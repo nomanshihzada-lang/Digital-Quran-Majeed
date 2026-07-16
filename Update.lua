@@ -12,6 +12,7 @@ import "android.os.Environment"
 import "android.content.Context"
 
 APP_NAME = "Al Quran Majeed"
+APP_VERSION = "2.1"
 handler  = Handler()
 
 -- Audio state
@@ -450,7 +451,7 @@ end
 
 function playSurah(pos)
     if not currentReciter then
-        Toast.makeText(activity, "Pehle Reciter select karein 鈥� Settings se", 0).show()
+        Toast.makeText(activity, "Pehle Reciter select karein 鈥 Settings se", 0).show()
         return
     end
     local fname = "Arabic_" .. pos .. ".mp3"
@@ -523,7 +524,7 @@ function advAyah(s, a)
             ayahModeBtn.setText("馃帶 Ayat Mode: OFF")
             ayahModeBtn.setBackgroundColor(0xFF607D8B)
         end)
-        Toast.makeText(activity, "Quran Majeed mukammal hua 鈥� MashaAllah!", 0).show()
+        Toast.makeText(activity, "Quran Majeed mukammal hua 鈥 MashaAllah!", 0).show()
     end
 end
 
@@ -584,7 +585,7 @@ function playAyahAt(s, a)
             handler.post(ayahUpdater)
             pcall(function()
                 nowPlayingTxt.setText(
-                    surahList[s] .. " 鈥� Ayah " .. a .. "/" .. (ayahCount[s] or "?")
+                    surahList[s] .. " 鈥 Ayah " .. a .. "/" .. (ayahCount[s] or "?")
                 )
                 playBtn.setText("Pause")
             end)
@@ -622,7 +623,7 @@ function playDuaAt(pos)
     local fname = "Dua_" .. pos .. ".mp3"
     local fu    = smartUrl(d.audio, fname)
     if not fu then
-        pcall(function() duaPlayBtn.setText("鈻� Play") end)
+        pcall(function() duaPlayBtn.setText("鈻 Play") end)
         Toast.makeText(activity, "Internet nahi. Pehle download karein.", 0).show()
         return
     end
@@ -643,14 +644,14 @@ function playDuaAt(pos)
                 function() return duaCurrentTxt end
             )
             handler.post(duaUpdater)
-            pcall(function() duaPlayBtn.setText("鈴� Pause") end)
+            pcall(function() duaPlayBtn.setText("鈴 Pause") end)
         end,
         function(mp)
             duaPlayer = stopMP(duaPlayer)
             pcall(function()
                 duaSeekBar.setProgress(0)
                 duaCurrentTxt.setText("00:00")
-                duaPlayBtn.setText("鈻� Play")
+                duaPlayBtn.setText("鈻 Play")
             end)
             if currentDuaPos < #duaList then
                 handler.postDelayed(
@@ -661,7 +662,7 @@ function playDuaAt(pos)
         end,
         function()
             duaPlayer = stopMP(duaPlayer)
-            pcall(function() duaPlayBtn.setText("鈻� Play") end)
+            pcall(function() duaPlayBtn.setText("鈻 Play") end)
             Toast.makeText(activity, "Dua load nahi hui. Internet check karein.", 0).show()
         end
     )
@@ -728,11 +729,11 @@ function playPara(n)
                 function() return paraCurrentTxt end
             )
             handler.post(paraUpdater)
-            pcall(function() paraPlayBtn.setText("鈴� Pause") end)
+            pcall(function() paraPlayBtn.setText("鈴 Pause") end)
         end,
         function(mp)
             paraPlayer = stopMP(paraPlayer)
-            pcall(function() paraPlayBtn.setText("鈻� Play") end)
+            pcall(function() paraPlayBtn.setText("鈻 Play") end)
             if paraTransEnabled then
                 playParaTrans(currentPara)
             elseif currentPara < 30 then
@@ -741,7 +742,7 @@ function playPara(n)
         end,
         function()
             paraPlayer = stopMP(paraPlayer)
-            pcall(function() paraPlayBtn.setText("鈻� Play") end)
+            pcall(function() paraPlayBtn.setText("鈻 Play") end)
             Toast.makeText(activity, "Para load nahi hua.", 0).show()
         end
     )
@@ -787,15 +788,15 @@ function playTafseer(pos)
                 function() return tafCurrentTxt end
             )
             handler.post(tafseerUpdater)
-            pcall(function() tafPlayBtn.setText("鈴� Pause") end)
+            pcall(function() tafPlayBtn.setText("鈴 Pause") end)
         end,
         function(mp)
             tafseerPlayer = stopMP(tafseerPlayer)
-            pcall(function() tafPlayBtn.setText("鈻� Play") end)
+            pcall(function() tafPlayBtn.setText("鈻 Play") end)
         end,
         function()
             tafseerPlayer = stopMP(tafseerPlayer)
-            pcall(function() tafPlayBtn.setText("鈻� Play") end)
+            pcall(function() tafPlayBtn.setText("鈻 Play") end)
             Toast.makeText(activity, "Tafseer load nahi hua. Internet check karein.", 0).show()
         end
     )
@@ -866,7 +867,7 @@ end
 function showSpeedMenu(tgt)
     local sp = {"0.5x", "1.0x", "1.25x", "1.5x", "1.75x", "2.0x"}
     AlertDialog.Builder(activity)
-        .setTitle("鈴� Playback Speed")
+        .setTitle("鈴 Playback Speed")
         .setItems(sp, {
             onClick = function(d, w)
                 if tgt and Build.VERSION.SDK_INT >= 23 then
@@ -889,13 +890,13 @@ function showSeekMenu()
     local opts = {"5s", "10s", "15s", "20s", "25s", "30s"}
     local vals = {5000, 10000, 15000, 20000, 25000, 30000}
     AlertDialog.Builder(activity)
-        .setTitle("鈴� Seek Jump Time")
+        .setTitle("鈴 Seek Jump Time")
         .setItems(opts, {
             onClick = function(d, w)
                 seekTime = vals[w + 1]
                 pcall(function()
                     rwdBtn.setText("鈼€ " .. opts[w + 1])
-                    fwdBtn.setText(opts[w + 1] .. " 鈻�")
+                    fwdBtn.setText(opts[w + 1] .. " 鈻")
                 end)
             end
         })
@@ -911,7 +912,7 @@ function showHomeScreen()
         LinearLayout, orientation = "vertical",
         layout_width = "fill", layout_height = "fill",
         {
-            TextView, text = "馃摉 Al Quran Majeed",
+            TextView, text = "馃摉 Al Quran Majeed v" .. APP_VERSION,
             textSize = "22sp", gravity = "center",
             padding = "14dp", textColor = "#1B5E20", typeface = 1,
             layout_width = "fill", layout_height = "wrap_content"
@@ -981,7 +982,7 @@ function showHomeScreen()
     btnQaida.onClick    = function() showNooraniScreen() end
     btnSettings.onClick = function()
         AlertDialog.Builder(activity)
-            .setTitle("鈿� Settings")
+            .setTitle("鈿 Settings")
             .setItems({"馃帣 Reciter Select", "馃寪 Tarjuma Zaban"}, {
                 onClick = function(d, w)
                     if w == 0 then
@@ -1011,7 +1012,7 @@ function showSurahListScreen()
                 textSize = "17sp", typeface = 1,
                 layout_weight = "1", gravity = "center_vertical"
             },
-            { Button, id = "slBackBtn", text = "猬� Home", layout_width = "wrap_content" }
+            { Button, id = "slBackBtn", text = "猬 Home", layout_width = "wrap_content" }
         },
         { ListView, id = "surahLv", layout_width = "fill", layout_height = "fill" }
     }))
@@ -1033,7 +1034,7 @@ function showSurahListScreen()
         AlertDialog.Builder(activity)
             .setTitle(surahList[pos + 1])
             .setItems(
-                {"鈻� Play", "猬� Arabic DL", "猬� Tarjuma DL", "馃摐 Tafseer"},
+                {"鈻 Play", "猬 Arabic DL", "猬 Tarjuma DL", "馃摐 Tafseer"},
                 {
                     onClick = function(d, w)
                         if w == 0 then
@@ -1079,7 +1080,7 @@ function showPlayerScreen(startPos)
                 text = surahList[currentPos],
                 textSize = "16sp", layout_weight = "1", padding = "8dp"
             },
-            { Button, id = "moreBtn", text = "鈿� More" }
+            { Button, id = "moreBtn", text = "鈿 More" }
         },
         -- Row 2: Seekbar + time
         {
@@ -1105,7 +1106,7 @@ function showPlayerScreen(startPos)
                 layout_height = "fill", layout_margin = "2dp"
             },
             {
-                Button, id = "dlBothBtn", text = "猬� DL Both",
+                Button, id = "dlBothBtn", text = "猬 DL Both",
                 layout_width = "0", layout_weight = "1",
                 layout_height = "fill", layout_margin = "2dp"
             }
@@ -1115,15 +1116,15 @@ function showPlayerScreen(startPos)
             LinearLayout, orientation = "horizontal",
             layout_width = "fill", layout_height = "0", layout_weight = "2",
             gravity = "center",
-            { Button, id = "prevBtn", text = "鈴� Prev", layout_width = "0", layout_weight = "1", layout_height = "fill" },
+            { Button, id = "prevBtn", text = "鈴 Prev", layout_width = "0", layout_weight = "1", layout_height = "fill" },
             { Button, id = "rwdBtn",  text = "鈼€ 10s",  layout_width = "0", layout_weight = "1", layout_height = "fill" },
             { Button, id = "playBtn", text = "Play",    layout_width = "0", layout_weight = "2", layout_height = "fill" },
-            { Button, id = "fwdBtn",  text = "10s 鈻�",  layout_width = "0", layout_weight = "1", layout_height = "fill" },
-            { Button, id = "nextBtn", text = "Next 鈴�", layout_width = "0", layout_weight = "1", layout_height = "fill" }
+            { Button, id = "fwdBtn",  text = "10s 鈻",  layout_width = "0", layout_weight = "1", layout_height = "fill" },
+            { Button, id = "nextBtn", text = "Next 鈴", layout_width = "0", layout_weight = "1", layout_height = "fill" }
         },
         -- Row 5: Back
         {
-            Button, id = "backToList", text = "猬� Back to Surah List",
+            Button, id = "backToList", text = "猬 Back to Surah List",
             layout_width = "fill", layout_height = "0", layout_weight = "1"
         }
     }))
@@ -1158,8 +1159,8 @@ function showPlayerScreen(startPos)
 
     moreBtn.onClick = function()
         AlertDialog.Builder(activity)
-            .setTitle("鈿� Player Options")
-            .setItems({"鈴� Speed", "鈴� Seek Time", "馃寪 Tarjuma Zaban"}, {
+            .setTitle("鈿 Player Options")
+            .setItems({"鈴 Speed", "鈴 Seek Time", "馃寪 Tarjuma Zaban"}, {
                 onClick = function(d, w)
                     if w == 0 then
                         showSpeedMenu(player or ayahPlayer)
@@ -1323,7 +1324,7 @@ function showDuaListScreen()
                 textSize = "16sp", typeface = 1,
                 layout_weight = "1", gravity = "center_vertical"
             },
-            { Button, id = "duaHomeBtn", text = "猬� Home", layout_width = "wrap_content" }
+            { Button, id = "duaHomeBtn", text = "猬 Home", layout_width = "wrap_content" }
         },
         { ListView, id = "duaLv", layout_width = "fill", layout_height = "fill" }
     }))
@@ -1383,23 +1384,23 @@ function showDuaPlayerScreen(startPos)
         {
             LinearLayout, orientation = "horizontal",
             layout_width = "fill", layout_height = "0", layout_weight = "2",
-            { Button, id = "duaPrevBtn", text = "鈴� Prev", layout_width = "0", layout_weight = "1", layout_height = "fill" },
+            { Button, id = "duaPrevBtn", text = "鈴 Prev", layout_width = "0", layout_weight = "1", layout_height = "fill" },
             { Button, id = "duaRwdBtn",  text = "鈼€ 5s",   layout_width = "0", layout_weight = "1", layout_height = "fill" },
-            { Button, id = "duaPlayBtn", text = "鈻� Play",  layout_width = "0", layout_weight = "2", layout_height = "fill" },
-            { Button, id = "duaFwdBtn",  text = "5s 鈻�",   layout_width = "0", layout_weight = "1", layout_height = "fill" },
-            { Button, id = "duaNextBtn", text = "Next 鈴�", layout_width = "0", layout_weight = "1", layout_height = "fill" }
+            { Button, id = "duaPlayBtn", text = "鈻 Play",  layout_width = "0", layout_weight = "2", layout_height = "fill" },
+            { Button, id = "duaFwdBtn",  text = "5s 鈻",   layout_width = "0", layout_weight = "1", layout_height = "fill" },
+            { Button, id = "duaNextBtn", text = "Next 鈴", layout_width = "0", layout_weight = "1", layout_height = "fill" }
         },
         -- Download + Back
         {
             LinearLayout, orientation = "horizontal",
             layout_width = "fill", layout_height = "0", layout_weight = "1",
             {
-                Button, id = "duaDlBtn", text = "猬� Download Dua",
+                Button, id = "duaDlBtn", text = "猬 Download Dua",
                 layout_width = "0", layout_weight = "1",
                 layout_height = "fill", layout_margin = "3dp"
             },
             {
-                Button, id = "duaBackBtn", text = "猬� Duas List",
+                Button, id = "duaBackBtn", text = "猬 Duas List",
                 layout_width = "0", layout_weight = "1",
                 layout_height = "fill", layout_margin = "3dp"
             }
@@ -1424,7 +1425,7 @@ function showDuaPlayerScreen(startPos)
             if duaPlayer.isPlaying() then
                 duaPlayer.pause()
                 if duaUpdater then handler.removeCallbacks(duaUpdater) end
-                duaPlayBtn.setText("鈻� Play")
+                duaPlayBtn.setText("鈻 Play")
             else
                 duaPlayer.start()
                 duaUpdater = mkUpdater(
@@ -1433,7 +1434,7 @@ function showDuaPlayerScreen(startPos)
                     function() return duaCurrentTxt end
                 )
                 handler.post(duaUpdater)
-                duaPlayBtn.setText("鈴� Pause")
+                duaPlayBtn.setText("鈴 Pause")
             end
         else
             playDuaAt(currentDuaPos)
@@ -1487,11 +1488,11 @@ function showParaScreen()
             layout_width = "fill", layout_height = "wrap_content",
             padding = "6dp",
             {
-                TextView, text = "馃摎 30 Paare 鈥� Juz Audio",
+                TextView, text = "馃摎 30 Paare 鈥 Juz Audio",
                 textSize = "17sp", typeface = 1,
                 layout_weight = "1", gravity = "center_vertical"
             },
-            { Button, id = "paraHomeBtn", text = "猬� Home", layout_width = "wrap_content" }
+            { Button, id = "paraHomeBtn", text = "猬 Home", layout_width = "wrap_content" }
         },
         -- Now playing title
         {
@@ -1514,9 +1515,9 @@ function showParaScreen()
         {
             LinearLayout, orientation = "horizontal",
             layout_width = "fill", layout_height = "wrap_content",
-            { Button, id = "paraPrevBtn", text = "鈴� Prev",    layout_width = "0", layout_weight = "1" },
-            { Button, id = "paraPlayBtn", text = "鈻� Play",     layout_width = "0", layout_weight = "2" },
-            { Button, id = "paraNextBtn", text = "Next 鈴�",    layout_width = "0", layout_weight = "1" }
+            { Button, id = "paraPrevBtn", text = "鈴 Prev",    layout_width = "0", layout_weight = "1" },
+            { Button, id = "paraPlayBtn", text = "鈻 Play",     layout_width = "0", layout_weight = "2" },
+            { Button, id = "paraNextBtn", text = "Next 鈴",    layout_width = "0", layout_weight = "1" }
         },
         -- Tarjuma + Download
         {
@@ -1527,7 +1528,7 @@ function showParaScreen()
                 layout_width = "0", layout_weight = "1", layout_margin = "2dp"
             },
             {
-                Button, id = "paraDlBtn", text = "猬� DL Para+Tarjuma",
+                Button, id = "paraDlBtn", text = "猬 DL Para+Tarjuma",
                 layout_width = "0", layout_weight = "1", layout_margin = "2dp"
             }
         },
@@ -1579,10 +1580,10 @@ function showParaScreen()
         if paraPlayer then
             if paraPlayer.isPlaying() then
                 paraPlayer.pause()
-                paraPlayBtn.setText("鈻� Play")
+                paraPlayBtn.setText("鈻 Play")
             else
                 paraPlayer.start()
-                paraPlayBtn.setText("鈴� Pause")
+                paraPlayBtn.setText("鈴 Pause")
             end
         else
             playPara(currentPara)
@@ -1601,7 +1602,7 @@ function showParaScreen()
         local nn  = currentPara < 10 and ("0" .. currentPara) or tostring(currentPara)
         dlFile(
             PARA_BASE .. "Para%20" .. nn .. ".mp3",
-            "Para " .. currentPara .. " 鈥� " .. paraNames[currentPara],
+            "Para " .. currentPara .. " 鈥 " .. paraNames[currentPara],
             "Para_" .. currentPara .. ".mp3"
         )
         local firstS    = paraFirstSurah[currentPara] or 1
@@ -1622,11 +1623,11 @@ function showTafseerListScreen()
             layout_width = "fill", layout_height = "wrap_content",
             padding = "6dp",
             {
-                TextView, text = "馃摐 Tafseer Ibn Kaseer 鈥� Urdu Audio",
+                TextView, text = "馃摐 Tafseer Ibn Kaseer 鈥 Urdu Audio",
                 textSize = "16sp", typeface = 1,
                 layout_weight = "1", gravity = "center_vertical"
             },
-            { Button, id = "tafHomeBtn", text = "猬� Home", layout_width = "wrap_content" }
+            { Button, id = "tafHomeBtn", text = "猬 Home", layout_width = "wrap_content" }
         },
         { ListView, id = "tafLv", layout_width = "fill", layout_height = "fill" }
     }))
@@ -1660,7 +1661,7 @@ function showTafseerPlayerScreen(startPos)
                 textSize = "16sp", typeface = 1,
                 layout_weight = "1", padding = "8dp", textColor = "#1B5E20"
             },
-            { Button, id = "tafDlBtn", text = "猬� Download", layout_width = "wrap_content" }
+            { Button, id = "tafDlBtn", text = "猬 Download", layout_width = "wrap_content" }
         },
         -- Seekbar
         {
@@ -1675,13 +1676,13 @@ function showTafseerPlayerScreen(startPos)
         {
             LinearLayout, orientation = "horizontal",
             layout_width = "fill", layout_height = "wrap_content",
-            { Button, id = "tafPrevBtn", text = "鈴� Prev",   layout_width = "0", layout_weight = "1" },
-            { Button, id = "tafPlayBtn", text = "鈻� Play",    layout_width = "0", layout_weight = "2" },
-            { Button, id = "tafNextBtn", text = "Next 鈴�",   layout_width = "0", layout_weight = "1" }
+            { Button, id = "tafPrevBtn", text = "鈴 Prev",   layout_width = "0", layout_weight = "1" },
+            { Button, id = "tafPlayBtn", text = "鈻 Play",    layout_width = "0", layout_weight = "2" },
+            { Button, id = "tafNextBtn", text = "Next 鈴",   layout_width = "0", layout_weight = "1" }
         },
         -- Back button
         {
-            Button, id = "tafBackBtn", text = "猬� Back to Tafseer List",
+            Button, id = "tafBackBtn", text = "猬 Back to Tafseer List",
             layout_width = "fill", layout_height = "wrap_content",
             layout_margin = "4dp"
         }
@@ -1703,10 +1704,10 @@ function showTafseerPlayerScreen(startPos)
         if tafseerPlayer then
             if tafseerPlayer.isPlaying() then
                 tafseerPlayer.pause()
-                tafPlayBtn.setText("鈻� Play")
+                tafPlayBtn.setText("鈻 Play")
             else
                 tafseerPlayer.start()
-                tafPlayBtn.setText("鈴� Pause")
+                tafPlayBtn.setText("鈴 Pause")
             end
         else
             playTafseer(currentTafseerPos)
@@ -1754,7 +1755,7 @@ function showNooraniScreen()
 
     -- Header
     local hdr = TextView(activity)
-    hdr.setText("馃摽 Noorani Qaida 鈥� 賳賵乇丕賳蹖 賯丕毓丿蹃")
+    hdr.setText("馃摽 Noorani Qaida 鈥 賳賵乇丕賳蹖 賯丕毓丿蹃")
     hdr.setTextSize(20)
     hdr.setTypeface(nil, 1)
     hdr.setGravity(17)
@@ -1763,7 +1764,7 @@ function showNooraniScreen()
     ll.addView(hdr)
 
     local sub = TextView(activity)
-    sub.setText("Harf pe click karein 鈥� Qari ki awaaz mein sunein | 猬� Download bhi available")
+    sub.setText("Harf pe click karein 鈥 Qari ki awaaz mein sunein | 猬 Download bhi available")
     sub.setTextSize(12)
     sub.setGravity(17)
     sub.setTextColor(0xFF555555)
@@ -1775,7 +1776,7 @@ function showNooraniScreen()
     hrow.setOrientation(0)
     hrow.setPadding(6, 4, 6, 4)
     hrow.setBackgroundColor(0xFF1B5E20)
-    local hnames = {"#", "Harf", "Urdu Naam", "English", "猬�"}
+    local hnames = {"#", "Harf", "Urdu Naam", "English", "猬"}
     local hwts   = {0.4, 1.0, 1.0, 1.0, 0.5}
     for i = 1, #hnames do
         local htv = TextView(activity)
@@ -1849,7 +1850,7 @@ function showNooraniScreen()
 
         -- Download button
         local dBtn = Button(activity)
-        dBtn.setText("猬�")
+        dBtn.setText("猬")
         dBtn.setAllCaps(false)
         dBtn.setTextSize(12)
         dBtn.setBackgroundColor(0xFF1565C0)
@@ -1871,7 +1872,7 @@ function showNooraniScreen()
             nqPlayer = stopMP(nqPlayer)
             local fu = smartUrl(audioUrl, audioFn)
             if fu then
-                Toast.makeText(activity, q[2] .. " 鈥� " .. q[3], 0).show()
+                Toast.makeText(activity, q[2] .. " 鈥 " .. q[3], 0).show()
                 nqPlayer = newMP(
                     fu,
                     function(mp) mp.start() end,
@@ -1897,7 +1898,7 @@ function showNooraniScreen()
 
     -- Back button
     local backBtn2 = Button(activity)
-    backBtn2.setText("猬� Back to Home")
+    backBtn2.setText("猬 Back to Home")
     backBtn2.setAllCaps(false)
     backBtn2.setBackgroundColor(0xFF607D8B)
     backBtn2.setTextColor(0xFFFFFFFF)
