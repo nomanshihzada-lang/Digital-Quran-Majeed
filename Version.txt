@@ -1,1 +1,60 @@
-2.0
+2.1
+Assalam-o-Alaikum!
+Version: 2.1
+
+--- WHAT'S NEW IN V2.1 ---
+
+Added (New Features):
+- Word-by-Word (Hifz) mode: reads a Surah's Ayat one Arabic word at a
+  time (Alafasy audio), for memorization - open from any Surah's "..."
+  menu, pick a starting Ayat, tap each word to hear it, or turn Auto ON
+  to play through automatically
+- Tarjuma (Translation): Off/Urdu/Hindi/Punjabi/English - pick from
+  Settings. Urdu and English also play automatically after each Ayat in
+  Ayat-ba-Ayat and Ruku mode, and download together with the Ayat audio
+  for offline use. Two Urdu voices available (Shamshad Ali Khan / Farhat
+  Hashmi) and two Punjabi/Hindi/English voices researched and verified
+- Poori Quran (Continuous): two full-Quran single recordings (with Urdu
+  translation mixed in) - Al-Minshawi and Al-Hosary - with Play/Pause,
+  Rewind/Forward, scrub, and offline download
+- Hadith (Sahih Bukhari, English): all 97 Kitab (Books), each with a
+  full Surah-Player-style player (Prev/Rewind/Play/Forward/Next Book,
+  offline download)
+- Tafseer-e-Quran (Bayan-ul-Quran) by Dr. Israr Ahmad, Urdu: Introduction
+  + all 114 Surahs, same full player style, offline download
+- 40 new "Rabbana" Quranic duas added to Daily Masnoon Duas
+- Advanced Home search: search and jump straight into a specific Ayat
+  (e.g. type "Baqarah 255"), search and play any of the 30 Para directly,
+  search/select Tarjuma language, and tapping a Surah now offers a
+  Play/Ayat-ba-Ayat/Ruku/Word-by-Word choice
+- Aaj ki Gregorian date, Islamic (Hijri) date, and battery % now shown
+  on Home
+- Copyable/shareable error dialogs (Copy + Share buttons) wherever a
+  download can fail, so problems are easy to report
+
+Fixed (Bugs):
+- Surah download crash: "Invalid value for visibility" (Android security
+  restriction on public-folder downloads) - affected Surah, Dua, and
+  background-download-fallback downloads
+- Storage permission was never requested, so Storage Manager always
+  showed 0 MB/0 files
+- 99 Names "Play" never turned into a real Pause button (always
+  restarted) - now a proper toggle, plus offline download added
+- Prayer times on Home were fetched once and cached forever, never
+  changing day to day - now auto-refresh once per day; API switched to
+  HTTPS for reliability
+- Word-by-Word: several rounds of audio/timing fixes (seek-before-ready
+  race condition, missing audio stream type, approximate-timing fallback
+  when exact per-word data isn't available for an Ayat)
+- Hadith player Next/Previous Book not stopping the previous audio
+
+Removed:
+- Storage Manager and Progress Tracker (not needed)
+
+More section: every screen (Para, Tasbeeh, Bookmarks, Names, Blessed
+Names, Full Quran, Hadith, Tafseer, Menu) is now reachable both as a big
+button on the More screen AND as a quick-switch tab on every sub-screen.
+
+--- CREDITS ---
+Lead Developer: Numan Khan.
+May Allah accept our continuous efforts!
