@@ -19,9 +19,17 @@ import "java.io.InputStreamReader"
 import "android.text.TextWatcher"
 
 --------------------------------------------------
--- QURAN MAJEED v2.0 - Simplified UI + Reciter-name-based fix + Accessibility labels
+-- QURAN MAJEED v2.2 - Tarjuma, Hadith, Tafseer, Word-by-Word + background playback fix
 -- Lead: Numan Khan
 --------------------------------------------------
+-- NOTE (v2.2): screen-off/background playback fix (MediaPlayer.setWakeMode,
+-- used neeche har jagah MediaPlayer banate waqt) ke sahi kaam karne ke liye
+-- project manifest mein "android.permission.WAKE_LOCK" permission add hona
+-- zaroori hai (yeh ek "normal" permission hai, is liye runtime par koi
+-- dialog nahi mangta - bas manifest mein declare hona chahiye). Apne
+-- AndroLua Pro/Jieshuo project settings mein yeh permission check/add kar
+-- lein, warna yeh fix pcall ke andar chup-chaap fail ho jayega (crash
+-- nahi hoga, bas wake-lock apply nahi hogi).
 
 --------------------------------------------------
 -- GLOBAL VARIABLES & APP STATE
@@ -176,15 +184,28 @@ end
 local function fetchPrayerTimes(c, cntry, onDone)
   Thread(Runnable{
     run=function()
-      local success, result = pcall(function()
-        local urlStr = "https://api.aladhan.com/v1/timingsByCity?city="..URLEncoder.encode(c).."&country="..URLEncoder.encode(cntry).."&method=1"
-        local conn = URL(urlStr).openConnection()
-        conn.setConnectTimeout(10000) conn.setReadTimeout(15000)
-        local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
-        local res = "" local line = reader.readLine()
-        while line do res = res..line line = reader.readLine() end
-        reader.close() return res
-      end)
+      -- FIX (v2.1): chhote/kam-maroof shehar (jaise "Chiniot") ke liye
+      -- "timingsByCity" endpoint kabhi geocode nahi kar pata ("city not
+      -- found"). Ab pehle wahi try hota hai, fail ho to "timingsByAddress"
+      -- (zyada flexible free-text matching) doosri koshish ke tor par
+      -- try hota hai.
+      local function tryEndpoint(urlStr)
+        local ok, res = pcall(function()
+          local conn = URL(urlStr).openConnection()
+          conn.setConnectTimeout(10000) conn.setReadTimeout(15000)
+          local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
+          local out = "" local line = reader.readLine()
+          while line do out = out..line line = reader.readLine() end
+          reader.close() return out
+        end)
+        if ok and res and res:find('"Fajr"') then return res end
+        return nil
+      end
+      local byCity = "https://api.aladhan.com/v1/timingsByCity?city="..URLEncoder.encode(c).."&country="..URLEncoder.encode(cntry).."&method=1"
+      local byAddress = "https://api.aladhan.com/v1/timingsByAddress?address="..URLEncoder.encode(c..", "..cntry).."&method=1"
+      local result = tryEndpoint(byCity)
+      if not result then result = tryEndpoint(byAddress) end
+      local success = (result ~= nil)
       activity.runOnUiThread(Runnable{
         run=function()
           local ok = false
@@ -340,6 +361,13 @@ local surahNames = {"Al-Fatihah","Al-Baqarah","Al-Imran","An-Nisa","Al-Ma'idah",
 
 -- Juz/Para -> Starting Surah mapping (standard division)
 local paraSurahStart = {1,2,2,3,4,4,5,6,7,8,9,11,12,14,17,18,21,23,25,27,29,33,36,39,41,46,51,58,67,78}
+-- FIX (v2.1): "30 Para" mein har Para ka pehla Surah to sahi tha, lekin
+-- us Surah ki KAUNSI AYAT se Para shuru hota hai (jab Para kisi lambi
+-- Surah, jaise Al-Baqarah, ke beech se shuru hota hai) yeh track nahi ho
+-- raha tha - is liye tap karne par poori Surah shuru se play hoti thi
+-- (Para 2/3 dono "Al-Baqarah shuru se" jaisa lagta tha). Yeh standard
+-- 30-Juz boundaries hain (Ayat number jahan se wo Para shuru hota hai).
+local paraFirstAyah = {1,142,253,93,24,148,82,111,88,41,93,6,53,1,1,75,1,1,21,56,46,31,28,32,47,1,31,1,1,1}
 
 -- Standard ayah count per Surah (Hafs/Uthmani) - zaroori hai Ayat-ba-Ayat mode ke liye
 local surahAyahCounts = {7,286,200,176,120,165,206,75,129,109,123,111,43,52,99,128,111,110,98,135,112,78,118,64,77,227,93,88,69,60,34,30,73,54,45,83,182,88,75,85,54,53,89,59,37,35,38,29,18,45,60,49,62,55,78,96,29,22,24,13,14,11,11,18,12,12,30,52,52,44,28,28,20,56,40,31,50,40,46,42,29,19,36,25,22,17,19,26,30,20,15,21,11,8,8,19,5,8,8,11,11,8,3,9,5,4,7,3,6,3,5,4,5,6}
@@ -351,8 +379,25 @@ local surahAyahCounts = {7,286,200,176,120,165,206,75,129,109,123,111,43,52,99,1
 -- quirks hain asal source mein), is liye 114/114 individually verify kar
 -- ke yahan likhi gayi hain, taake koi 404 na aaye.
 --------------------------------------------------
-local URDU_TRANSLATION_BASE = "https://archive.org/download/complete-quran-with-urdu-translation-mishary-rashid-alafasy/"
-local urduTranslationFiles = {
+-- FIX (v2.2): saari base-download URLs ek hi table mein consolidate kar
+-- di hain (pehle har ek apna alag top-level "local" tha) - AndroLua ke
+-- Lua interpreter ki "too many local variables (limit is 200) in main
+-- function" hard-limit se bachne ke liye zaroori tha (yeh file itni
+-- badi ho chuki hai ke individual locals ginti mein khatam ho rahi thi).
+local URLBASES = {
+  urdu = "https://archive.org/download/complete-quran-with-urdu-translation-mishary-rashid-alafasy/",
+  hindi = "https://archive.org/download/The_Noble_Quran_With_Hindi_Translation-Audio_MP3_HQ/",
+  punjabi = "https://archive.org/download/AlQuranWithPunjabiTranslation/",
+  english = "https://archive.org/download/quran-english-translation-audio/",
+  sindhi = "https://archive.org/download/Al-quran-with-sindhi-translation------high-quality-audio-mp3/",
+  hadith = "https://archive.org/download/sahih-bukhari-english-audio/",
+  israrTafseer = "https://archive.org/download/tafseer-e-quran-urdu/",
+  nawawi = "https://archive.org/download/40HadithNawawi/",
+}
+local _lazyCache = {}  -- shared cache table (keeps top-level local count down)
+local function urduTranslationFiles()
+  if not _lazyCache.urdu then
+    _lazyCache.urdu = {
   "001 Surah Fatiha.mp3", "002 Surah Al-Baqarah.mp3", "003 Surah Al-Imran.mp3", "004 Surah An-Nisa.mp3",
   "005 Surah Maidah.mp3", "006 Surah Al Anam.mp3", "007 Surah Araf.mp3", "008 Surah Anfal.mp3",
   "009 Surah Al Tauba.mp3", "010 Surah Yunus.mp3", "011 Surah Hud.mp3", "012 Suarh Yusuf.mp3",
@@ -383,10 +428,13 @@ local urduTranslationFiles = {
   "109 Surah Al-Kafirun.mp3", "110 Surah An-Nasr.mp3", "111 Surah Al-Lahab.mp3", "112 Surah Al-Ikhlas.mp3",
   "113 Surah Al-Falaq.mp3", "114 Surah An-Nas.mp3"
 }
+  end
+  return _lazyCache.urdu
+end
 local function buildUrduSurahUrl(surahIdx)
-  local fn = urduTranslationFiles[surahIdx]
+  local fn = urduTranslationFiles()[surahIdx]
   if not fn then return nil end
-  return URDU_TRANSLATION_BASE .. fn:gsub(" ", "%%20")
+  return URLBASES.urdu .. fn:gsub(" ", "%%20")
 end
 
 -- NAYA (v2.1): Hindi Translation - Arabic recitation (Sheikh Abdur Rehman
@@ -394,11 +442,12 @@ end
 -- Surah (archive.org: The_Noble_Quran_With_Hindi_Translation-Audio_MP3_HQ) -
 -- 114/114 verified. Filenames mein Arabic characters bhi hain, is liye
 -- proper byte-level URL-encoding zaroori hai (sirf space nahi).
-local HINDI_TRANSLATION_BASE = "https://archive.org/download/The_Noble_Quran_With_Hindi_Translation-Audio_MP3_HQ/"
 local function urlEncodeBytes(str)
   return (str:gsub("[^%w%-%.%_%~]", function(c) return string.format("%%%02X", string.byte(c)) end))
 end
-local hindiTranslationFiles = {
+local function hindiTranslationFiles()
+  if not _lazyCache.hindi then
+    _lazyCache.hindi = {
   "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3", "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
   "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3", "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
   "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3", "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
@@ -457,18 +506,22 @@ local hindiTranslationFiles = {
   "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3", "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
   "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3", "114 - An-Nas ( Mankind ) - سورة الناس.mp3"
 }
+  end
+  return _lazyCache.hindi
+end
 local function buildHindiSurahUrl(surahIdx)
-  local fn = hindiTranslationFiles[surahIdx]
+  local fn = hindiTranslationFiles()[surahIdx]
   if not fn then return nil end
-  return HINDI_TRANSLATION_BASE .. urlEncodeBytes(fn)
+  return URLBASES.hindi .. urlEncodeBytes(fn)
 end
 
 -- NAYA (v2.1): Punjabi Translation - Arabic recitation (Qari Khushi
 -- Muhammad-ul-Azhari) + Punjabi tarjuma (Hidayatullah, awaz Aziz Malik)
 -- COMBINED, ek hi file per Surah (archive.org:
 -- AlQuranWithPunjabiTranslation) - 114/114 verified.
-local PUNJABI_TRANSLATION_BASE = "https://archive.org/download/AlQuranWithPunjabiTranslation/"
-local punjabiTranslationFiles = {
+local function punjabiTranslationFiles()
+  if not _lazyCache.punjabi then
+    _lazyCache.punjabi = {
   "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3", "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
   "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3", "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
   "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3", "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
@@ -527,17 +580,21 @@ local punjabiTranslationFiles = {
   "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3", "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
   "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3", "114 - An-Nas ( Mankind ) - سورة الناس.mp3"
 }
+  end
+  return _lazyCache.punjabi
+end
 local function buildPunjabiSurahUrl(surahIdx)
-  local fn = punjabiTranslationFiles[surahIdx]
+  local fn = punjabiTranslationFiles()[surahIdx]
   if not fn then return nil end
-  return PUNJABI_TRANSLATION_BASE .. urlEncodeBytes(fn)
+  return URLBASES.punjabi .. urlEncodeBytes(fn)
 end
 
 -- NAYA (v2.1): English Translation - Recitation + English tarjuma (Ibrahim
 -- Walk, Saheeh International) COMBINED, ek hi file per Surah (archive.org:
 -- quran-english-translation-audio) - 114/114 verified.
-local ENGLISH_TRANSLATION_BASE = "https://archive.org/download/quran-english-translation-audio/"
-local englishTranslationFiles = {
+local function englishTranslationFiles()
+  if not _lazyCache.english then
+    _lazyCache.english = {
   "001 - Al-Fatihah (The Opening).mp3", "002 - Al-Baqarah (The Cow).mp3", "003 - Al-Imran (The Family of Imran).mp3",
   "004 - An-Nisa (Women).mp3", "005 - Al-Maidah (The Table Spread).mp3", "006 - Al-Anam (The Cattle).mp3",
   "007 - Al-Araf (The Heights).mp3", "008 - Al-Anfal (The Spoils of War).mp3", "009 - At-Tawbah (Repentance).mp3",
@@ -577,13 +634,34 @@ local englishTranslationFiles = {
   "109 - Al-Kafirun (The Disbelievers).mp3", "110 - An-Nasr (The Help).mp3", "111 - Al-Masad (The Plaited Rope).mp3",
   "112 - Al-Ikhlas (Purity of Faith).mp3", "113 - Al-Falaq (The Daybreak).mp3", "114 - An-Nas (Mankind).mp3"
 }
+  end
+  return _lazyCache.english
+end
 local function buildEnglishSurahUrl(surahIdx)
-  local fn = englishTranslationFiles[surahIdx]
+  local fn = englishTranslationFiles()[surahIdx]
   if not fn then return nil end
-  return ENGLISH_TRANSLATION_BASE .. urlEncodeBytes(fn)
+  return URLBASES.english .. urlEncodeBytes(fn)
 end
 
-local translationMode = prefs.getString("translationMode", "Off")  -- "Off", "Urdu", "Hindi", "Punjabi", or "English"
+-- NAYA (v2.2): Sindhi Translation - Arabic recitation (Mishary Rashid
+-- Alafasy) + Sindhi tarjuma COMBINED, ek hi file per Surah (archive.org:
+-- "Al Quran with Sindhi Translation" by TheChoice.one, verified) - is
+-- item ke 114/114 filenames bilkul HUBAHU wahi hain jo Hindi wale item
+-- (upar) mein hain (dono ek hi uploader/template se hain), is liye alag
+-- se 114 filenames dobara likhne ki bajaye wahi list reuse kar rahe hain
+-- - sirf base URL (aur is se folder) alag hai.
+local function buildSindhiSurahUrl(surahIdx)
+  local fn = hindiTranslationFiles()[surahIdx]
+  if not fn then return nil end
+  return URLBASES.sindhi .. urlEncodeBytes(fn)
+end
+
+-- FIX (v2.2): Chinese tarjuma hata di gayi hai (uska audio source
+-- reliably kaam nahi kar raha tha) - agar kisi ne pehle se Chinese
+-- select ki hui thi, usay khud-ba-khud "Off" par wapis kar dete hain
+-- taake koi purani/ghalat value atki na rahe
+local translationMode = prefs.getString("translationMode", "Off")  -- "Off", "Urdu", "Hindi", "Punjabi", "English", or "Sindhi"
+if translationMode == "Chinese" then translationMode = "Off" end
 local function saveTranslationMode(v)
   translationMode = v
   prefs.edit().putString("translationMode", v).apply()
@@ -852,7 +930,9 @@ end
 -- pure hadith wording only (no Quran ayat text). A "Full Masnoon Duas Audio"
 -- button below plays/downloads the complete verified Hisnul Muslim recording
 -- instead, so users still get audio even without a per-dua link.
-local dailyDuas = {
+local function dailyDuas()
+  if not _lazyCache.dailyDuas then
+    _lazyCache.dailyDuas = {
   {cat="Khaana Peena", title="Khana Khane Ke Baad", ar="الْحَمْدُ لِلَّهِ الَّذِي أَطْعَمَنِي هَٰذَا وَرَزَقَنِيهِ مِنْ غَيْرِ حَوْلٍ مِنِّي وَلَا قُوَّةٍ", ur="تمام تعریفیں اللہ کے لیے جس نے مجھے یہ کھلایا اور رزق دیا", tip="Khana khatam hone ke baad parhein", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating.mp3", src="archive.org (Islamic Dua in Audio)"},
   {cat="Khaana Peena", title="Doodh Peene Ke Baad", ar="اللَّهُمَّ بَارِكْ لَنَا فِيهِ وَزِدْنَا مِنْهُ", ur="اے اللہ اس میں برکت دے اور اس سے زیادہ عطا فرما", tip="Doodh peene ke khaas baad ki dua", audio="", src=""},
   {cat="Sona Uthna", title="Sone Se Pehle Ki Dua", ar="بِاسْمِكَ اللَّهُمَّ أَمُوتُ وَأَحْيَا", ur="اے اللہ تیرے نام سے مرتا اور جیتا ہوں", tip="Bistar par lait kar dayin karwat par parhein (Sahih Bukhari)", audio="", src=""},
@@ -985,6 +1065,9 @@ local dailyDuas = {
   {cat="Rabbana (Quranic Dua)", title="Accept My Invocation", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/39%20Accept%20my%20Invocation.mp3", src="archive.org (Rabbana 40 Supplications)"},
   {cat="Rabbana (Quranic Dua)", title="Allah Is Oft-Forgiving", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/40%20Allah%20is%20Oft-Forgiving.mp3", src="archive.org (Rabbana 40 Supplications)"},
 }
+  end
+  return _lazyCache.dailyDuas
+end
 local function getDuaAudioLocal(d) return duaAudioDir .. "dua_" .. slug(d.title) .. ".mp3" end
 
 -- NAYA (v2.1): "Poori Quran (Continuous)" - poori Quran EK hi bari file
@@ -1001,8 +1084,9 @@ local function getFullQuranLocal(v) return duaAudioDir .. v.file end
 -- audio, har Kitab apni file mein (archive.org: sahih-bukhari-english-audio,
 -- QNS Academy) - Urdu wala source clean/reliable nahi mila is liye
 -- English (jis mein poori 97 Kitab ki saaf list hai) use ki gayi hai.
-local HADITH_BASE = "https://archive.org/download/sahih-bukhari-english-audio/"
-local hadithBooks = {
+local function hadithBooks()
+  if not _lazyCache.hadithBooks then
+    _lazyCache.hadithBooks = {
   {n=1, title="The Book Of Revelation", range="Hadith 1-7", file="Sahih Bukhari Book 01  The Book Of Revelation  Hadith 1-7 of 7563 English.mp3"},
   {n=2, title="Belief (Faith)", range="Hadith 8-58", file="Sahih Bukhari Book 02  The Book Of Belief (Faith)  Hadith 8-58 of 7563 English.mp3"},
   {n=3, title="Knowledge", range="Hadith 59-134", file="Sahih Bukhari Book 03  The Book Of Knowledge  Hadith 59-134 of 7563 English.mp3"},
@@ -1101,15 +1185,19 @@ local hadithBooks = {
   {n=96, title="Holding Fast to the Quran & Sunnah", range="Hadith 7268-7370", file="Sahih Bukhari Book 96  The Book Of Holding Fast to the Quran and Sunnah  Hadith 7268-7370 of 7563 English.mp3"},
   {n=97, title="Islamic Monotheism (Tawhid)", range="Hadith 7371-7563", file="Sahih Bukhari Book 97  The Book Of Islamic Monotheism (Tawhid  Tawheed)  Hadith 7371-7563 of 7563 English.mp3"}
 }
-local function buildHadithUrl(b) return HADITH_BASE .. urlEncodeBytes(b.file) end
+  end
+  return _lazyCache.hadithBooks
+end
+local function buildHadithUrl(b) return URLBASES.hadith .. urlEncodeBytes(b.file) end
 local function getHadithLocal(b) return duaAudioDir .. "hadith_bukhari_" .. b.n .. ".mp3" end
 
 -- NAYA (v2.1): Tafseer-e-Quran (Bayan-ul-Quran) by Dr. Israr Ahmad, Urdu -
 -- 115 files (1 Introduction + 114 Surahs), archive.org: tafseer-e-quran-urdu
 -- - verified. Filenames formula se nahi bantay (spacing/casing quirks
 -- asal source mein), is liye har ek verify kar ke likhi gayi hai.
-local ISRAR_TAFSEER_BASE = "https://archive.org/download/tafseer-e-quran-urdu/"
-local israrTafseerFiles = {
+local function israrTafseerFiles()
+  if not _lazyCache.israrTafseer then
+    _lazyCache.israrTafseer = {
   {n=0, title="Introduction (Bayan-ul-Quran)", file="000-Introduction -Bayan-ul-Quran.mp3"},
   {n=1, title=surahNames[1], file="001-AL-FAATIHAH.mp3"}, {n=2, title=surahNames[2], file="002- AL-BAQARAH.mp3"},
   {n=3, title=surahNames[3], file="003- ALE-IMRAN.mp3"}, {n=4, title=surahNames[4], file="004- AN-NISAA.mp3"},
@@ -1169,8 +1257,16 @@ local israrTafseerFiles = {
   {n=111, title=surahNames[111], file="111-AL-LAHAB.mp3"}, {n=112, title=surahNames[112], file="112-AL-IKHLAAS.mp3"},
   {n=113, title=surahNames[113], file="113-AL-FALAQ.mp3"}, {n=114, title=surahNames[114], file="114-AN-NAAS.mp3"}
 }
-local function buildIsrarTafseerUrl(t) return ISRAR_TAFSEER_BASE .. urlEncodeBytes(t.file) end
+  end
+  return _lazyCache.israrTafseer
+end
+local function buildIsrarTafseerUrl(t) return URLBASES.israrTafseer .. urlEncodeBytes(t.file) end
 local function getIsrarTafseerLocal(t) return duaAudioDir .. "tafseer_israr_" .. t.n .. ".mp3" end
+
+-- NAYA (v2.1): 40 Hadith Imam An-Nawawi, Arabic - archive.org: 40HadithNawawi
+-- - saaf formula-based naming (nawawiNN_64kb.mp3), koi exception nahi
+local function buildNawawiUrl(n) return URLBASES.nawawi .. string.format("nawawi%02d_64kb.mp3", n) end
+local function getNawawiLocal(n) return duaAudioDir .. "nawawi_" .. n .. ".mp3" end
 
 --------------------------------------------------
 -- BOOKMARKS, PINS, DELETES
@@ -1294,6 +1390,8 @@ local function playReliable(urls, cachePath, label, refreshFn, onComplete)
     Toast.makeText(activity, "Loading: " .. label .. "...", 1).show()
     duaMp = MediaPlayer()
     pcall(function() duaMp.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
+    -- FIX (v2.2): screen band hone par bhi playback chalti rahe
+    pcall(function() duaMp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
     local streamFailed = false
     local dsOk = pcall(function() duaMp.setDataSource(url) end)
     if not dsOk then
@@ -1352,6 +1450,8 @@ local function playReliable(urls, cachePath, label, refreshFn, onComplete)
     local ok = pcall(function()
       duaMp = MediaPlayer()
       pcall(function() duaMp.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
+      -- FIX (v2.2): screen band hone par bhi playback chalti rahe
+      pcall(function() duaMp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
       duaMp.setDataSource(cachePath)
       duaMp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
         -- Cached file khud prepare/play hote waqt fail hui (corrupt ho sakti
@@ -1448,6 +1548,7 @@ local function moreSubTabs(activeTab)
       {Button, text="Full Quran", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("fullquran"), textColor=tabTextColor("fullquran"), contentDescription="Poori Quran Continuous tab", onClick=function() showFullQuranScreen() end},
       {Button, text="Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("hadith"), textColor=tabTextColor("hadith"), contentDescription="Hadith tab", onClick=function() showHadithScreen() end},
       {Button, text="Tafseer 2", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("israr"), textColor=tabTextColor("israr"), contentDescription="Tafseer Israr Ahmad tab", onClick=function() showIsrarTafseerScreen() end},
+      {Button, text="40 Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("nawawi"), textColor=tabTextColor("nawawi"), contentDescription="40 Hadith Nawawi tab", onClick=function() showNawawiScreen() end},
       {Button, text="Menu", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("menu"), textColor=tabTextColor("menu"), contentDescription="Menu tab", onClick=function() showSettings() end},
       {Button, text="Home", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Back to Home tab", onClick=function() showHome() end}
     }
@@ -1458,7 +1559,7 @@ local duaPlayerIndex = 1
 local audioDuasCache = {}
 local function buildAudioDuasList()
   audioDuasCache = {}
-  for _, d in ipairs(dailyDuas) do if d.audio ~= "" then table.insert(audioDuasCache, d) end end
+  for _, d in ipairs(dailyDuas()) do if d.audio ~= "" then table.insert(audioDuasCache, d) end end
   return audioDuasCache
 end
 
@@ -1486,7 +1587,7 @@ local function buildSearchIndex()
     end})
   end
   -- NAYA (v2.1): Tarjuma (translation) bhi search se select ho sakta hai
-  for _, lang in ipairs({"Off", "Urdu", "Hindi", "Punjabi", "English"}) do
+  for _, lang in ipairs({"Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi"}) do
     table.insert(idx, {label="Tarjuma: " .. lang, action=function()
       saveTranslationMode(lang)
       Toast.makeText(activity, "Tarjuma set to " .. lang, 1).show()
@@ -1501,7 +1602,7 @@ local function buildSearchIndex()
       showSurahList()
     end})
   end
-  for _, d in ipairs(dailyDuas) do
+  for _, d in ipairs(dailyDuas()) do
     if d.audio ~= "" then
       table.insert(idx, {label="Dua (Audio): " .. d.title, action=function()
         buildAudioDuasList()
@@ -1560,7 +1661,7 @@ function showHome()
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor, focusable=true, focusableInTouchMode=true,
-    {TextView, text="Quran Majeed v2.1", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 1"},
+    {TextView, text="Quran Majeed v2.2", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 2"},
     {LinearLayout, orientation=0, layout_width=-1, padding="10dp", gravity="center_vertical",
       {EditText, id="etHomeSearch", hint="Search Surah, Reciter, or Dua...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888"},
       {Button, id="btnHomeSearch", text="Search", textSize="13sp", layout_marginLeft="5dp", backgroundColor=appColorStr, textColor=-1, contentDescription="Search"}
@@ -1774,7 +1875,7 @@ function showDailyDuas()
   local list = buildAudioDuasList()
 
   local textDuas = {}
-  for _, d in ipairs(dailyDuas) do if d.audio == "" then table.insert(textDuas, d) end end
+  for _, d in ipairs(dailyDuas()) do if d.audio == "" then table.insert(textDuas, d) end end
 
   -- ===== AUDIO DUAS rows (Quran Majeed ki surah-list jaisi - sirf tap karein), category-wise grouped =====
   local audioRows = {}
@@ -1871,8 +1972,33 @@ function showParaSurahs(paraNum)
   for s = startS, endS do table.insert(list, s) end
   if #list == 0 then list = {startS} end
 
+  -- FIX (v2.1): pehle sirf Surah ka naam dikhta tha - agar ek lambi Surah
+  -- (jaise Al-Baqarah) do/teen Paron mein bikhri ho, to wahi naam alag
+  -- Paron mein baar baar, bina kisi Ayat-range ke, dikhta tha - is se log
+  -- confuse hote thay (lagta tha ghalti hai). Ab har entry ke sath sahi
+  -- "Ayat X-Y" range dikhta hai jab wo Para us Surah ka sirf HISSA cover
+  -- karta hai, aur tap karne par seedha usi Ayat se shuru hota hai.
+  local nextParaFirstSurah = (paraNum < 30) and paraSurahStart[paraNum+1] or 115
+  local nextParaFirstAyah = (paraNum < 30) and (paraFirstAyah[paraNum+1] or 1) or 1
+  local startAyahs = {}
+  local endAyahs = {}
   local names = {}
-  for _, s in ipairs(list) do table.insert(names, surahNames[s]) end
+  for idx, s in ipairs(list) do
+    local sAyah = (idx == 1) and (paraFirstAyah[paraNum] or 1) or 1
+    local eAyah
+    if idx == #list and s == nextParaFirstSurah then
+      eAyah = nextParaFirstAyah - 1
+    else
+      eAyah = surahAyahCounts[s] or 1
+    end
+    startAyahs[idx] = sAyah
+    endAyahs[idx] = eAyah
+    if sAyah == 1 and eAyah == (surahAyahCounts[s] or 1) then
+      table.insert(names, surahNames[s])
+    else
+      table.insert(names, surahNames[s] .. " (Ayat " .. sAyah .. "-" .. eAyah .. ")")
+    end
+  end
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
@@ -1884,7 +2010,14 @@ function showParaSurahs(paraNum)
   })
   applyWallpaper(mainLayout, bgColor)
   psList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
-  psList.onItemClick = function(l, v, p, i) showPlayer(list[i+1]) end
+  psList.onItemClick = function(l, v, p, i)
+    local idx = i + 1
+    if startAyahs[idx] > 1 then
+      showAyahByAyah(list[idx], startAyahs[idx])
+    else
+      showPlayer(list[idx])
+    end
+  end
 end
 
 -- 99 NAMES OF ALLAH
@@ -2232,7 +2365,7 @@ function showHadithScreen()
   stopPlayer()
   local bgColor, textColor = getThemeColors()
   local names = {}
-  for _, b in ipairs(hadithBooks) do table.insert(names, "Book " .. b.n .. ": " .. b.title) end
+  for _, b in ipairs(hadithBooks()) do table.insert(names, "Book " .. b.n .. ": " .. b.title) end
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
@@ -2256,7 +2389,7 @@ function showHadithPlayer(bookIdx)
   -- band nahi hota tha - is liye naye screen ke buttons purani audio ko
   -- control kar rahe thay, jo "kaam nahi kar raha" jaisa lagta tha.
   stopPlayer()
-  local b = hadithBooks[bookIdx]
+  local b = hadithBooks()[bookIdx]
   local localPath = getHadithLocal(b)
   local playUrl = File(localPath).exists() and localPath or buildHadithUrl(b)
   local isDownloaded = File(localPath).exists()
@@ -2290,7 +2423,7 @@ function showHadithPlayer(bookIdx)
   applyWallpaper(mainLayout, bgColor)
 
   hdPrevBtn.onClick = function() if bookIdx > 1 then showHadithPlayer(bookIdx - 1) end end
-  hdNextBtn.onClick = function() if bookIdx < #hadithBooks then showHadithPlayer(bookIdx + 1) end end
+  hdNextBtn.onClick = function() if bookIdx < #hadithBooks() then showHadithPlayer(bookIdx + 1) end end
 
   hdRwdBtn.onClick = function()
     if duaMp then pcall(function()
@@ -2321,7 +2454,7 @@ function showHadithPlayer(bookIdx)
       hdPlayPause.setText("Loading...")
       playReliable(playUrl, localPath, "Bukhari Book " .. b.n, nil, function()
         pcall(function() hdPlayPause.setText("▶ " .. tr("Play")) end)
-        if bookIdx < #hadithBooks then showHadithPlayer(bookIdx + 1) end
+        if bookIdx < #hadithBooks() then showHadithPlayer(bookIdx + 1) end
       end)
     end
   end
@@ -2366,7 +2499,7 @@ function showIsrarTafseerScreen()
   stopPlayer()
   local bgColor, textColor = getThemeColors()
   local names = {}
-  for _, t in ipairs(israrTafseerFiles) do table.insert(names, t.n == 0 and t.title or ("Surah " .. t.n .. ": " .. t.title)) end
+  for _, t in ipairs(israrTafseerFiles()) do table.insert(names, t.n == 0 and t.title or ("Surah " .. t.n .. ": " .. t.title)) end
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
@@ -2386,7 +2519,7 @@ end
 function showIsrarTafseerPlayer(idx)
   screen = "israrplayer"
   stopPlayer()
-  local t = israrTafseerFiles[idx]
+  local t = israrTafseerFiles()[idx]
   local localPath = getIsrarTafseerLocal(t)
   local playUrl = File(localPath).exists() and localPath or buildIsrarTafseerUrl(t)
   local isDownloaded = File(localPath).exists()
@@ -2417,7 +2550,7 @@ function showIsrarTafseerPlayer(idx)
   applyWallpaper(mainLayout, bgColor)
 
   izPrevBtn.onClick = function() if idx > 1 then showIsrarTafseerPlayer(idx - 1) end end
-  izNextBtn.onClick = function() if idx < #israrTafseerFiles then showIsrarTafseerPlayer(idx + 1) end end
+  izNextBtn.onClick = function() if idx < #israrTafseerFiles() then showIsrarTafseerPlayer(idx + 1) end end
 
   izRwdBtn.onClick = function()
     if duaMp then pcall(function()
@@ -2448,7 +2581,7 @@ function showIsrarTafseerPlayer(idx)
       izPlayPause.setText("Loading...")
       playReliable(playUrl, localPath, t.title, nil, function()
         pcall(function() izPlayPause.setText("▶ " .. tr("Play")) end)
-        if idx < #israrTafseerFiles then showIsrarTafseerPlayer(idx + 1) end
+        if idx < #israrTafseerFiles() then showIsrarTafseerPlayer(idx + 1) end
       end)
     end
   end
@@ -2487,6 +2620,132 @@ function showIsrarTafseerPlayer(idx)
   izSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
 end
 
+-- 40 HADITH NAWAWI - list
+function showNawawiScreen()
+  screen = "nawawilist"
+  stopPlayer()
+  local bgColor, textColor = getThemeColors()
+  local names = {}
+  for i = 1, 40 do table.insert(names, "Hadith " .. i) end
+
+  activity.setContentView(loadlayout{
+    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#3E2723", layout_width=-1, gravity="center_vertical",
+      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {TextView, text="40 Hadith (Imam An-Nawawi)", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+    },
+    {TextView, text="Mukhtasar, mash-hoor 40 Ahadith ka majmua", textSize="12sp", textColor="#777777", padding="8dp"},
+    {ListView, id="nawawiList", layout_width=-1, layout_height=0, layout_weight=1}
+  })
+  applyWallpaper(mainLayout, bgColor)
+  nawawiList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
+  nawawiList.onItemClick = function(l, v, p, i) showNawawiPlayer(i + 1) end
+end
+
+-- 40 HADITH NAWAWI - player (Quran Majeed Surah Player jaisa)
+function showNawawiPlayer(n)
+  screen = "nawawiplayer"
+  stopPlayer()
+  local localPath = getNawawiLocal(n)
+  local playUrl = File(localPath).exists() and localPath or buildNawawiUrl(n)
+  local isDownloaded = File(localPath).exists()
+  local bgColor, textColor = getThemeColors()
+
+  activity.setContentView(loadlayout{
+    LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
+    {TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
+    {TextView, text="Hadith " .. n .. " of 40", textSize="20sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr, gravity="center"},
+    {SeekBar, id="nwSeekBar", layout_width=-1, layout_marginBottom="10dp"},
+    {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
+      {TextView, id="nwCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
+      {TextView, id="nwTotalTxt", text="00:00", layout_weight=1, gravity="center"}
+    },
+    {LinearLayout, orientation=0, gravity="center", layout_width=-1,
+      {Button, id="nwPrevBtn", text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp"},
+      {Button, id="nwRwdBtn", text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp"},
+      {Button, id="nwPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp"},
+      {Button, id="nwFwdBtn", text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp"},
+      {Button, id="nwNextBtn", text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp"}
+    },
+    {Button, id="nwDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
+    {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
+      {Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() showNawawiScreen() end},
+      {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
+    }
+  })
+  applyWallpaper(mainLayout, bgColor)
+
+  nwPrevBtn.onClick = function() if n > 1 then showNawawiPlayer(n - 1) end end
+  nwNextBtn.onClick = function() if n < 40 then showNawawiPlayer(n + 1) end end
+
+  nwRwdBtn.onClick = function()
+    if duaMp then pcall(function()
+      local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
+      duaMp.seekTo(np > 0 and np or 0)
+    end) end
+  end
+
+  nwFwdBtn.onClick = function()
+    if duaMp then pcall(function()
+      local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
+      if np < duaMp.getDuration() then duaMp.seekTo(np) end
+    end) end
+  end
+
+  nwPlayPause.onClick = function()
+    if duaMp then
+      pcall(function()
+        if duaMp.isPlaying() then
+          duaMp.pause()
+          nwPlayPause.setText("▶ " .. tr("Play"))
+        else
+          duaMp.start()
+          nwPlayPause.setText("⏸ " .. tr("Pause"))
+        end
+      end)
+    else
+      nwPlayPause.setText("Loading...")
+      playReliable(playUrl, localPath, "Hadith " .. n, nil, function()
+        pcall(function() nwPlayPause.setText("▶ " .. tr("Play")) end)
+        if n < 40 then showNawawiPlayer(n + 1) end
+      end)
+    end
+  end
+
+  nwDownload.onClick = function()
+    if File(localPath).exists() then
+      confirmDelete(localPath, function() showNawawiPlayer(n) end)
+    else
+      local ok, err = pcall(function()
+        local req = DownloadManager.Request(Uri.parse(buildNawawiUrl(n)))
+        req.setTitle("Hadith " .. n)
+        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+        req.setDestinationUri(Uri.fromFile(File(localPath)))
+        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+      end)
+      if ok then
+        Toast.makeText(activity, "Download shuru ho gaya...", 1).show()
+      else
+        showErrorDialog("Hadith Download Error", err)
+      end
+    end
+  end
+
+  updateTask = Runnable({run = function()
+    if duaMp then pcall(function()
+      if duaMp.isPlaying() then
+        nwSeekBar.setMax(duaMp.getDuration())
+        nwSeekBar.setProgress(duaMp.getCurrentPosition())
+        nwCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
+        nwTotalTxt.setText(ft(duaMp.getDuration()))
+      end
+    end) end
+    handler.postDelayed(updateTask, 1000)
+  end})
+  handler.post(updateTask)
+  nwSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+end
+
 function showMore()
   screen = "more"
   local bgColor, textColor = getThemeColors()
@@ -2504,6 +2763,7 @@ function showMore()
       {Button, text="Poori Quran (Continuous)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() showFullQuranScreen() end},
       {Button, text="Hadith (Sahih Bukhari)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#4E342E", textColor=-1, onClick=function() showHadithScreen() end},
       {Button, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#5D4037", textColor=-1, onClick=function() showIsrarTafseerScreen() end},
+      {Button, text="40 Hadith (An-Nawawi)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() showNawawiScreen() end},
       {Button, text="Menu", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", onClick=function() showSettings() end}
     }},
     moreSubTabs("")
@@ -2721,7 +2981,9 @@ function showSettings()
   local seekLabels = {"5 Seconds", "10 Seconds", "15 Seconds", "20 Seconds", "25 Seconds", "30 Seconds", "1 Minute"} local seekValues = {5, 10, 15, 20, 25, 30, 60}
   local seekIndex = 1 for i,v in ipairs(seekValues) do if v == seekSeconds then seekIndex = i - 1 break end end
   -- NAYA (v2.1): Tarjuma (Translation) Off/Urdu spinner
-  local tarjumaLabels = {"Off", "Urdu", "Hindi", "Punjabi", "English"}
+  -- FIX (v2.2): Chinese option hata di gayi (uska audio source reliably
+  -- kaam nahi kar raha tha). NAYA (v2.2): Sindhi tarjuma add ki gayi.
+  local tarjumaLabels = {"Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi"}
   local tarjumaIndex = 0 for i,v in ipairs(tarjumaLabels) do if v == translationMode then tarjumaIndex = i - 1 break end end
   local urduVoiceLabels = {"Shamshad Ali Khan", "Farhat Hashmi"}
   local urduVoiceValues = {"Shamshad", "Farhat"}
@@ -2815,6 +3077,7 @@ function showFeedback()
       {Button, text="💬 Join WhatsApp Group 1", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/DJY36CzqJdO7uYMsUi1fXp") end},
       {Button, text="💬 Join WhatsApp Group 2", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/KzqqC44433PF2iwsXNd93p") end},
       {Button, text="💬 Join WhatsApp Group 3", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/FsiATGe2BAb2rfNWolL3k4") end},
+      {Button, text="💬 Join WhatsApp Group 4", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/JGz8fgOFXth9cTWh3IRF7s?s=cl&p=a&mlu=4") end},
       {Button, text="📢 Follow WhatsApp Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#128C7E", textColor=-1, onClick=function() openLinkAndClose("https://whatsapp.com/channel/0029Vb7I39ILikgHRF0PBV3k") end},
       {Button, text="📺 Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="30dp", backgroundColor="#FF0000", textColor=-1, onClick=function() openLinkAndClose("https://youtube.com/@friendtagresourcesteam?si=mT_M3jqVLcpwlRjN") end},
       {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() showSettings() end}
@@ -2830,9 +3093,9 @@ function showAbout()
 
   local infoText = [[
 Assalam-o-Alaikum!
-Version: 2.1
+Version: 2.2
 
---- WHAT'S NEW IN V2.1 ---
+--- WHAT'S NEW IN V2.2 ---
 
 Added (New Features):
 - Word-by-Word (Hifz) mode: reads a Surah's Ayat one Arabic word at a
@@ -2853,6 +3116,12 @@ Added (New Features):
 - Tafseer-e-Quran (Bayan-ul-Quran) by Dr. Israr Ahmad, Urdu: Introduction
   + all 114 Surahs, same full player style, offline download
 - 40 new "Rabbana" Quranic duas added to Daily Masnoon Duas
+- 40 Hadith (Imam An-Nawawi), Arabic: a short, well-known collection of
+  40 ahadith, same full player style (Prev/Rewind/Play/Forward/Next,
+  offline download)
+- Sindhi Tarjuma added (Mishary Rashid Alafasy recitation + Sindhi
+  translation, combined audio, all 114 Surahs) - select it from Settings
+  alongside Urdu/Hindi/Punjabi/English
 - Advanced Home search: search and jump straight into a specific Ayat
   (e.g. type "Baqarah 255"), search and play any of the 30 Para directly,
   search/select Tarjuma language, and tapping a Surah now offers a
@@ -2863,6 +3132,10 @@ Added (New Features):
   download can fail, so problems are easy to report
 
 Fixed (Bugs):
+- Playback used to stop as soon as the screen turned off or the app went
+  to background - now Surah/Dua/Hadith/Tafseer/Full Quran/Word-by-Word
+  audio keeps playing in the background (screen locked, or you switch to
+  another app) until you pause it yourself
 - Surah download crash: "Invalid value for visibility" (Android security
   restriction on public-folder downloads) - affected Surah, Dua, and
   background-download-fallback downloads
@@ -2877,9 +3150,15 @@ Fixed (Bugs):
   race condition, missing audio stream type, approximate-timing fallback
   when exact per-word data isn't available for an Ayat)
 - Hadith player Next/Previous Book not stopping the previous audio
+- App was slow to open - the big Surah-translation word-lists, Hadith
+  book list, and Tafseer list are now loaded only when you actually open
+  those screens, instead of being built every single time the app starts,
+  so Home opens noticeably faster
 
 Removed:
 - Storage Manager and Progress Tracker (not needed)
+- Chinese translation option (audio source wasn't playing reliably) -
+  Tarjuma choices are now Off/Urdu/Hindi/Punjabi/English/Sindhi
 
 More section: every screen (Para, Tasbeeh, Bookmarks, Names, Blessed
 Names, Full Quran, Hadith, Tafseer, Menu) is now reachable both as a big
@@ -3241,6 +3520,8 @@ local function wbwLoadAyah(surahIdx, ayahNum, onReady)
         -- yehi wajah thi "koi awaz nahi aati" ki. Ayat-ba-Ayat/Duas mode
         -- (playReliable) mein yeh hamesha set hota hai, ab yahan bhi karte hain.
         pcall(function() wbwPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
+        -- FIX (v2.2): screen band hone par bhi playback chalti rahe
+        pcall(function() wbwPlayer.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
         wbwPlayer.setDataSource(playUrl)
         wbwPlayer.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
           -- SAFETY FALLBACK: agar is ayat ke liye exact per-lafz timing
@@ -3613,6 +3894,11 @@ end
 
 function showRukuPlayer(surahIdx, rukuIdx)
   screen = "rukuplayer"
+  -- FIX: Prev/Next Ruku dabane par screen naye sirey se render hoti thi,
+  -- lekin purani Ruku ki audio (duaMp) band nahi hoti thi - is liye naya
+  -- Play button purani (pehli) Ayat ki audio ko hi control kar raha tha.
+  -- Bilkul wahi bug jo Hadith player mein tha, wahi fix yahan bhi.
+  stopPlayer()
   local bgColor, textColor = getThemeColors()
   local list = rukuCache[surahIdx]
   if not list or not list[rukuIdx] then showRukuMode(surahIdx) return end
@@ -3756,12 +4042,13 @@ function showPlayer(index)
   local isHindi = (translationMode == "Hindi")
   local isPunjabi = (translationMode == "Punjabi")
   local isEnglish = (translationMode == "English")
+  local isSindhi = (translationMode == "Sindhi")
   -- NAYA (v2.1): Tarjuma ON ho to combined (Arabic+tarjuma, ek hi file)
   -- audio use hoti hai - isi liye download bhi EK hi hota hai, alag Surah
   -- aur alag tarjuma download nahi karni padti.
-  local fileName = isUrdu and ("urdu_surah_"..sID..".mp3") or isHindi and ("hindi_surah_"..sID..".mp3") or isPunjabi and ("punjabi_surah_"..sID..".mp3") or isEnglish and ("english_surah_"..sID..".mp3") or ("reciter_"..reciterKey.."_surah_"..sID..".mp3")
+  local fileName = isUrdu and ("urdu_surah_"..sID..".mp3") or isHindi and ("hindi_surah_"..sID..".mp3") or isPunjabi and ("punjabi_surah_"..sID..".mp3") or isEnglish and ("english_surah_"..sID..".mp3") or isSindhi and ("sindhi_surah_"..sID..".mp3") or ("reciter_"..reciterKey.."_surah_"..sID..".mp3")
   local localFilePath = downloadDir .. fileName
-  local onlineUrl = isUrdu and buildUrduSurahUrl(index) or isHindi and buildHindiSurahUrl(index) or isPunjabi and buildPunjabiSurahUrl(index) or isEnglish and buildEnglishSurahUrl(index) or buildQuranUrl(currentReciter, index)
+  local onlineUrl = isUrdu and buildUrduSurahUrl(index) or isHindi and buildHindiSurahUrl(index) or isPunjabi and buildPunjabiSurahUrl(index) or isEnglish and buildEnglishSurahUrl(index) or isSindhi and buildSindhiSurahUrl(index) or buildQuranUrl(currentReciter, index)
   local playUrl = File(localFilePath).exists() and localFilePath or onlineUrl
   local isDownloaded = File(localFilePath).exists()
 
@@ -3771,7 +4058,7 @@ function showPlayer(index)
     LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
     {TextView, text=isDownloaded and "Offline Mode" or "Online Stream", textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
     {TextView, text=surahName, textSize="26sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text="Reciter: " .. (isUrdu and "Mishary Rashid Alafasy (Urdu Tarjuma ke sath)" or isHindi and "Sheikh Abdur Rehman Al Sudes (Hindi Tarjuma ke sath)" or isPunjabi and "Qari Khushi Muhammad-ul-Azhari (Punjabi Tarjuma ke sath)" or isEnglish and "Ibrahim Walk (English Tarjuma ke sath)" or reciters[currentReciter].name), textSize="14sp", layout_marginBottom="20dp", textColor=textColor},
+    {TextView, text="Reciter: " .. (isUrdu and "Mishary Rashid Alafasy (Urdu Tarjuma ke sath)" or isHindi and "Sheikh Abdur Rehman Al Sudes (Hindi Tarjuma ke sath)" or isPunjabi and "Qari Khushi Muhammad-ul-Azhari (Punjabi Tarjuma ke sath)" or isEnglish and "Ibrahim Walk (English Tarjuma ke sath)" or isSindhi and "Mishary Rashid Alafasy (Sindhi Tarjuma ke sath)" or reciters[currentReciter].name), textSize="14sp", layout_marginBottom="20dp", textColor=textColor},
 
     {TextView, id="txtSleepTimer", text="", textSize="14sp", textColor="#E91E63", layout_marginBottom="10dp", typeface=Typeface.DEFAULT_BOLD},
 
@@ -3796,12 +4083,16 @@ function showPlayer(index)
   })
   applyWallpaper(mainLayout, bgColor)
 
-  btnDownload.onClick = function() if File(localFilePath).exists() then confirmDelete(localFilePath, function() showPlayer(currentIndex) end) else downloadSurah(onlineUrl, fileName, surahName .. (isUrdu and " (Urdu Tarjuma)" or isHindi and " (Hindi Tarjuma)" or isPunjabi and " (Punjabi Tarjuma)" or isEnglish and " (English Tarjuma)" or "")) end end
+  btnDownload.onClick = function() if File(localFilePath).exists() then confirmDelete(localFilePath, function() showPlayer(currentIndex) end) else downloadSurah(onlineUrl, fileName, surahName .. (isUrdu and " (Urdu Tarjuma)" or isHindi and " (Hindi Tarjuma)" or isPunjabi and " (Punjabi Tarjuma)" or isEnglish and " (English Tarjuma)" or isSindhi and " (Sindhi Tarjuma)" or "")) end end
 
   stopPlayer(function()
   playerReady = false
   playIntentPending = false
-  mp = MediaPlayer() mp.setDataSource(playUrl) mp.prepareAsync()
+  mp = MediaPlayer()
+  -- FIX (v2.2): screen band hone ke baad bhi playback (streaming/
+  -- decoding) na atke, is ke liye CPU ko "so" jaane se rokte hain
+  pcall(function() mp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
+  mp.setDataSource(playUrl) mp.prepareAsync()
   mp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p, w, e) Toast.makeText(activity, "Audio error.", 0).show() if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end return true end})
   mp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
     if Build.VERSION.SDK_INT >= 23 then p.setPlaybackParams(p.getPlaybackParams().setSpeed(playbackSpeed)) end
@@ -3848,20 +4139,20 @@ function showPlayer(index)
   end)
 end
 
--- FIX: app close/background hone par audio chalti rehti thi (dusre devices
--- par report hua) - yeh lifecycle hooks framework khud call karta hai (jaise
--- onKeyDown), taake app pause/band hote hi audio bhi ruk jaye
-function onPause()
-  pcall(function() if mp and mp.isPlaying() then mp.pause() end end)
-  pcall(function() if duaMp and duaMp.isPlaying() then duaMp.pause() end end)
-  pcall(function() if wbwPlayer and wbwPlayer.isPlaying() then wbwPlayer.pause() end end)
-end
-
-function onStop()
-  pcall(function() if mp and mp.isPlaying() then mp.pause() end end)
-  pcall(function() if duaMp and duaMp.isPlaying() then duaMp.pause() end end)
-  pcall(function() if wbwPlayer and wbwPlayer.isPlaying() then wbwPlayer.pause() end end)
-end
+-- FIX (v2.2): pehle yahan mp/duaMp/wbwPlayer ko PAUSE kar diya jata tha
+-- jab bhi screen band hoti ya app background mein jati (taake "audio
+-- background mein chalti rehti hai" wala purana masla na ho) - lekin
+-- isi wajah se yeh naya masla ban gaya tha ke sirf SCREEN band karne se
+-- hi Surah/Dua/Hadith/Tafseer wagera ki audio ruk jati thi, jab tak user
+-- khud dobara Play na dabaye. Ab audio background mein (screen band ho,
+-- ya kisi aur app par chale jayein) bhi chalti rehti hai - jaisa har
+-- audio/Quran app mein hota hai - sirf tab rukegi jab user khud
+-- Pause/Stop dabaye ya track khatam ho jaye. MediaPlayer.setWakeMode
+-- (jahan bhi mp/duaMp/wbwPlayer banaye jate hain) yeh yaqeeni banata hai
+-- ke screen band hone par CPU "so" na jaye aur streaming/download beech
+-- mein na atke.
+function onPause() end
+function onStop() end
 
 function onDestroy()
   -- FIX: pehle yahan mp.stop()/mp.release() seedha (turant) call ho rahe the,
@@ -3899,6 +4190,8 @@ function onKeyDown(keyCode, event)
     elseif screen == "hadithplayer" then showHadithScreen() return true
     elseif screen == "israrlist" then showMore() return true
     elseif screen == "israrplayer" then showIsrarTafseerScreen() return true
+    elseif screen == "nawawilist" then showMore() return true
+    elseif screen == "nawawiplayer" then showNawawiScreen() return true
     elseif screen == "settings" or screen == "tasbeeh" or screen == "bookmarks" then showMore() return true end
   end
   return false
