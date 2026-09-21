@@ -19,7 +19,7 @@ import "java.io.InputStreamReader"
 import "android.text.TextWatcher"
 
 --------------------------------------------------
--- QURAN MAJEED v2.2 - Tarjuma, Hadith, Tafseer, Word-by-Word + background playback fix
+-- QURAN MAJEED v2.3 - Tarjuma, Hadith, Tafseer, Word-by-Word, background playback + prayer-time fixes
 -- Lead: Numan Khan
 --------------------------------------------------
 -- NOTE (v2.2): screen-off/background playback fix (MediaPlayer.setWakeMode,
@@ -125,6 +125,9 @@ local tasbeehVibrateEnabled = prefs.getBoolean("tasbeehVibrate", true)
 local lifetimeZikrTotal = prefs.getInt("lifetimeZikrTotal", 0)
 local lastPlayedSurah = prefs.getInt("lastSurah", 1)
 local readingFontSize = prefs.getInt("readingFontSize", 22)
+-- NAYA (v2.2): Ayat-ba-Ayat mode mein ek Ayat ko lagataar kitni dafa
+-- bajana hai (hifz/memorization ke liye) - Settings se badla ja sakta hai
+local ayahRepeatCount = prefs.getInt("ayahRepeatCount", 1)
 
 local savedCity = prefs.getString("userCity", "Abbottabad")
 local savedCountry = prefs.getString("userCountry", "Pakistan")
@@ -133,6 +136,10 @@ local prayerDhuhr = prefs.getString("pDhuhr", "12:15")
 local prayerAsr = prefs.getString("pAsr", "16:45")
 local prayerMaghrib = prefs.getString("pMaghrib", "19:10")
 local prayerIsha = prefs.getString("pIsha", "20:30")
+-- NAYA (v2.3): Tulu-e-Aftab (Sunrise) - Fajr ka waqt kab khatam hota hai,
+-- yeh Aladhan API se hi milta hai (isi response mein "Sunrise" field
+-- hoti hai, bas ab tak use nahi ho raha tha)
+local prayerSunrise = prefs.getString("pSunrise", "06:15")
 local savedHijriDate = prefs.getString("hijriDate", "Update location for Hijri Date")
 
 --------------------------------------------------
@@ -142,6 +149,21 @@ local function slug(s)
   local out = tostring(s):gsub("%s+", "_"):gsub("[^%w_]", "")
   if out == "" then out = "reciter" end
   return out
+end
+
+-- FIX (v2.3): prayer times "HH:MM" (24-hour, jaise 16:30) format mein
+-- show ho rahi thin - ab Home screen par 12-hour format (4:30 PM) mein
+-- dikhti hain. NOTE: internal storage (prayerFajr etc, aur Tahajjud ka
+-- calculation) 24-hour hi rehta hai - yeh function SIRF DISPLAY ke liye
+-- convert karta hai, taake koi aur calculation na tootay.
+local function to12Hour(t)
+  local h, m = t:match("(%d+):(%d+)")
+  if not h then return t end
+  h = tonumber(h)
+  local suffix = (h < 12) and "AM" or "PM"
+  local h12 = h % 12
+  if h12 == 0 then h12 = 12 end
+  return h12 .. ":" .. m .. " " .. suffix
 end
 
 local function calcTahajjud(maghrib, fajr)
@@ -215,15 +237,17 @@ local function fetchPrayerTimes(c, cntry, onDone)
             local a = result:match('"Asr":"(.-)"')
             local m = result:match('"Maghrib":"(.-)"')
             local i = result:match('"Isha":"(.-)"')
+            local sr = result:match('"Sunrise":"(.-)"')
             local hjDay = result:match('"hijri":{.-"day":"(.-)"')
             local hjMonth = result:match('"month":{.-"en":"(.-)"')
             local hjYear = result:match('"year":"(.-)"')
             if f then
               savedCity = c savedCountry = cntry
               prayerFajr = f prayerDhuhr = d prayerAsr = a prayerMaghrib = m prayerIsha = i
+              if sr then prayerSunrise = sr end
               if hjDay and hjMonth and hjYear then savedHijriDate = hjDay.." "..hjMonth.." "..hjYear else savedHijriDate = "Hijri Fetch Error" end
               lastPrayerFetchDate = todayDateString()
-              prefs.edit().putString("userCity", c).putString("userCountry", cntry).putString("pFajr", f).putString("pDhuhr", d).putString("pAsr", a).putString("pMaghrib", m).putString("pIsha", i).putString("hijriDate", savedHijriDate).putString("lastPrayerFetchDate", lastPrayerFetchDate).apply()
+              prefs.edit().putString("userCity", c).putString("userCountry", cntry).putString("pFajr", f).putString("pDhuhr", d).putString("pAsr", a).putString("pMaghrib", m).putString("pIsha", i).putString("pSunrise", prayerSunrise).putString("hijriDate", savedHijriDate).putString("lastPrayerFetchDate", lastPrayerFetchDate).apply()
               ok = true
             end
           end
@@ -301,7 +325,7 @@ local function fetchRecitersFromAPI()
       end
       if chosenServer then
         table.insert(newList, {name=name, url=chosenServer})
-        if #newList >= 49 then break end -- 49 + DI = 50
+        if #newList >= 51 then break end -- FIX (v2.3): raised from 49 - Sudais/Sadaqat are now pinned separately (see below) and de-duplicated out of this live list if present here, so the cap was raised to make sure that de-duplication never shrinks the total reciter count
       end
     end
   end)
@@ -329,10 +353,37 @@ local function loadRecitersCache()
 end
 
 local diReciterEntry = reciters[1] -- backup DI entry reference
+-- FIX (v2.3): pehle sirf Syed Sadaqat Ali "pinned" thay - Abdul Rahman
+-- Al-Sudais sirf FALLBACK hardcoded table mein tha, jo pehli hi
+-- cachedList/live-fetch ke baad POORI TARAH REPLACE ho jati hai - is
+-- liye agar wo mp3quran.net ki live list mein na aata (order/naming
+-- ki wajah se) to reciter count expected se KAM reh jata. Ab dono
+-- (Sudais + Sadaqat Ali) yahan "pinned" hain - dono hamesha, live
+-- fetch ke baad bhi, list mein guaranteed rahenge.
+local extraPinnedReciters = {
+  {name="Abdul Rahman Al-Sudais", url="https://server11.mp3quran.net/sds/"},
+  {name="Syed Sadaqat Ali", url="https://archive.org/download/syed-sadaqat-ali/"},
+}
+-- Agar live/cached list mein bhi (alag naming ke sath) inhi 2 reciters
+-- ka koi entry aa jaye, to usay yahan se nikal dete hain - taake koi
+-- reciter DO baar (duplicate) list mein na dikhe.
+local function withoutPinnedDuplicates(list)
+  local filtered = {}
+  for _, r in ipairs(list) do
+    local nameLower = tostring(r.name):lower()
+    local isDup = false
+    for _, p in ipairs(extraPinnedReciters) do
+      if nameLower:find(p.name:lower():match("[%w]+%s*[%w%-]*$") or p.name:lower(), 1, true) then isDup = true break end
+    end
+    if not isDup then table.insert(filtered, r) end
+  end
+  return filtered
+end
 local cachedList = loadRecitersCache()
 if cachedList then
   local merged = {diReciterEntry}
-  for _, r in ipairs(cachedList) do table.insert(merged, r) end
+  for _, p in ipairs(extraPinnedReciters) do table.insert(merged, p) end
+  for _, r in ipairs(withoutPinnedDuplicates(cachedList)) do table.insert(merged, r) end
   reciters = merged
 end
 
@@ -348,7 +399,8 @@ Thread(Runnable{run=function()
     -- doesn't silently jump to a different reciter mid-session
     local previouslySelectedName = reciters[currentReciter] and reciters[currentReciter].name or ""
     local merged = {diReciterEntry}
-    for _, r in ipairs(liveList) do table.insert(merged, r) end
+    for _, p in ipairs(extraPinnedReciters) do table.insert(merged, p) end
+    for _, r in ipairs(withoutPinnedDuplicates(liveList)) do table.insert(merged, r) end
     handler.post(Runnable{run=function()
       reciters = merged
       saveRecitersCache(liveList)
@@ -1661,7 +1713,7 @@ function showHome()
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor, focusable=true, focusableInTouchMode=true,
-    {TextView, text="Quran Majeed v2.2", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 2"},
+    {TextView, text="Quran Majeed v2.3", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 3"},
     {LinearLayout, orientation=0, layout_width=-1, padding="10dp", gravity="center_vertical",
       {EditText, id="etHomeSearch", hint="Search Surah, Reciter, or Dua...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888"},
       {Button, id="btnHomeSearch", text="Search", textSize="13sp", layout_marginLeft="5dp", backgroundColor=appColorStr, textColor=-1, contentDescription="Search"}
@@ -1722,12 +1774,21 @@ function showHome()
             end}).setNegativeButton("Cancel", nil).show()
           end}
         },
+        -- FIX (v2.3): 24-hour ("16:30") se 12-hour ("4:30 PM") format mein
+        -- badal diya (to12Hour) - internal storage/Tahajjud calculation
+        -- ab bhi 24-hour hi hai, sirf display badla hai.
+        -- NAYA (v2.3): Tulu-e-Aftab (Sunrise) row bhi add ki - taake pata
+        -- chale Fajr ka waqt kab khatam hota hai. 6-column ek row mein
+        -- kaafi tight hoti, is liye do rows (3+3) mein rakha hai.
+        {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="6dp",
+          {TextView, text="Fajr\n"..to12Hour(prayerFajr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
+          {TextView, text="Sunrise\n"..to12Hour(prayerSunrise), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
+          {TextView, text="Dhuhr\n"..to12Hour(prayerDhuhr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"}
+        },
         {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
-          {TextView, text="Fajr\n"..prayerFajr, textSize="14sp", textColor=textColor, layout_weight=1, gravity="center"},
-          {TextView, text="Dhuhr\n"..prayerDhuhr, textSize="14sp", textColor=textColor, layout_weight=1, gravity="center"},
-          {TextView, text="Asr\n"..prayerAsr, textSize="14sp", textColor=textColor, layout_weight=1, gravity="center"},
-          {TextView, text="Maghrib\n"..prayerMaghrib, textSize="14sp", textColor=textColor, layout_weight=1, gravity="center"},
-          {TextView, text="Isha\n"..prayerIsha, textSize="14sp", textColor=textColor, layout_weight=1, gravity="center"}
+          {TextView, text="Asr\n"..to12Hour(prayerAsr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
+          {TextView, text="Maghrib\n"..to12Hour(prayerMaghrib), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
+          {TextView, text="Isha\n"..to12Hour(prayerIsha), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"}
         },
         {TextView, text="Tahajjud Time: " .. calcTahajjud(prayerMaghrib, prayerFajr), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor="#8E24AA", gravity="center"}
       }
@@ -2988,6 +3049,9 @@ function showSettings()
   local urduVoiceLabels = {"Shamshad Ali Khan", "Farhat Hashmi"}
   local urduVoiceValues = {"Shamshad", "Farhat"}
   local urduVoiceIndex = 0 for i,v in ipairs(urduVoiceValues) do if v == urduVoice then urduVoiceIndex = i - 1 break end end
+  -- NAYA (v2.2): Ayat-ba-Ayat mode mein Ayat kitni dafa repeat ho
+  local repeatLabels = {"1x (No Repeat)", "2x", "3x", "5x", "10x"} local repeatValues = {1, 2, 3, 5, 10}
+  local repeatIndex = 0 for i,v in ipairs(repeatValues) do if v == ayahRepeatCount then repeatIndex = i - 1 break end end
 
   activity.setContentView(loadlayout{
     ScrollView, id="mainLayout", layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
@@ -3005,6 +3069,8 @@ function showSettings()
       {Spinner, id="tarjumaSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
       {TextView, text="Urdu Tarjuma Awaz (jab Tarjuma=Urdu ho):", textSize="16sp", textColor=textColor},
       {Spinner, id="urduVoiceSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+      {TextView, text="Ayat Repeat Count (Ayat-ba-Ayat mode, hifz ke liye):", textSize="16sp", textColor=textColor},
+      {Spinner, id="repeatCountSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
       {TextView, text="App Preferences:", textSize="16sp", textColor=appColorStr, typeface=Typeface.DEFAULT_BOLD},
       {CheckBox, id="chkAutoNext", text="Auto Next Surah Mode", textSize="16sp", layout_marginTop="10dp", checked=autoNextMode, textColor=textColor},
 
@@ -3028,6 +3094,7 @@ function showSettings()
   sleepSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, sleepLabels)) sleepSpinner.setSelection(sleepIndex) sleepSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) sleepTimerMinutes=sleepValues[pos+1] end})
   tarjumaSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, tarjumaLabels)) tarjumaSpinner.setSelection(tarjumaIndex) tarjumaSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveTranslationMode(tarjumaLabels[pos+1]) end})
   urduVoiceSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, urduVoiceLabels)) urduVoiceSpinner.setSelection(urduVoiceIndex) urduVoiceSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveUrduVoice(urduVoiceValues[pos+1]) end})
+  repeatCountSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repeatLabels)) repeatCountSpinner.setSelection(repeatIndex) repeatCountSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) ayahRepeatCount=repeatValues[pos+1] prefs.edit().putInt("ayahRepeatCount", ayahRepeatCount).apply() end})
   chkAutoNext.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) autoNextMode=isChecked end})
 end
 
@@ -3093,76 +3160,46 @@ function showAbout()
 
   local infoText = [[
 Assalam-o-Alaikum!
-Version: 2.2
+Version: 2.3
 
---- WHAT'S NEW IN V2.2 ---
+Quran Majeed is a full, offline-friendly Quran app: Surah-by-Surah
+recitation from 50+ reciters, Ayat-ba-Ayat and Ruku playback, Word-by-Word
+(Hifz) mode, five Tarjuma languages, Hadith and Tafseer collections, Daily
+Masnoon Duas, Tasbeeh, and Prayer Times.
 
-Added (New Features):
-- Word-by-Word (Hifz) mode: reads a Surah's Ayat one Arabic word at a
-  time (Alafasy audio), for memorization - open from any Surah's "..."
-  menu, pick a starting Ayat, tap each word to hear it, or turn Auto ON
-  to play through automatically
-- Tarjuma (Translation): Off/Urdu/Hindi/Punjabi/English - pick from
-  Settings. Urdu and English also play automatically after each Ayat in
-  Ayat-ba-Ayat and Ruku mode, and download together with the Ayat audio
-  for offline use. Two Urdu voices available (Shamshad Ali Khan / Farhat
-  Hashmi) and two Punjabi/Hindi/English voices researched and verified
-- Poori Quran (Continuous): two full-Quran single recordings (with Urdu
-  translation mixed in) - Al-Minshawi and Al-Hosary - with Play/Pause,
-  Rewind/Forward, scrub, and offline download
-- Hadith (Sahih Bukhari, English): all 97 Kitab (Books), each with a
-  full Surah-Player-style player (Prev/Rewind/Play/Forward/Next Book,
-  offline download)
-- Tafseer-e-Quran (Bayan-ul-Quran) by Dr. Israr Ahmad, Urdu: Introduction
-  + all 114 Surahs, same full player style, offline download
-- 40 new "Rabbana" Quranic duas added to Daily Masnoon Duas
-- 40 Hadith (Imam An-Nawawi), Arabic: a short, well-known collection of
-  40 ahadith, same full player style (Prev/Rewind/Play/Forward/Next,
-  offline download)
-- Sindhi Tarjuma added (Mishary Rashid Alafasy recitation + Sindhi
-  translation, combined audio, all 114 Surahs) - select it from Settings
-  alongside Urdu/Hindi/Punjabi/English
-- Advanced Home search: search and jump straight into a specific Ayat
-  (e.g. type "Baqarah 255"), search and play any of the 30 Para directly,
-  search/select Tarjuma language, and tapping a Surah now offers a
-  Play/Ayat-ba-Ayat/Ruku/Word-by-Word choice
-- Aaj ki Gregorian date, Islamic (Hijri) date, and battery % now shown
-  on Home
-- Copyable/shareable error dialogs (Copy + Share buttons) wherever a
-  download can fail, so problems are easy to report
+--- WHAT'S NEW IN V2.3 ---
 
-Fixed (Bugs):
-- Playback used to stop as soon as the screen turned off or the app went
-  to background - now Surah/Dua/Hadith/Tafseer/Full Quran/Word-by-Word
-  audio keeps playing in the background (screen locked, or you switch to
-  another app) until you pause it yourself
-- Surah download crash: "Invalid value for visibility" (Android security
-  restriction on public-folder downloads) - affected Surah, Dua, and
-  background-download-fallback downloads
-- Storage permission was never requested, so Storage Manager always
-  showed 0 MB/0 files
-- 99 Names "Play" never turned into a real Pause button (always
-  restarted) - now a proper toggle, plus offline download added
-- Prayer times on Home were fetched once and cached forever, never
-  changing day to day - now auto-refresh once per day; API switched to
-  HTTPS for reliability
-- Word-by-Word: several rounds of audio/timing fixes (seek-before-ready
-  race condition, missing audio stream type, approximate-timing fallback
-  when exact per-word data isn't available for an Ayat)
-- Hadith player Next/Previous Book not stopping the previous audio
-- App was slow to open - the big Surah-translation word-lists, Hadith
-  book list, and Tafseer list are now loaded only when you actually open
-  those screens, instead of being built every single time the app starts,
-  so Home opens noticeably faster
+Prayer Times:
+- Times now show in 12-hour format with AM/PM (e.g. "4:30 PM") instead
+  of 24-hour (e.g. "16:30")
+- Tulu-e-Aftab (Sunrise) added, so you can see when Fajr time ends
 
-Removed:
-- Storage Manager and Progress Tracker (not needed)
-- Chinese translation option (audio source wasn't playing reliably) -
-  Tarjuma choices are now Off/Urdu/Hindi/Punjabi/English/Sindhi
+Reciters:
+- Two new reciters added: Abdul Rahman Al-Sudais and Syed Sadaqat Ali
+  (well known from PTV's "Al-Quran" program) - both fully verified,
+  114/114 Surahs
+- Fixed a gap where a newly-added reciter could silently disappear once
+  the app refreshed its live reciter list from the server - key
+  reciters are now locked in place so they always stay available
 
-More section: every screen (Para, Tasbeeh, Bookmarks, Names, Blessed
-Names, Full Quran, Hadith, Tafseer, Menu) is now reachable both as a big
-button on the More screen AND as a quick-switch tab on every sub-screen.
+Playback:
+- Audio (Surah, Dua, Hadith, Tafseer, Full Quran, Word-by-Word) now
+  keeps playing in the background when the screen is locked or you
+  switch to another app - it only stops when you pause it yourself
+- App opens noticeably faster - large data (translation word-lists,
+  Hadith book list, Tafseer list) now loads only when that screen is
+  actually opened, instead of every time the app starts
+
+Tarjuma (Translation):
+- Sindhi added, alongside Urdu, Hindi, Punjabi, and English - combined
+  Arabic recitation + translation audio, offline downloadable
+- Chinese translation removed (its audio source stopped working
+  reliably)
+
+Ayat-ba-Ayat mode:
+- Long-press any Ayat to Copy or Share its Arabic text
+- New "Ayat Repeat Count" setting (1x/2x/3x/5x/10x) to repeat each Ayat
+  automatically for memorization practice
 
 --- CREDITS ---
 Lead Developer: Numan Khan.
@@ -3774,7 +3811,7 @@ function showAyahByAyah(surahIdx, autoPlayAyat)
       {Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() showPlayer(surahIdx) end},
       {TextView, text=surahNames[surahIdx] .. " - Ayat-ba-Ayat", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
-    {TextView, id="txtAyahStatus", text="Reciter: Mishary Alafasy (fixed reciter for this mode). Tap any Ayat below to play it.", textSize="11sp", textColor="#777777", padding="8dp"},
+    {TextView, id="txtAyahStatus", text="Reciter: Mishary Alafasy (fixed reciter for this mode). Tap an Ayat to play it, long-press for Copy/Share.", textSize="11sp", textColor="#777777", padding="8dp"},
     (lastAyahProgress[surahIdx] and {Button, id="btnResumeAyah", text="Resume from Ayat " .. lastAyahProgress[surahIdx], textSize="13sp", backgroundColor="#FF8F00", textColor=-1, layout_margin="8dp"}) or {LinearLayout, orientation=0, layout_width=-1, layout_height=0},
     {TextView, id="txtDownloadProgress", text="Downloaded for offline: " .. alreadyDownloaded .. " / " .. totalAyahs, textSize="12sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="8dp"},
     {Button, id="btnDownloadAllAyahs", text="Download All Ayahs for Offline", textSize="13sp", backgroundColor="#1976D2", textColor=-1, layout_margin="8dp"},
@@ -3782,21 +3819,35 @@ function showAyahByAyah(surahIdx, autoPlayAyat)
   })
   applyWallpaper(mainLayout, bgColor)
 
-  local function playAyah(n)
+  -- NAYA (v2.2): "Repeat" - Settings mein jo count chuna hai, usi hisaab se
+  -- yeh Ayat lagataar utni dafa bajti hai (translation bhi har dafa, agar
+  -- ON ho) - hifz/memorization ke liye. remainingRepeats khatam hone tak
+  -- khud-ba-khud agli "dohrai" chalti hai.
+  local function playAyahRepeated(n, remainingRepeats)
     if n < 1 or n > totalAyahs then return end
-    pcall(function() txtAyahStatus.setText("Playing Ayat " .. n .. " of " .. totalAyahs) end)
+    if remainingRepeats < 1 then return end
+    local repeatTotal = ayahRepeatCount
+    local repeatNow = repeatTotal - remainingRepeats + 1
+    local statusSuffix = (repeatTotal > 1) and (" (repeat " .. repeatNow .. "/" .. repeatTotal .. ")") or ""
+    pcall(function() txtAyahStatus.setText("Playing Ayat " .. n .. " of " .. totalAyahs .. statusSuffix) end)
     saveLastAyahProgress(surahIdx, n)
+    local function afterOneRound()
+      if remainingRepeats > 1 then playAyahRepeated(n, remainingRepeats - 1) end
+    end
     -- NAYA (v2.1): Tarjuma "Urdu" ON ho to Arabic ke turant baad usi
     -- Ayat ka Urdu tarjuma bhi play hota hai (per-Ayat, everyayah.com)
     playReliable(buildAyahUrl(surahIdx, n), getAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n, nil, function()
       if translationMode == "Urdu" then
         local uUrl, uPath = currentUrduAyahPair(surahIdx, n)
-        playReliable(uUrl, uPath, surahNames[surahIdx] .. " Ayat " .. n .. " (Urdu)", nil, nil)
+        playReliable(uUrl, uPath, surahNames[surahIdx] .. " Ayat " .. n .. " (Urdu)", nil, afterOneRound)
       elseif translationMode == "English" then
-        playReliable(buildEnglishAyahUrl(surahIdx, n), getEnglishAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (English)", nil, nil)
+        playReliable(buildEnglishAyahUrl(surahIdx, n), getEnglishAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (English)", nil, afterOneRound)
+      else
+        afterOneRound()
       end
     end)
   end
+  local function playAyah(n) playAyahRepeated(n, ayahRepeatCount) end
 
   if lastAyahProgress[surahIdx] and btnResumeAyah then
     btnResumeAyah.onClick = function() playAyah(lastAyahProgress[surahIdx]) end
@@ -3804,6 +3855,38 @@ function showAyahByAyah(surahIdx, autoPlayAyat)
 
   ayahList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, buildLabels(nil)))
   ayahList.onItemClick = function(l, v, p, i) playAyah(i + 1) end
+  -- NAYA (v2.2): long-press par Copy/Share ka options menu (Arabic text
+  -- fetchSurahMeta se cached hota hai - agar abhi load nahi hui to
+  -- Toast se bata dete hain, jabran khaali text copy/share nahi karte)
+  ayahList.onItemLongClick = function(l, v, p, i)
+    local n = i + 1
+    local ayahText = ayahTextCache[surahIdx] and ayahTextCache[surahIdx][n]
+    AlertDialog.Builder(activity).setTitle(surahNames[surahIdx] .. " - Ayat " .. n).setItems({"▶️ Play", "📋 Copy Text", "📤 Share Text", "❌ Cancel"}, {onClick=function(d, w)
+      if w == 0 then
+        playAyah(n)
+      elseif w == 1 then
+        if ayahText then
+          pcall(function() activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Ayat", ayahText)) end)
+          Toast.makeText(activity, "Ayat text copied!", 0).show()
+        else
+          Toast.makeText(activity, "Ayat text abhi load nahi hui, thoda intezar karein.", 0).show()
+        end
+      elseif w == 2 then
+        if ayahText then
+          pcall(function()
+            local shareText = ayahText .. "\n\n(" .. surahNames[surahIdx] .. " " .. n .. ")"
+            local shareIntent = Intent(Intent.ACTION_SEND)
+            shareIntent.setType("text/plain")
+            shareIntent.putExtra(Intent.EXTRA_TEXT, shareText)
+            activity.startActivity(Intent.createChooser(shareIntent, "Share Ayat"))
+          end)
+        else
+          Toast.makeText(activity, "Ayat text abhi load nahi hui, thoda intezar karein.", 0).show()
+        end
+      end
+    end}).show()
+    return true
+  end
 
   -- NAYA (v2.1): agar search se seedha kisi khaas Ayat par bheja gaya hai
   if autoPlayAyat then playAyah(autoPlayAyat) end
