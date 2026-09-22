@@ -1,36 +1,26 @@
-2.3
+2.4
 
---- WHAT'S NEW IN V2.3 ---
+Assalam-o-Alaikum!
+Version: 2.4
 
-Prayer Times:
-- Times now show in 12-hour format with AM/PM (e.g. "4:30 PM") instead
-  of 24-hour (e.g. "16:30")
-- Tulu-e-Aftab (Sunrise) added, so you can see when Fajr time ends
+--- WHAT'S NEW IN V2.4 ---
+
+Islamic (Hijri) Date:
+- Fixed a display bug where the Hijri month name showed special accented
+  characters (from the online source) that looked wrong and were
+  mispronounced by screen readers - now shows a clean, correct month
+  name (e.g. "Rabi-ul-Thani"), and updates automatically day by day
+
+Punjabi Calendar:
+- Added the Punjabi (Nanakshahi) calendar date on Home, right under the
+  Islamic date - calculated directly using the calendar's own fixed
+  month-start rule (no internet needed for this part), so it's accurate
+  and always current
 
 Reciters:
-- Two new reciters added: Abdul Rahman Al-Sudais and Syed Sadaqat Ali
-  (well known from PTV's "Al-Quran" program) - both fully verified,
-  114/114 Surahs
-- Fixed a gap where a newly-added reciter could silently disappear once
-  the app refreshed its live reciter list from the server - key
-  reciters are now locked in place so they always stay available
+- Saud Al-Shuraim moved to the top of the reciter list (highest demand)
+  and locked in place so he can never disappear on a list refresh
 
-Playback:
-- Audio (Surah, Dua, Hadith, Tafseer, Full Quran, Word-by-Word) now
-  keeps playing in the background when the screen is locked or you
-  switch to another app - it only stops when you pause it yourself
-- App opens noticeably faster - large data (translation word-lists,
-  Hadith book list, Tafseer list) now loads only when that screen is
-  actually opened, instead of every time the app starts
-
-Tarjuma (Translation):
-- Sindhi added, alongside Urdu, Hindi, Punjabi, and English - combined
-  Arabic recitation + translation audio, offline downloadable
-- Chinese translation removed (its audio source stopped working
-  reliably)
-
-Ayat-ba-Ayat mode:
-- Long-press any Ayat to Copy or Share its Arabic text
-- New "Ayat Repeat Count" setting (1x/2x/3x/5x/10x) to repeat each Ayat
-  automatically for memorization practice
-
+--- CREDITS ---
+Lead Developer: Numan Khan.
+May Allah accept our continuous efforts!
