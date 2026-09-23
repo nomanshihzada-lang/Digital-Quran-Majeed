@@ -41,14 +41,16 @@ local currentReciter = 1
 local autoNextMode = true
 local isPaused = false
 -- NAYA (v2.5): speed/repeat state EK table mein (AndroLua 200-local limit)
+-- NOTE: prefs load NEICHE prefs define hone ke BAAD hota hai - yahan sirf
+-- table + helpers, taake activity nil hone par early crash na ho.
 local PS = {speed=1.0, ayahRepeat=1, surahRepeat=1, surahRepeatRem=0}
-pcall(function()
-  local s = activity.getSharedPreferences("QuranAppPrefs", 0).getFloat("playbackSpeed", 1.0)
-  if s and s > 0 then PS.speed = s end
-end)
 function savePlaybackSpeed(v)
   PS.speed = v
-  pcall(function() activity.getSharedPreferences("QuranAppPrefs", 0).edit().putFloat("playbackSpeed", v).apply() end)
+  pcall(function()
+    if activity then
+      activity.getSharedPreferences("QuranAppPrefs", 0).edit().putFloat("playbackSpeed", v).apply()
+    end
+  end)
 end
 function applyPlaybackSpeed(player)
   if not player then return end
@@ -91,7 +93,23 @@ local function tr(text) return text end
 --------------------------------------------------
 -- SHARED PREFERENCES & DATA
 --------------------------------------------------
-local prefs = activity.getSharedPreferences("QuranAppPrefs", 0)
+-- FIX (v2.5): AndroLua Pro mein global "activity" hota hai; kuch Jieshuo
+-- Tools / hybrid setups mein "this" milta hai. Dono cover karte hain.
+pcall(function()
+  if activity == nil and this ~= nil then activity = this end
+end)
+local prefs = nil
+pcall(function()
+  prefs = activity.getSharedPreferences("QuranAppPrefs", 0)
+end)
+if not prefs then
+  error("Activity context nahi mila.\n\nAndroLua Pro mein project bana kar Run karein.\nJieshuo → Tools folder se seedha main.lua load mat karein — wahan Activity inject nahi hoti.\n\nSahi tareeqa: AndroLua Pro → New Project → is file ko main.lua banao → Run.")
+end
+-- Speed prefs load
+pcall(function()
+  local s = prefs.getFloat("playbackSpeed", 1.0)
+  if s and s > 0 then PS.speed = s end
+end)
 
 -- PROGRESS TRACKER data (jo Surah pura sun li, aur Ayat-ba-Ayat/Ruku mein
 -- aakhri position - taake qari sahab track kar sakein bachon ne kahan tak
