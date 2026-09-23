@@ -1,25 +1,32 @@
-2.4
+2.5..Assalam-o-Alaikum!
+Version: 2.5
 
-Assalam-o-Alaikum!
-Version: 2.4
+--- WHAT'S NEW IN V2.5 ---
 
---- WHAT'S NEW IN V2.4 ---
+Play Speed Control (everywhere):
+- Speed spinner seedha Surah Player + Dua Player par (0.75x-2x)
+- 30 Para bhi isi Surah player ko use karte hain
+- Ayat-ba-Ayat, Ruku, Duas, Hadith, Tafseer par bhi speed apply
+- Speed prefs mein save - app restart ke baad bhi yaad
 
-Islamic (Hijri) Date:
-- Fixed a display bug where the Hijri month name showed special accented
-  characters (from the online source) that looked wrong and were
-  mispronounced by screen readers - now shows a clean, correct month
-  name (e.g. "Rabi-ul-Thani"), and updates automatically day by day
+Repeat Mode (player par, Menu se nahi):
+- Surah Player: 1x / 2x / 3x / 5x / Loop (poori Surah dobara)
+- Ayat-ba-Ayat: 1x / 2x / 3x / 5x / 10x spinner seedha us screen par
+- Settings wala spinner bhi same value save karta hai
 
-Punjabi Calendar:
-- Added the Punjabi (Nanakshahi) calendar date on Home, right under the
-  Islamic date - calculated directly using the calendar's own fixed
-  month-start rule (no internet needed for this part), so it's accurate
-  and always current
+30 Para fix:
+- Para 14 boundary theek: Al-Hijr (15:1) se shuru (pehle galti se
+  Ibrahim 14 set thi)
 
-Reciters:
-- Saud Al-Shuraim moved to the top of the reciter list (highest demand)
-  and locked in place so he can never disappear on a list refresh
+Islamic (Hijri) Date - REAL FIX:
+- Hijri year ab sahi block se (1448), na ke Gregorian 2026
+- Pakistan/India/Bangladesh: adjustment -2 (local moon-sighting)
+- Pehli dafa 2.5 open par cache clear + auto re-fetch
+
+Duas:
+- Dua player Quran jaisa (Speed, seek seconds, Arabic+Urdu display)
+- Zyada masnoon text duas (Urdu+Arabic) category-wise add
+- Purani text duas ke Arabic/Urdu complete
 
 --- CREDITS ---
 Lead Developer: Numan Khan.
