@@ -19,7 +19,7 @@ import "java.io.InputStreamReader"
 import "android.text.TextWatcher"
 
 --------------------------------------------------
--- QURAN MAJEED v2.4 - Tarjuma, Hadith, Tafseer, Word-by-Word, background playback + Hijri/Punjabi calendar fixes
+-- QURAN MAJEED v2.5 - Speed/Repeat on players, Para 14 fix, Hijri, richer Duas
 -- Lead: Numan Khan
 --------------------------------------------------
 -- NOTE (v2.2): screen-off/background playback fix (MediaPlayer.setWakeMode,
@@ -40,7 +40,24 @@ local currentIndex = 1
 local currentReciter = 1
 local autoNextMode = true
 local isPaused = false
-local playbackSpeed = 1.0
+-- NAYA (v2.5): speed/repeat state EK table mein (AndroLua 200-local limit)
+local PS = {speed=1.0, ayahRepeat=1, surahRepeat=1, surahRepeatRem=0}
+pcall(function()
+  local s = activity.getSharedPreferences("QuranAppPrefs", 0).getFloat("playbackSpeed", 1.0)
+  if s and s > 0 then PS.speed = s end
+end)
+function savePlaybackSpeed(v)
+  PS.speed = v
+  pcall(function() activity.getSharedPreferences("QuranAppPrefs", 0).edit().putFloat("playbackSpeed", v).apply() end)
+end
+function applyPlaybackSpeed(player)
+  if not player then return end
+  pcall(function()
+    if Build.VERSION.SDK_INT >= 23 then
+      player.setPlaybackParams(player.getPlaybackParams().setSpeed(PS.speed))
+    end
+  end)
+end
 local sleepTimerMinutes = 0
 local seekSeconds = 10
 local targetSleepTime = 0
@@ -125,9 +142,18 @@ local tasbeehVibrateEnabled = prefs.getBoolean("tasbeehVibrate", true)
 local lifetimeZikrTotal = prefs.getInt("lifetimeZikrTotal", 0)
 local lastPlayedSurah = prefs.getInt("lastSurah", 1)
 local readingFontSize = prefs.getInt("readingFontSize", 22)
--- NAYA (v2.2): Ayat-ba-Ayat mode mein ek Ayat ko lagataar kitni dafa
--- bajana hai (hifz/memorization ke liye) - Settings se badla ja sakta hai
-local ayahRepeatCount = prefs.getInt("ayahRepeatCount", 1)
+-- NAYA (v2.2/v2.5): Ayat + Surah repeat - PS table mein (200-local limit)
+PS.ayahRepeat = prefs.getInt("ayahRepeatCount", 1)
+PS.surahRepeat = prefs.getInt("surahRepeatCount", 1)
+PS.surahRepeatRem = 0
+function saveAyahRepeatCount(v)
+  PS.ayahRepeat = v
+  prefs.edit().putInt("ayahRepeatCount", v).apply()
+end
+function saveSurahRepeatCount(v)
+  PS.surahRepeat = v
+  prefs.edit().putInt("surahRepeatCount", v).apply()
+end
 
 local savedCity = prefs.getString("userCity", "Abbottabad")
 local savedCountry = prefs.getString("userCountry", "Pakistan")
@@ -253,8 +279,18 @@ local function fetchPrayerTimes(c, cntry, onDone)
         if ok and res and res:find('"Fajr"') then return res end
         return nil
       end
-      local byCity = "https://api.aladhan.com/v1/timingsByCity?city="..URLEncoder.encode(c).."&country="..URLEncoder.encode(cntry).."&method=1"
-      local byAddress = "https://api.aladhan.com/v1/timingsByAddress?address="..URLEncoder.encode(c..", "..cntry).."&method=1"
+      -- FIX (v2.5): Pakistan/India/Bangladesh local moon-sighting usually
+      -- 1-2 days behind Saudi Umm al-Qura. Aladhan default Hijri ~ Umm al-Qura
+      -- (e.g. 12 Rabi-ul-Thani jab Pakistan mein 10 ho). Country Pakistan/
+      -- India/Bangladesh par adjustment=-2 taake real local tareekh aaye.
+      local adj = 0
+      local cnLower = tostring(cntry or ""):lower()
+      if cnLower:find("pakistan", 1, true) or cnLower:find("india", 1, true) or cnLower:find("bangladesh", 1, true) then
+        adj = -2
+      end
+      local adjQ = (adj ~= 0) and ("&adjustment=" .. adj) or ""
+      local byCity = "https://api.aladhan.com/v1/timingsByCity?city="..URLEncoder.encode(c).."&country="..URLEncoder.encode(cntry).."&method=1"..adjQ
+      local byAddress = "https://api.aladhan.com/v1/timingsByAddress?address="..URLEncoder.encode(c..", "..cntry).."&method=1"..adjQ
       local result = tryEndpoint(byCity)
       if not result then result = tryEndpoint(byAddress) end
       local success = (result ~= nil)
@@ -276,10 +312,14 @@ local function fetchPrayerTimes(c, cntry, onDone)
             -- jata hai aur ek saaf, plain-ASCII naam table se match kiya
             -- jata hai - hamesha sahi aur TalkBack-friendly.
             local hijriMonthNames = {"Muharram","Safar","Rabi-ul-Awwal","Rabi-ul-Thani","Jumada-ul-Awwal","Jumada-ul-Thani","Rajab","Shaban","Ramadan","Shawwal","Dhul-Qadah","Dhul-Hijjah"}
+            -- FIX (v2.5): pehle hjYear = result:match('"year":"(.-)"') tha jo
+            -- JSON mein PEHLA "year" pakad leta tha (Gregorian 2026) - is
+            -- wajah se Hijri date galat/confusing dikhti thi. Ab strictly
+            -- hijri block ke andar se year nikalte hain.
             local hjDay = result:match('"hijri":{.-"day":"(.-)"')
             local hjMonthNum = result:match('"hijri":{.-"month":{"number":(%d+)')
             local hjMonth = hjMonthNum and hijriMonthNames[tonumber(hjMonthNum)]
-            local hjYear = result:match('"year":"(.-)"')
+            local hjYear = result:match('"hijri":{.-"year":"(%d+)"')
             if f then
               savedCity = c savedCountry = cntry
               prayerFajr = f prayerDhuhr = d prayerAsr = a prayerMaghrib = m prayerIsha = i
@@ -453,7 +493,10 @@ end}).start()
 local surahNames = {"Al-Fatihah","Al-Baqarah","Al-Imran","An-Nisa","Al-Ma'idah","Al-An'am","Al-A'raf","Al-Anfal","At-Tawbah","Yunus","Hud","Yusuf","Ar-Ra'd","Ibrahim","Al-Hijr","An-Nahl","Al-Isra","Al-Kahf","Maryam","Ta-Ha","Al-Anbiya","Al-Hajj","Al-Mu'minun","An-Nur","Al-Furqan","Ash-Shu'ara","An-Naml","Al-Qasas","Al-Ankabut","Ar-Rum","Luqman","As-Sajdah","Al-Ahzab","Saba","Fatir","Ya-Sin","As-Saffat","Sad","Az-Zumar","Ghafir","Fussilat","Ash-Shura","Az-Zukhruf","Ad-Dukhan","Al-Jathiyah","Al-Ahqaf","Muhammad","Al-Fath","Al-Hujurat","Qaf","Adh-Dhariyat","At-Tur","An-Najm","Al-Qamar","Ar-Rahman","Al-Waqi'ah","Al-Hadid","Al-Mujadilah","Al-Hashr","Al-Mumtahanah","As-Saff","Al-Jumu'ah","Al-Munafiqun","At-Taghabun","At-Talaq","At-Tahrim","Al-Mulk","Al-Qalam","Al-Haqqah","Al-Ma'arij","Nuh","Al-Jinn","Al-Muzzammil","Al-Muddaththir","Al-Qiyamah","Al-Insan","Al-Mursalat","An-Naba","An-Nazi'at","Abasa","At-Takwir","Al-Infitar","Al-Mutaffifin","Al-Inshiqaq","Al-Buruj","At-Tariq","Al-A'la","Al-Ghashiyah","Al-Fajr","Al-Balad","Ash-Shams","Al-Layl","Ad-Duha","Ash-Sharh","At-Tin","Al-Alaq","Al-Qadr","Al-Bayyinah","Az-Zalzalah","Al-Adiyat","Al-Qari'ah","At-Takathur","Al-Asr","Al-Humazah","Al-Fil","Quraysh","Al-Ma'un","Al-Kawthar","Al-Kafirun","An-Nasr","Al-Masad","Al-Ikhlas","Al-Falaq","An-Nas"}
 
 -- Juz/Para -> Starting Surah mapping (standard division)
-local paraSurahStart = {1,2,2,3,4,4,5,6,7,8,9,11,12,14,17,18,21,23,25,27,29,33,36,39,41,46,51,58,67,78}
+-- FIX (v2.5): Para 14 standard boundary Surah 15 (Al-Hijr) ayat 1 hai,
+-- pehle galti se Surah 14 (Ibrahim) set thi - is se Para 14 list galat
+-- Surah se shuru hoti thi. Baqi boundaries standard Hafs 30-Juz hain.
+local paraSurahStart = {1,2,2,3,4,4,5,6,7,8,9,11,12,15,17,18,21,23,25,27,29,33,36,39,41,46,51,58,67,78}
 -- FIX (v2.1): "30 Para" mein har Para ka pehla Surah to sahi tha, lekin
 -- us Surah ki KAUNSI AYAT se Para shuru hota hai (jab Para kisi lambi
 -- Surah, jaise Al-Baqarah, ke beech se shuru hota hai) yeh track nahi ho
@@ -1028,12 +1071,23 @@ local function dailyDuas()
     _lazyCache.dailyDuas = {
   {cat="Khaana Peena", title="Khana Khane Ke Baad", ar="الْحَمْدُ لِلَّهِ الَّذِي أَطْعَمَنِي هَٰذَا وَرَزَقَنِيهِ مِنْ غَيْرِ حَوْلٍ مِنِّي وَلَا قُوَّةٍ", ur="تمام تعریفیں اللہ کے لیے جس نے مجھے یہ کھلایا اور رزق دیا", tip="Khana khatam hone ke baad parhein", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating.mp3", src="archive.org (Islamic Dua in Audio)"},
   {cat="Khaana Peena", title="Doodh Peene Ke Baad", ar="اللَّهُمَّ بَارِكْ لَنَا فِيهِ وَزِدْنَا مِنْهُ", ur="اے اللہ اس میں برکت دے اور اس سے زیادہ عطا فرما", tip="Doodh peene ke khaas baad ki dua", audio="", src=""},
-  {cat="Sona Uthna", title="Sone Se Pehle Ki Dua", ar="بِاسْمِكَ اللَّهُمَّ أَمُوتُ وَأَحْيَا", ur="اے اللہ تیرے نام سے مرتا اور جیتا ہوں", tip="Bistar par lait kar dayin karwat par parhein (Sahih Bukhari)", audio="", src=""},
-  {cat="Sona Uthna", title="Neend Se Uthne Ki Dua", ar="الْحَمْدُ لِلَّهِ الَّذِي أَحْيَانَا بَعْدَ مَا أَمَاتَنَا وَإِلَيْهِ النُّشُورُ", ur="تمام تعریفیں اللہ کے لیے جس نے ہمیں مارنے کے بعد زندہ کیا", tip="Neend se uthte hi sab se pehle parhein", audio="", src=""},
-  {cat="Sona Uthna", title="Karwat Badalte Waqt", ar="لَا إِلَٰهَ إِلَّا اللَّهُ الْوَاحِدُ الْقَهَّارُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ اکیلا اور غالب ہے", tip="Raat ko neend mein karwat lete waqt", audio="", src=""},
-  {cat="Baithna Ghar", title="Majlis Mein Baithne Ki Dua", ar="سُبْحَانَكَ اللَّهُمَّ وَبِحَمْدِكَ", ur="اے اللہ تو پاک ہے اور تیری تعریف کے ساتھ", tip="Kaffaratul Majlis - majlis se uthte waqt bhi parhein", audio="", src=""},
-  {cat="Hifazat", title="Sayyid-ul-Istighfar", ar="اللَّهُمَّ أَنْتَ رَبِّي لَا إِلَٰهَ إِلَّا أَنْتَ", ur="اے اللہ تو میرا رب ہے تیرے سوا کوئی معبود نہیں", tip="Sab se afzal istighfar (Sahih Bukhari)", audio="", src=""},
-  {cat="Hifazat", title="Durood-e-Ibrahimi", ar="اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ وَعَلَى آلِ مُحَمَّدٍ", ur="اے اللہ محمد ﷺ اور ان کی آل پر رحمت نازل فرما", tip="Namaz ke Tashahhud mein aur Juma ke din", audio="", src=""},
+  {cat="Sona Uthna", title="Sone Se Pehle Ki Dua", ar="بِاسْمِكَ اللَّهُمَّ أَمُوتُ وَأَحْيَا", ur="اے اللہ! تیرے نام سے میں مرتا ہوں اور جیتا ہوں", tip="Bistar par lait kar dayin karwat par parhein (Sahih Bukhari)", audio="", src=""},
+  {cat="Sona Uthna", title="Neend Se Uthne Ki Dua", ar="الْحَمْدُ لِلَّهِ الَّذِي أَحْيَانَا بَعْدَ مَا أَمَاتَنَا وَإِلَيْهِ النُّشُورُ", ur="تمام تعریفیں اللہ کے لیے جس نے ہمیں مارنے کے بعد زندہ کیا اور اسی کی طرف اٹھنا ہے", tip="Neend se uthte hi sab se pehle parhein", audio="", src=""},
+  {cat="Sona Uthna", title="Karwat Badalte Waqt", ar="لَا إِلَٰهَ إِلَّا اللَّهُ الْوَاحِدُ الْقَهَّارُ رَبُّ السَّمَاوَاتِ وَالْأَرْضِ وَمَا بَيْنَهُمَا الْعَزِيزُ الْغَفَّارُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ اکیلا غالب ہے، آسمانوں اور زمین اور جو ان کے درمیان ہے سب کا رب، عزت والا بخشنے والا", tip="Raat ko neend mein karwat lete waqt", audio="", src=""},
+  {cat="Baithna Ghar", title="Majlis Mein Baithne Ki Dua", ar="سُبْحَانَكَ اللَّهُمَّ وَبِحَمْدِكَ أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا أَنْتَ أَسْتَغْفِرُكَ وَأَتُوبُ إِلَيْكَ", ur="اے اللہ تو پاک ہے اور تیری ہی تعریف ہے، میں گواہی دیتا ہوں کہ تیرے سوا کوئی معبود نہیں، تجھ سے معافی مانگتا ہوں اور تیری طرف توبہ کرتا ہوں", tip="Kaffaratul Majlis - majlis se uthte waqt bhi parhein", audio="", src=""},
+  {cat="Hifazat", title="Sayyid-ul-Istighfar", ar="اللَّهُمَّ أَنْتَ رَبِّي لَا إِلَٰهَ إِلَّا أَنْتَ خَلَقْتَنِي وَأَنَا عَبْدُكَ", ur="اے اللہ تو میرا رب ہے، تیرے سوا کوئی معبود نہیں، تو نے مجھے پیدا کیا اور میں تیرا بندہ ہوں", tip="Sab se afzal istighfar (Sahih Bukhari)", audio="", src=""},
+  {cat="Hifazat", title="Durood-e-Ibrahimi", ar="اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ وَعَلَى آلِ مُحَمَّدٍ كَمَا صَلَّيْتَ عَلَى إِبْرَاهِيمَ وَعَلَى آلِ إِبْرَاهِيمَ إِنَّكَ حَمِيدٌ مَجِيدٌ", ur="اے اللہ محمد ﷺ اور ان کی آل پر رحمت نازل فرما جیسے ابراہیم اور ان کی آل پر نازل فرمائی، بیشک تو تعریف والا بزرگی والا ہے", tip="Namaz ke Tashahhud mein aur Juma ke din", audio="", src=""},
+  -- NAYA (v2.5): zyada masnoon text duas (Urdu + Arabic) - category-wise
+  {cat="Hifazat", title="Ayatul Kursi", ar="اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ الْحَيُّ الْقَيُّومُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ زندہ ہے اور سب کو قائم رکھنے والا ہے", tip="Har namaz ke baad aur sone se pehle", audio="", src=""},
+  {cat="Hifazat", title="Qul Huwallahu Ahad (Ikhlas)", ar="قُلْ هُوَ اللَّهُ أَحَدٌ اللَّهُ الصَّمَدُ", ur="کہو وہ اللہ ایک ہے، اللہ بے نیاز ہے", tip="Hifazat ke liye 3 martaba", audio="", src=""},
+  {cat="Subah Shaam", title="Subah Ki Masnoon Dua (Full)", ar="أَصْبَحْنَا وَأَصْبَحَ الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے صبح کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Fajr ke baad", audio="", src=""},
+  {cat="Subah Shaam", title="Shaam Ki Masnoon Dua", ar="أَمْسَيْنَا وَأَمْسَى الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے شام کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Maghrib ke baad", audio="", src=""},
+  {cat="Safar", title="Safar Ki Dua", ar="سُبْحَانَ الَّذِي سَخَّرَ لَنَا هَٰذَا وَمَا كُنَّا لَهُ مُقْرِنِينَ وَإِنَّا إِلَىٰ رَبِّنَا لَمُنْقَلِبُونَ", ur="پاک ہے وہ ذات جس نے ہمارے لیے اس سواری کو مسخر کیا اور ہم اس کے قابو میں لانے والے نہ تھے، اور بیشک ہم اپنے رب کی طرف لوٹنے والے ہیں", tip="Sawari par baithte waqt", audio="", src=""},
+  {cat="Khaana Peena", title="Khana Khane Se Pehle", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے شروع", tip="Khana shuru karte waqt Bismillah", audio="", src=""},
+  {cat="Tahaarat", title="Wuzu Se Pehle", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے", tip="Wuzu shuru karte waqt", audio="", src=""},
+  {cat="Tahaarat", title="Wuzu Ke Baad", ar="أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا اللَّهُ وَحْدَهُ لَا شَرِيكَ لَهُ وَأَشْهَدُ أَنَّ مُحَمَّدًا عَبْدُهُ وَرَسُولُهُ", ur="میں گواہی دیتا ہوں کہ اللہ کے سوا کوئی معبود نہیں وہ اکیلا ہے اس کا کوئی شریک نہیں اور محمد ﷺ اس کے بندے اور رسول ہیں", tip="Wuzu ke baad", audio="", src=""},
+  {cat="Masjid", title="Masjid Mein Dakhil Hone Ki Dua", ar="اللَّهُمَّ افْتَحْ لِي أَبْوَابَ رَحْمَتِكَ", ur="اے اللہ میرے لیے اپنی رحمت کے دروازے کھول دے", tip="Masjid mein dakhil hote waqt", audio="", src=""},
+  {cat="Masjid", title="Masjid Se Nikalne Ki Dua", ar="اللَّهُمَّ إِنِّي أَسْأَلُكَ مِنْ فَضْلِكَ", ur="اے اللہ میں تجھ سے تیرا فضل مانگتا ہوں", tip="Masjid se nikalte waqt", audio="", src=""},
   -- Neeche di gayi duas ka audio verify hokar mila hai (TheSufi.com, Arabic+Urdu translation):
   {cat="Subah Shaam", title="Subah Ki Dua (Morning Prayer)", ar="", ur="Subah ki masnoon dua", tip="Fajr ke baad parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications-Morning-Prayer.mp3", src="TheSufi.com (Arabic+Urdu)"},
   {cat="Sona Uthna", title="Neend Se Uthne Ki Dua (Audio)", ar="", ur="Neend se uthne ki masnoon dua", tip="Neend se uthte hi parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--8-.mp3", src="TheSufi.com (Arabic+Urdu)"},
@@ -1533,7 +1587,12 @@ local function playReliable(urls, cachePath, label, refreshFn, onComplete)
       end}).start()
       return true
     end})
-    duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p) p.start() Toast.makeText(activity, "Playing: " .. label, 0).show() if refreshFn then refreshFn() end end})
+    duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
+      applyPlaybackSpeed(p)
+      p.start()
+      Toast.makeText(activity, "Playing: " .. label, 0).show()
+      if refreshFn then refreshFn() end
+    end})
     duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
     duaMp.prepareAsync()
   end
@@ -1556,7 +1615,12 @@ local function playReliable(urls, cachePath, label, refreshFn, onComplete)
         tryStream()
         return true
       end})
-      duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p) p.start() Toast.makeText(activity, "Playing (offline): " .. label, 0).show() if refreshFn then refreshFn() end end})
+      duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
+        applyPlaybackSpeed(p)
+        p.start()
+        Toast.makeText(activity, "Playing (offline): " .. label, 0).show()
+        if refreshFn then refreshFn() end
+      end})
       duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
       duaMp.prepareAsync()
     end)
@@ -1746,6 +1810,13 @@ function showHome()
   -- FIX (v2.1): agar aakhri prayer-time fetch AAJ ki tareekh ki nahi hai
   -- (matlab purana din, ya kabhi fetch hi nahi hui), to khud-ba-khud
   -- background mein dobara fetch ho jati hai - bina button dabaye
+  -- FIX (v2.5): pehli dafa 2.5 open hone par purani galat Hijri cache
+  -- clear karke force re-fetch (year-parse + Pakistan adjustment ke sath)
+  local hijriFixDone = prefs.getBoolean("hijriFix_v25", false)
+  if not hijriFixDone then
+    lastPrayerFetchDate = ""
+    prefs.edit().putBoolean("hijriFix_v25", true).putString("lastPrayerFetchDate", "").apply()
+  end
   if lastPrayerFetchDate ~= todayDateString() and savedCity ~= "" and savedCountry ~= "" then
     fetchPrayerTimes(savedCity, savedCountry, function(ok)
       if ok and screen == "home" then showHome() end
@@ -1754,7 +1825,7 @@ function showHome()
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor, focusable=true, focusableInTouchMode=true,
-    {TextView, text="Quran Majeed v2.4", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 4"},
+    {TextView, text="Quran Majeed v2.5", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 5"},
     {LinearLayout, orientation=0, layout_width=-1, padding="10dp", gravity="center_vertical",
       {EditText, id="etHomeSearch", hint="Search Surah, Reciter, or Dua...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888"},
       {Button, id="btnHomeSearch", text="Search", textSize="13sp", layout_marginLeft="5dp", backgroundColor=appColorStr, textColor=-1, contentDescription="Search"}
@@ -1907,18 +1978,24 @@ function showDuaPlayer(idx)
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
     {TextView, text=(isDownloaded and "Offline Mode" or "Online Stream") .. " - " .. idx .. "/" .. #list, textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text=d.title, textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="10dp", textColor=appColorStr, gravity="center", contentDescription=d.title},
-    {TextView, text=d.ur, textSize="15sp", layout_marginBottom="10dp", textColor=textColor, gravity="center"},
-    {TextView, text="💡 " .. d.tip, textSize="12sp", textColor="#777777", layout_marginBottom="20dp", gravity="center"},
+    {TextView, text=d.title, textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="8dp", textColor=appColorStr, gravity="center", contentDescription=d.title},
+    {TextView, text=(d.ar and d.ar ~= "" and d.ar or ""), textSize="18sp", layout_marginBottom="6dp", textColor=appColorStr, gravity="center"},
+    {TextView, text=d.ur or "", textSize="15sp", layout_marginBottom="8dp", textColor=textColor, gravity="center"},
+    {TextView, text=(d.tip and d.tip ~= "" and ("💡 " .. d.tip) or (d.cat and ("Category: " .. d.cat) or "")), textSize="12sp", textColor="#777777", layout_marginBottom="12dp", gravity="center"},
 
-    {SeekBar, id="skBar", layout_width=-1, layout_marginBottom="20dp"},
+    {SeekBar, id="skBar", layout_width=-1, layout_marginBottom="8dp"},
+    -- NAYA (v2.5): Dua player bhi Quran player jaisa - Speed control
+    {LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, layout_marginBottom="10dp",
+      {TextView, text="Speed:", textSize="13sp", textColor=textColor, layout_marginRight="8dp"},
+      {Spinner, id="duaSpeedSpinner", layout_width=0, layout_weight=1}
+    },
     {LinearLayout, orientation=0, gravity="center", layout_width=-1,
       {Button, text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous", onClick=function() if duaPlayerIndex>1 then showDuaPlayer(duaPlayerIndex-1) end end},
-      {Button, text="⏪ 10s", textSize="16sp", layout_weight=1, layout_margin="2dp", contentDescription="Rewind 10 seconds", onClick=function() if duaMp and duaMp.isPlaying() then local n=duaMp.getCurrentPosition()-10000 if n<0 then n=0 end duaMp.seekTo(n) end end},
+      {Button, text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp", contentDescription="Rewind", onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()-(seekSeconds*1000) if n<0 then n=0 end duaMp.seekTo(n) end) end end},
       {Button, id="btnDuaPlayPause", text="⏸ " .. tr("Pause"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", contentDescription="Play or Pause", onClick=function()
         if duaMp then pcall(function() if duaMp.isPlaying() then duaMp.pause() btnDuaPlayPause.setText("▶ " .. tr("Play")) else duaMp.start() btnDuaPlayPause.setText("⏸ " .. tr("Pause")) end end) end
       end},
-      {Button, text="10s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp", contentDescription="Fast Forward 10 seconds", onClick=function() if duaMp and duaMp.isPlaying() then local n=duaMp.getCurrentPosition()+10000 duaMp.seekTo(n) end end},
+      {Button, text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp", contentDescription="Fast Forward", onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()+(seekSeconds*1000) duaMp.seekTo(n) end) end end},
       {Button, text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp", contentDescription="Next", onClick=function() if duaPlayerIndex<#list then showDuaPlayer(duaPlayerIndex+1) end end}
     },
     {Button, id="btnDuaDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1, contentDescription=isDownloaded and "Delete Offline Copy" or "Download"},
@@ -1928,6 +2005,19 @@ function showDuaPlayer(idx)
     }
   })
   applyWallpaper(mainLayout, bgColor)
+
+  do
+    local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"}
+    local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
+    local speedIndex = 1
+    for i,v in ipairs(speedValues) do if math.abs(v - PS.speed) < 0.01 then speedIndex = i - 1 break end end
+    duaSpeedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels))
+    duaSpeedSpinner.setSelection(speedIndex)
+    duaSpeedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
+      savePlaybackSpeed(speedValues[pos+1])
+      if duaMp then applyPlaybackSpeed(duaMp) end
+    end})
+  end
 
   btnDuaDownload.onClick = function()
     if File(localPath).exists() then
@@ -3078,7 +3168,7 @@ function showSettings()
 
   local reciterNames = {} for i, v in ipairs(reciters) do table.insert(reciterNames, v.name) end
   local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"} local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
-  local speedIndex = 1 for i,v in ipairs(speedValues) do if v == playbackSpeed then speedIndex = i - 1 break end end
+  local speedIndex = 1 for i,v in ipairs(speedValues) do if v == PS.speed then speedIndex = i - 1 break end end
   local sleepLabels = {"Off", "15 Minutes", "30 Minutes", "45 Minutes", "60 Minutes"} local sleepValues = {0, 15, 30, 45, 60}
   local sleepIndex = 0 for i,v in ipairs(sleepValues) do if v == sleepTimerMinutes then sleepIndex = i - 1 break end end
   local seekLabels = {"5 Seconds", "10 Seconds", "15 Seconds", "20 Seconds", "25 Seconds", "30 Seconds", "1 Minute"} local seekValues = {5, 10, 15, 20, 25, 30, 60}
@@ -3093,7 +3183,7 @@ function showSettings()
   local urduVoiceIndex = 0 for i,v in ipairs(urduVoiceValues) do if v == urduVoice then urduVoiceIndex = i - 1 break end end
   -- NAYA (v2.2): Ayat-ba-Ayat mode mein Ayat kitni dafa repeat ho
   local repeatLabels = {"1x (No Repeat)", "2x", "3x", "5x", "10x"} local repeatValues = {1, 2, 3, 5, 10}
-  local repeatIndex = 0 for i,v in ipairs(repeatValues) do if v == ayahRepeatCount then repeatIndex = i - 1 break end end
+  local repeatIndex = 0 for i,v in ipairs(repeatValues) do if v == PS.ayahRepeat then repeatIndex = i - 1 break end end
 
   activity.setContentView(loadlayout{
     ScrollView, id="mainLayout", layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
@@ -3132,11 +3222,11 @@ function showSettings()
   reciterSpinner.setSelection(math.min(currentReciter, #reciters) - 1)
   reciterSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) currentReciter=pos+1 end})
   seekSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, seekLabels)) seekSpinner.setSelection(seekIndex) seekSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) seekSeconds=seekValues[pos+1] end})
-  speedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels)) speedSpinner.setSelection(speedIndex) speedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) playbackSpeed=speedValues[pos+1] end})
+  speedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels)) speedSpinner.setSelection(speedIndex) speedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) savePlaybackSpeed(speedValues[pos+1]) if mp then applyPlaybackSpeed(mp) end if duaMp then applyPlaybackSpeed(duaMp) end end})
   sleepSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, sleepLabels)) sleepSpinner.setSelection(sleepIndex) sleepSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) sleepTimerMinutes=sleepValues[pos+1] end})
   tarjumaSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, tarjumaLabels)) tarjumaSpinner.setSelection(tarjumaIndex) tarjumaSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveTranslationMode(tarjumaLabels[pos+1]) end})
   urduVoiceSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, urduVoiceLabels)) urduVoiceSpinner.setSelection(urduVoiceIndex) urduVoiceSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveUrduVoice(urduVoiceValues[pos+1]) end})
-  repeatCountSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repeatLabels)) repeatCountSpinner.setSelection(repeatIndex) repeatCountSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) ayahRepeatCount=repeatValues[pos+1] prefs.edit().putInt("ayahRepeatCount", ayahRepeatCount).apply() end})
+  repeatCountSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repeatLabels)) repeatCountSpinner.setSelection(repeatIndex) repeatCountSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveAyahRepeatCount(repeatValues[pos+1]) end})
   chkAutoNext.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) autoNextMode=isChecked end})
 end
 
@@ -3202,25 +3292,34 @@ function showAbout()
 
   local infoText = [[
 Assalam-o-Alaikum!
-Version: 2.4
+Version: 2.5
 
---- WHAT'S NEW IN V2.4 ---
+--- WHAT'S NEW IN V2.5 ---
 
-Islamic (Hijri) Date:
-- Fixed a display bug where the Hijri month name showed special accented
-  characters (from the online source) that looked wrong and were
-  mispronounced by screen readers - now shows a clean, correct month
-  name (e.g. "Rabi-ul-Thani"), and updates automatically day by day
+Play Speed Control (everywhere):
+- Speed spinner seedha Surah Player + Dua Player par (0.75x-2x)
+- 30 Para bhi isi Surah player ko use karte hain
+- Ayat-ba-Ayat, Ruku, Duas, Hadith, Tafseer par bhi speed apply
+- Speed prefs mein save - app restart ke baad bhi yaad
 
-Punjabi Calendar:
-- Added the Punjabi (Nanakshahi) calendar date on Home, right under the
-  Islamic date - calculated directly using the calendar's own fixed
-  month-start rule (no internet needed for this part), so it's accurate
-  and always current
+Repeat Mode (player par, Menu se nahi):
+- Surah Player: 1x / 2x / 3x / 5x / Loop (poori Surah dobara)
+- Ayat-ba-Ayat: 1x / 2x / 3x / 5x / 10x spinner seedha us screen par
+- Settings wala spinner bhi same value save karta hai
 
-Reciters:
-- Saud Al-Shuraim moved to the top of the reciter list (highest demand)
-  and locked in place so he can never disappear on a list refresh
+30 Para fix:
+- Para 14 boundary theek: Al-Hijr (15:1) se shuru (pehle galti se
+  Ibrahim 14 set thi)
+
+Islamic (Hijri) Date - REAL FIX:
+- Hijri year ab sahi block se (1448), na ke Gregorian 2026
+- Pakistan/India/Bangladesh: adjustment -2 (local moon-sighting)
+- Pehli dafa 2.5 open par cache clear + auto re-fetch
+
+Duas:
+- Dua player Quran jaisa (Speed, seek seconds, Arabic+Urdu display)
+- Zyada masnoon text duas (Urdu+Arabic) category-wise add
+- Purani text duas ke Arabic/Urdu complete
 
 --- CREDITS ---
 Lead Developer: Numan Khan.
@@ -3425,30 +3524,24 @@ end
 -- kis second par shuru/khatam hota hai) - iske liye ek free, open-source
 -- data ("quran-align" project, GitHub) use hota hai jo Alafasy reciter
 -- ke liye hi bana hai - is liye yeh bilkul sahi audio ke saath sync hoga.
--- Apna ALAG MediaPlayer (wbwPlayer) hai - mp/duaMp ko bilkul touch nahi
+-- Apna ALAG MediaPlayer (WBW.player) hai - mp/duaMp ko bilkul touch nahi
 -- karta, is liye kisi bhi purani screen ki playback logic par asar nahi.
 --------------------------------------------------
-local wbwPlayer = nil
-local wbwTimingIndex = nil   -- app session mein ek dafa banta hai: "surah_ayah" -> segments
-local wbwWords = nil
-local wbwTimings = nil
-local wbwWordIdx = 1
-local wbwSurahIdx = 1
-local wbwAyahNum = 1
-local wbwAutoAdv = false
-local wbwStopHandle = nil
-local wbwPendingWordDuration = 200  -- kitni der (ms) chalna hai, seek complete hone ke baad set hota hai
-local wbwOnWordPlaybackDone = nil   -- current WBW screen apna callback yahan set karta hai (auto-advance ke liye)
-
-local wbwTimingUrl = "https://github.com/cpfair/quran-align/releases/download/release-2016-11-24/Alafasy_128kbps.json"
-local wbwTimingCachePath = ayahAudioDir .. "wbw_timing_alafasy.json"
-
-local function wbwStopAudio()
-  wbwOnWordPlaybackDone = nil
-  if wbwStopHandle then pcall(function() handler.removeCallbacks(wbwStopHandle) end) wbwStopHandle = nil end
-  if wbwPlayer then
-    local oldP = wbwPlayer
-    wbwPlayer = nil
+-- FIX (v2.5): saari WBW state EK table - AndroLua 200-local limit
+local WBW = {
+  player=nil, timingIndex=nil, words=nil, timings=nil,
+  wordIdx=1, surahIdx=1, ayahNum=1, autoAdv=false,
+  stopHandle=nil, pendingWordDuration=200, onWordPlaybackDone=nil,
+  timingUrl="https://github.com/cpfair/quran-align/releases/download/release-2016-11-24/Alafasy_128kbps.json",
+  timingCachePath=ayahAudioDir .. "wbw_timing_alafasy.json",
+  timingLoadError=nil,
+}
+function wbwStopAudio()
+  WBW.onWordPlaybackDone = nil
+  if WBW.stopHandle then pcall(function() handler.removeCallbacks(WBW.stopHandle) end) WBW.stopHandle = nil end
+  if WBW.player then
+    local oldP = WBW.player
+    WBW.player = nil
     Thread(Runnable{run=function()
       pcall(function() if oldP.isPlaying() then oldP.stop() end end)
       pcall(function() oldP.release() end)
@@ -3460,7 +3553,7 @@ end
 -- (github.com -> objects.githubusercontent.com) - kuch Android versions par
 -- HttpURLConnection ise khud follow nahi karta, is liye manually follow
 -- karte hain (max 5 hops) taake download reliably chale.
-local function httpGetFollowRedirects(urlStr, maxRedirects)
+function httpGetFollowRedirects(urlStr, maxRedirects)
   local curUrl = urlStr
   for i = 1, (maxRedirects or 5) do
     local conn = URL(curUrl).openConnection()
@@ -3486,32 +3579,31 @@ local function httpGetFollowRedirects(urlStr, maxRedirects)
 end
 
 -- Alafasy ki poori word-timing JSON (ek hi baar) local cache se, ya download
--- karke, load karta hai aur parse karke wbwTimingIndex banata hai. Sirf app
+-- karke, load karta hai aur parse karke WBW.timingIndex banata hai. Sirf app
 -- session mein ek dafa hota hai - baad ki har ayat isi table se milti hai.
 -- NOTE: agar yeh kisi bhi wajah se fail ho (network, parse), wbwLoadAyah
 -- neeche khud-kaar "approximate" per-lafz timing bana leta hai, is liye
 -- Word-by-Word feature is failure ki soorat mein bhi dead-end nahi hoti.
-local wbwTimingLoadError = nil
-local function wbwLoadTimingIndex(onDone)
-  if wbwTimingIndex then onDone(true) return end
+function wbwLoadTimingIndex(onDone)
+  if WBW.timingIndex then onDone(true) return end
   Thread(Runnable{run=function()
     local ok, raw = pcall(function()
-      if File(wbwTimingCachePath).exists() and File(wbwTimingCachePath).length() > 1000 then
-        local f = io.open(wbwTimingCachePath, "r")
+      if File(WBW.timingCachePath).exists() and File(WBW.timingCachePath).length() > 1000 then
+        local f = io.open(WBW.timingCachePath, "r")
         local c = f:read("*a")
         f:close()
         return c
       end
-      local res = httpGetFollowRedirects(wbwTimingUrl, 5)
+      local res = httpGetFollowRedirects(WBW.timingUrl, 5)
       pcall(function()
-        local fo = io.open(wbwTimingCachePath, "w")
+        local fo = io.open(WBW.timingCachePath, "w")
         fo:write(res)
         fo:close()
       end)
       return res
     end)
     if not ok or not raw then
-      wbwTimingLoadError = "Timing file download nahi hui: " .. tostring(raw)
+      WBW.timingLoadError = "Timing file download nahi hui: " .. tostring(raw)
       handler.post(Runnable{run=function() onDone(false) end})
       return
     end
@@ -3529,24 +3621,21 @@ local function wbwLoadTimingIndex(onDone)
           local seg = segsJson.getJSONArray(j)
           segs[#segs+1] = {seg.getInt(0), seg.getInt(1), seg.getInt(2), seg.getInt(3)}
         end
-        -- string.format("%d_%d", ...) taake number-to-string conversion
-        -- hamesha "2_255" ho, kabhi "2.0_255.0" na ban jaye (jis se lookup
-        -- fail ho jata tha aur har lafz "not available" dikhata tha)
         idx[string.format("%d_%d", s, a)] = segs
       end
     end)
-    if not pok then wbwTimingLoadError = "Timing file parse nahi hui: " .. tostring(perr) end
+    if not pok then WBW.timingLoadError = "Timing file parse nahi hui: " .. tostring(perr) end
     handler.post(Runnable{run=function()
-      if pok then wbwTimingIndex = idx end
+      if pok then WBW.timingIndex = idx end
       onDone(pok)
     end})
   end}).start()
 end
 
--- Ek ayat ke liye: text (fetchSurahMeta se), timing (wbwTimingIndex se),
+-- Ek ayat ke liye: text (fetchSurahMeta se), timing (WBW.timingIndex se),
 -- aur audio (buildAyahUrl/getAyahAudioLocal se, already-downloaded ho to
 -- wahi use hoti hai) - teeno load karke onReady(true) ya onReady(false, err)
-local function wbwLoadAyah(surahIdx, ayahNum, onReady)
+function wbwLoadAyah(surahIdx, ayahNum, onReady)
   wbwLoadTimingIndex(function(timingOk)
     fetchSurahMeta(surahIdx, function(list, texts)
       if not texts or not texts[ayahNum] then
@@ -3555,33 +3644,33 @@ local function wbwLoadAyah(surahIdx, ayahNum, onReady)
       end
       local words = {}
       for w in tostring(texts[ayahNum]):gmatch("%S+") do words[#words+1] = w end
-      wbwWords = words
+      WBW.words = words
 
-      local segs = (wbwTimingIndex and wbwTimingIndex[string.format("%d_%d", surahIdx, ayahNum)]) or {}
+      local segs = (WBW.timingIndex and WBW.timingIndex[string.format("%d_%d", surahIdx, ayahNum)]) or {}
       local tim = {}
       for _, seg in ipairs(segs) do
         local ws, we, st, en = seg[1], seg[2], seg[3], seg[4]
         for i = ws, we - 1 do tim[i+1] = {st, en} end
       end
       local hasExactTiming = next(tim) ~= nil
-      wbwTimings = tim
-      wbwWordIdx = 1
+      WBW.timings = tim
+      WBW.wordIdx = 1
 
       local localPath = getAyahAudioLocal(surahIdx, ayahNum)
       local playUrl = File(localPath).exists() and localPath or buildAyahUrl(surahIdx, ayahNum)
 
       wbwStopAudio()
       local ok = pcall(function()
-        wbwPlayer = MediaPlayer()
+        WBW.player = MediaPlayer()
         -- FIX: pehle yahan setAudioStreamType nahi tha, jo purane Android
         -- (jaise S7) par MediaPlayer ko prepare/play hi nahi hone deta -
         -- yehi wajah thi "koi awaz nahi aati" ki. Ayat-ba-Ayat/Duas mode
         -- (playReliable) mein yeh hamesha set hota hai, ab yahan bhi karte hain.
-        pcall(function() wbwPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
+        pcall(function() WBW.player.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
         -- FIX (v2.2): screen band hone par bhi playback chalti rahe
-        pcall(function() wbwPlayer.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
-        wbwPlayer.setDataSource(playUrl)
-        wbwPlayer.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
+        pcall(function() WBW.player.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
+        WBW.player.setDataSource(playUrl)
+        WBW.player.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
           -- SAFETY FALLBACK: agar is ayat ke liye exact per-lafz timing
           -- nahi mili (timing file download/parse fail hui, ya is khaas
           -- ayat ka data quran-align mein maujood nahi), to "not available"
@@ -3597,7 +3686,7 @@ local function wbwLoadAyah(surahIdx, ayahNum, onReady)
               for i = 1, #words do
                 est[i] = {math.floor((i-1) * dur / #words), math.floor(i * dur / #words)}
               end
-              wbwTimings = est
+              WBW.timings = est
             end
           end
           onReady(true, nil, hasExactTiming)
@@ -3607,16 +3696,16 @@ local function wbwLoadAyah(surahIdx, ayahNum, onReady)
         -- reh jata tha (khaas kar pehli/"cold" seek par). Ab play/pause
         -- dono OnSeekCompleteListener ke andar, seek MUKAMMAL hone ke
         -- BAAD hote hain - is se har lafz reliably bajta hai.
-        wbwPlayer.setOnSeekCompleteListener(MediaPlayer.OnSeekCompleteListener{onSeekComplete=function(p)
+        WBW.player.setOnSeekCompleteListener(MediaPlayer.OnSeekCompleteListener{onSeekComplete=function(p)
           pcall(function() p.start() end)
-          wbwStopHandle = Runnable{run=function()
-            pcall(function() if wbwPlayer and wbwPlayer.isPlaying() then wbwPlayer.pause() end end)
-            wbwStopHandle = nil
-            if screen == "wbwmode" and wbwOnWordPlaybackDone then wbwOnWordPlaybackDone() end
+          WBW.stopHandle = Runnable{run=function()
+            pcall(function() if WBW.player and WBW.player.isPlaying() then WBW.player.pause() end end)
+            WBW.stopHandle = nil
+            if screen == "wbwmode" and WBW.onWordPlaybackDone then WBW.onWordPlaybackDone() end
           end}
-          handler.postDelayed(wbwStopHandle, wbwPendingWordDuration)
+          handler.postDelayed(WBW.stopHandle, WBW.pendingWordDuration)
         end})
-        wbwPlayer.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
+        WBW.player.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
           -- FIX: kuch hosts (yahi everyayah.com bhi) is device/Android
           -- version par seedhe streaming se theek se play nahi hote -
           -- Ayat-ba-Ayat/Duas mode (playReliable) mein isi wajah se
@@ -3640,7 +3729,7 @@ local function wbwLoadAyah(surahIdx, ayahNum, onReady)
           end
           return true
         end})
-        wbwPlayer.prepareAsync()
+        WBW.player.prepareAsync()
       end)
       if not ok then onReady(false, "Audio player error.") end
     end)
@@ -3665,16 +3754,16 @@ end
 
 function showWordByWordMode(surahIdx, startAyah)
   screen = "wbwmode"
-  wbwSurahIdx = surahIdx
-  wbwAyahNum = startAyah or 1
+  WBW.surahIdx = surahIdx
+  WBW.ayahNum = startAyah or 1
   wbwStopAudio()
   local bgColor, textColor = getThemeColors()
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() wbwStopAudio() showPlayer(wbwSurahIdx) end},
-      {TextView, id="wbwHeaderTxt", text=surahNames[surahIdx] .. " - Ayat " .. wbwAyahNum .. "/" .. (surahAyahCounts[surahIdx] or "?"), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+      {Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() wbwStopAudio() showPlayer(WBW.surahIdx) end},
+      {TextView, id="wbwHeaderTxt", text=surahNames[surahIdx] .. " - Ayat " .. WBW.ayahNum .. "/" .. (surahAyahCounts[surahIdx] or "?"), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {TextView, id="wbwStatusTxt", text="Loading...", textSize="12sp", textColor="#777777", padding="6dp", gravity="center"},
     {TextView, id="wbwWordTxt", text="", textSize="46sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="center", padding="10dp", layout_width=-1, layout_height=0, layout_weight=3, contentDescription="Current word"},
@@ -3693,22 +3782,22 @@ function showWordByWordMode(surahIdx, startAyah)
   applyWallpaper(mainLayout, bgColor)
 
   local function renderWord()
-    if wbwWords and wbwWords[wbwWordIdx] then
+    if WBW.words and WBW.words[WBW.wordIdx] then
       pcall(function()
-        wbwWordTxt.setText(wbwWords[wbwWordIdx])
-        wbwCountTxt.setText("Lafz " .. wbwWordIdx .. " / " .. #wbwWords)
+        wbwWordTxt.setText(WBW.words[WBW.wordIdx])
+        wbwCountTxt.setText("Lafz " .. WBW.wordIdx .. " / " .. #WBW.words)
       end)
     end
   end
 
   local playCurrentWord
   playCurrentWord = function()
-    if wbwStopHandle then pcall(function() handler.removeCallbacks(wbwStopHandle) end) wbwStopHandle = nil end
-    if not wbwPlayer then
+    if WBW.stopHandle then pcall(function() handler.removeCallbacks(WBW.stopHandle) end) WBW.stopHandle = nil end
+    if not WBW.player then
       Toast.makeText(activity, "Audio abhi taiyar nahi hui, thoda intezar karein.", 0).show()
       return
     end
-    local t = wbwTimings and wbwTimings[wbwWordIdx]
+    local t = WBW.timings and WBW.timings[WBW.wordIdx]
     if not t then
       -- FIX: pehle "andazan" (approximate) timing sirf ek dafa, audio
       -- "prepared" hote hi bana li jati thi - us waqt duration kabhi kabhi
@@ -3717,13 +3806,13 @@ function showWordByWordMode(surahIdx, startAyah)
       -- available" aata tha. Ab isay YAHIN, Sunein dabane ke waqt banate
       -- hain - is waqt tak duration hamesha reliably mil jati hai.
       local dur = 0
-      pcall(function() dur = wbwPlayer.getDuration() end)
-      if dur and dur > 0 and wbwWords and #wbwWords > 0 then
-        local st = math.floor((wbwWordIdx - 1) * dur / #wbwWords)
-        local en = math.floor(wbwWordIdx * dur / #wbwWords)
+      pcall(function() dur = WBW.player.getDuration() end)
+      if dur and dur > 0 and WBW.words and #WBW.words > 0 then
+        local st = math.floor((WBW.wordIdx - 1) * dur / #WBW.words)
+        local en = math.floor(WBW.wordIdx * dur / #WBW.words)
         t = {st, en}
-        wbwTimings = wbwTimings or {}
-        wbwTimings[wbwWordIdx] = t
+        WBW.timings = WBW.timings or {}
+        WBW.timings[WBW.wordIdx] = t
       end
     end
     if not t then
@@ -3738,13 +3827,13 @@ function showWordByWordMode(surahIdx, startAyah)
     -- liye wahan chalta mehsoos hota tha). Ab start() aur stop-timer dono
     -- OnSeekCompleteListener ke andar, seek MUKAMMAL hone ke BAAD shuru
     -- hote hain.
-    wbwPendingWordDuration = math.max(en - st, 200)
-    pcall(function() wbwPlayer.seekTo(st) end)
+    WBW.pendingWordDuration = math.max(en - st, 200)
+    pcall(function() WBW.player.seekTo(st) end)
   end
 
-  wbwOnWordPlaybackDone = function()
-    if wbwAutoAdv and wbwWords and wbwWordIdx < #wbwWords then
-      wbwWordIdx = wbwWordIdx + 1
+  WBW.onWordPlaybackDone = function()
+    if WBW.autoAdv and WBW.words and WBW.wordIdx < #WBW.words then
+      WBW.wordIdx = WBW.wordIdx + 1
       renderWord()
       playCurrentWord()
     end
@@ -3754,9 +3843,9 @@ function showWordByWordMode(surahIdx, startAyah)
     pcall(function()
       wbwStatusTxt.setText("Loading...")
       wbwWordTxt.setText("")
-      wbwHeaderTxt.setText(surahNames[wbwSurahIdx] .. " - Ayat " .. wbwAyahNum .. "/" .. (surahAyahCounts[wbwSurahIdx] or "?"))
+      wbwHeaderTxt.setText(surahNames[WBW.surahIdx] .. " - Ayat " .. WBW.ayahNum .. "/" .. (surahAyahCounts[WBW.surahIdx] or "?"))
     end)
-    wbwLoadAyah(wbwSurahIdx, wbwAyahNum, function(ok, err, exact)
+    wbwLoadAyah(WBW.surahIdx, WBW.ayahNum, function(ok, err, exact)
       if screen ~= "wbwmode" then return end
       if ok then
         pcall(function()
@@ -3765,7 +3854,7 @@ function showWordByWordMode(surahIdx, startAyah)
           else
             wbwStatusTxt.setText("Reciter: Mishary Alafasy - andazan (approximate) taqseem, is ayat ke liye exact lafz-timing maujood nahi")
           end
-          saveLastAyahProgress(wbwSurahIdx, wbwAyahNum)
+          saveLastAyahProgress(WBW.surahIdx, WBW.ayahNum)
         end)
         renderWord()
       else
@@ -3775,27 +3864,27 @@ function showWordByWordMode(surahIdx, startAyah)
   end
 
   wbwPlayWordBtn.onClick = function() playCurrentWord() end
-  wbwPrevWordBtn.onClick = function() if wbwWords and wbwWordIdx > 1 then wbwWordIdx = wbwWordIdx - 1 renderWord() end end
-  wbwNextWordBtn.onClick = function() if wbwWords and wbwWordIdx < #wbwWords then wbwWordIdx = wbwWordIdx + 1 renderWord() end end
+  wbwPrevWordBtn.onClick = function() if WBW.words and WBW.wordIdx > 1 then WBW.wordIdx = WBW.wordIdx - 1 renderWord() end end
+  wbwNextWordBtn.onClick = function() if WBW.words and WBW.wordIdx < #WBW.words then WBW.wordIdx = WBW.wordIdx + 1 renderWord() end end
 
   wbwAutoBtn.onClick = function()
-    wbwAutoAdv = not wbwAutoAdv
-    wbwAutoBtn.setText(wbwAutoAdv and "Auto: ON" or "Auto: OFF")
-    pcall(function() wbwAutoBtn.setBackgroundColor(Color.parseColor(wbwAutoAdv and "#1565C0" or "#607D8B")) end)
+    WBW.autoAdv = not WBW.autoAdv
+    wbwAutoBtn.setText(WBW.autoAdv and "Auto: ON" or "Auto: OFF")
+    pcall(function() wbwAutoBtn.setBackgroundColor(Color.parseColor(WBW.autoAdv and "#1565C0" or "#607D8B")) end)
   end
 
   wbwPrevAyahBtn.onClick = function()
-    if wbwAyahNum > 1 then wbwAyahNum = wbwAyahNum - 1
-    elseif wbwSurahIdx > 1 then wbwSurahIdx = wbwSurahIdx - 1 wbwAyahNum = surahAyahCounts[wbwSurahIdx] or 1
+    if WBW.ayahNum > 1 then WBW.ayahNum = WBW.ayahNum - 1
+    elseif WBW.surahIdx > 1 then WBW.surahIdx = WBW.surahIdx - 1 WBW.ayahNum = surahAyahCounts[WBW.surahIdx] or 1
     else return end
     wbwStopAudio()
     loadAndRender()
   end
 
   wbwNextAyahBtn.onClick = function()
-    local mx = surahAyahCounts[wbwSurahIdx] or 1
-    if wbwAyahNum < mx then wbwAyahNum = wbwAyahNum + 1
-    elseif wbwSurahIdx < 114 then wbwSurahIdx = wbwSurahIdx + 1 wbwAyahNum = 1
+    local mx = surahAyahCounts[WBW.surahIdx] or 1
+    if WBW.ayahNum < mx then WBW.ayahNum = WBW.ayahNum + 1
+    elseif WBW.surahIdx < 114 then WBW.surahIdx = WBW.surahIdx + 1 WBW.ayahNum = 1
     else return end
     wbwStopAudio()
     loadAndRender()
@@ -3834,11 +3923,28 @@ function showAyahByAyah(surahIdx, autoPlayAyat)
     },
     {TextView, id="txtAyahStatus", text="Reciter: Mishary Alafasy (fixed reciter for this mode). Tap an Ayat to play it, long-press for Copy/Share.", textSize="11sp", textColor="#777777", padding="8dp"},
     (lastAyahProgress[surahIdx] and {Button, id="btnResumeAyah", text="Resume from Ayat " .. lastAyahProgress[surahIdx], textSize="13sp", backgroundColor="#FF8F00", textColor=-1, layout_margin="8dp"}) or {LinearLayout, orientation=0, layout_width=-1, layout_height=0},
+    -- NAYA (v2.5): Ayat Repeat spinner seedha is screen par (Menu nahi jana)
+    {LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, padding="8dp",
+      {TextView, text="Ayat Repeat:", textSize="13sp", textColor=textColor, layout_marginRight="8dp"},
+      {Spinner, id="ayahRepeatSpinner", layout_width=0, layout_weight=1}
+    },
     {TextView, id="txtDownloadProgress", text="Downloaded for offline: " .. alreadyDownloaded .. " / " .. totalAyahs, textSize="12sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="8dp"},
     {Button, id="btnDownloadAllAyahs", text="Download All Ayahs for Offline", textSize="13sp", backgroundColor="#1976D2", textColor=-1, layout_margin="8dp"},
     {ListView, id="ayahList", layout_width=-1, layout_height=0, layout_weight=1}
   })
   applyWallpaper(mainLayout, bgColor)
+
+  do
+    local repLabels = {"1x (No Repeat)", "2x", "3x", "5x", "10x"}
+    local repValues = {1, 2, 3, 5, 10}
+    local repIndex = 0
+    for i,v in ipairs(repValues) do if v == PS.ayahRepeat then repIndex = i - 1 break end end
+    ayahRepeatSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repLabels))
+    ayahRepeatSpinner.setSelection(repIndex)
+    ayahRepeatSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
+      saveAyahRepeatCount(repValues[pos+1])
+    end})
+  end
 
   -- NAYA (v2.2): "Repeat" - Settings mein jo count chuna hai, usi hisaab se
   -- yeh Ayat lagataar utni dafa bajti hai (translation bhi har dafa, agar
@@ -3847,7 +3953,7 @@ function showAyahByAyah(surahIdx, autoPlayAyat)
   local function playAyahRepeated(n, remainingRepeats)
     if n < 1 or n > totalAyahs then return end
     if remainingRepeats < 1 then return end
-    local repeatTotal = ayahRepeatCount
+    local repeatTotal = PS.ayahRepeat
     local repeatNow = repeatTotal - remainingRepeats + 1
     local statusSuffix = (repeatTotal > 1) and (" (repeat " .. repeatNow .. "/" .. repeatTotal .. ")") or ""
     pcall(function() txtAyahStatus.setText("Playing Ayat " .. n .. " of " .. totalAyahs .. statusSuffix) end)
@@ -3868,7 +3974,7 @@ function showAyahByAyah(surahIdx, autoPlayAyat)
       end
     end)
   end
-  local function playAyah(n) playAyahRepeated(n, ayahRepeatCount) end
+  local function playAyah(n) playAyahRepeated(n, PS.ayahRepeat) end
 
   if lastAyahProgress[surahIdx] and btnResumeAyah then
     btnResumeAyah.onClick = function() playAyah(lastAyahProgress[surahIdx]) end
@@ -4171,7 +4277,15 @@ function showPlayer(index)
     {Button, text="Ruku Mode", textSize="14sp", layout_marginBottom="10dp", backgroundColor="#6A1B9A", textColor=-1, onClick=function() showRukuMode(index) end},
     {Button, text="Word-by-Word (Hifz)", textSize="14sp", layout_marginBottom="20dp", backgroundColor="#B71C1C", textColor=-1, contentDescription="Word by word memorization mode", onClick=function() showWbwStartDialog(index) end},
 
-    {SeekBar, id="skBar", layout_width=-1, layout_marginBottom="20dp"},
+    {SeekBar, id="skBar", layout_width=-1, layout_marginBottom="10dp"},
+    -- NAYA (v2.5): Play Speed + Surah Repeat spinner seedha player screen par
+    -- (Menu mein jane ki zaroorat nahi) - Surah + 30 Para dono yahan se
+    {LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, layout_marginBottom="6dp",
+      {TextView, text="Speed:", textSize="13sp", textColor=textColor, layout_marginRight="6dp"},
+      {Spinner, id="playerSpeedSpinner", layout_width=0, layout_weight=1},
+      {TextView, text="Repeat:", textSize="13sp", textColor=textColor, layout_marginLeft="8dp", layout_marginRight="6dp"},
+      {Spinner, id="playerRepeatSpinner", layout_width=0, layout_weight=1}
+    },
     {LinearLayout, orientation=0, gravity="center", layout_width=-1,
       {Button, text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() playPrevSurah() end},
       {Button, text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() seekRewind() end},
@@ -4189,6 +4303,33 @@ function showPlayer(index)
 
   btnDownload.onClick = function() if File(localFilePath).exists() then confirmDelete(localFilePath, function() showPlayer(currentIndex) end) else downloadSurah(onlineUrl, fileName, surahName .. (isUrdu and " (Urdu Tarjuma)" or isHindi and " (Hindi Tarjuma)" or isPunjabi and " (Punjabi Tarjuma)" or isEnglish and " (English Tarjuma)" or isSindhi and " (Sindhi Tarjuma)" or "")) end end
 
+  -- NAYA (v2.5): player-screen speed + surah-repeat spinners
+  do
+    local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"}
+    local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
+    local speedIndex = 1
+    for i,v in ipairs(speedValues) do if math.abs(v - PS.speed) < 0.01 then speedIndex = i - 1 break end end
+    playerSpeedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels))
+    playerSpeedSpinner.setSelection(speedIndex)
+    playerSpeedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
+      savePlaybackSpeed(speedValues[pos+1])
+      if mp then applyPlaybackSpeed(mp) end
+      if duaMp then applyPlaybackSpeed(duaMp) end
+    end})
+    local repLabels = {"1x", "2x", "3x", "5x", "Loop"}
+    local repValues = {1, 2, 3, 5, 0}
+    local repIndex = 0
+    for i,v in ipairs(repValues) do if v == PS.surahRepeat then repIndex = i - 1 break end end
+    playerRepeatSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repLabels))
+    playerRepeatSpinner.setSelection(repIndex)
+    playerRepeatSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
+      saveSurahRepeatCount(repValues[pos+1])
+      PS.surahRepeatRem = PS.surahRepeat
+    end})
+  end
+
+  PS.surahRepeatRem = PS.surahRepeat
+
   stopPlayer(function()
   playerReady = false
   playIntentPending = false
@@ -4199,7 +4340,7 @@ function showPlayer(index)
   mp.setDataSource(playUrl) mp.prepareAsync()
   mp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p, w, e) Toast.makeText(activity, "Audio error.", 0).show() if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end return true end})
   mp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
-    if Build.VERSION.SDK_INT >= 23 then p.setPlaybackParams(p.getPlaybackParams().setSpeed(playbackSpeed)) end
+    applyPlaybackSpeed(p)
     skBar.setMax(p.getDuration())
     playerReady = true
     -- FIX: agar user ne load hone se pehle hi Play dabaya tha, ab turant
@@ -4237,13 +4378,24 @@ function showPlayer(index)
   mp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function()
     completedSurahs[index] = true
     saveCompletedSurahs()
+    -- NAYA (v2.5): Surah Repeat (1x/2x/3x/5x/Loop) - Loop=0 means infinite
+    if PS.surahRepeat == 0 then
+      pcall(function() if mp then mp.seekTo(0) mp.start() end end)
+      return
+    end
+    if PS.surahRepeatRem > 1 then
+      PS.surahRepeatRem = PS.surahRepeatRem - 1
+      pcall(function() if mp then mp.seekTo(0) mp.start() end end)
+      return
+    end
+    PS.surahRepeatRem = PS.surahRepeat
     if autoNextMode then playNextSurah() else btnPlayPause.setText("▶ " .. tr("Play")) cancelNotification() end
   end})
   skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and mp then mp.seekTo(p) end end})
   end)
 end
 
--- FIX (v2.2): pehle yahan mp/duaMp/wbwPlayer ko PAUSE kar diya jata tha
+-- FIX (v2.2): pehle yahan mp/duaMp/WBW.player ko PAUSE kar diya jata tha
 -- jab bhi screen band hoti ya app background mein jati (taake "audio
 -- background mein chalti rehti hai" wala purana masla na ho) - lekin
 -- isi wajah se yeh naya masla ban gaya tha ke sirf SCREEN band karne se
@@ -4252,7 +4404,7 @@ end
 -- ya kisi aur app par chale jayein) bhi chalti rehti hai - jaisa har
 -- audio/Quran app mein hota hai - sirf tab rukegi jab user khud
 -- Pause/Stop dabaye ya track khatam ho jaye. MediaPlayer.setWakeMode
--- (jahan bhi mp/duaMp/wbwPlayer banaye jate hain) yeh yaqeeni banata hai
+-- (jahan bhi mp/duaMp/WBW.player banaye jate hain) yeh yaqeeni banata hai
 -- ke screen band hone par CPU "so" na jaye aur streaming/download beech
 -- mein na atke.
 function onPause() end
@@ -4285,7 +4437,7 @@ function onKeyDown(keyCode, event)
     elseif screen == "ayahmode" then showPlayer(currentIndex) return true
     elseif screen == "rukumode" then showPlayer(currentIndex) return true
     elseif screen == "rukuplayer" then showRukuMode(currentIndex) return true
-    elseif screen == "wbwmode" then wbwStopAudio() showPlayer(wbwSurahIdx) return true
+    elseif screen == "wbwmode" then wbwStopAudio() showPlayer(WBW.surahIdx) return true
     elseif screen == "surahlist" then showHome() return true
     elseif screen == "socialmedia" then showSettings() return true
     elseif screen == "fullquranlist" then showMore() return true
