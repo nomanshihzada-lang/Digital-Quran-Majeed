@@ -1,1 +1,46 @@
-2.5
+2.6
+
+Assalam-o-Alaikum!
+Version: 2.6
+
+--- WHAT'S NEW IN V2.6 ---
+
+1) Azan player:
+- Quran-player-style controls: Play/Pause, rewind, forward, seek bar, next/previous, download/delete offline.
+- 15 verified recordings are available in the list (10 Internet Archive recordings and 5 direct tracks).
+- Downloads save under Downloads/Azan_Audio; offline files play through the same player.
+
+2) City-wise prayer Azan schedule:
+- Uses the saved City/Country and the prayer timings already shown on Home.
+- Fajr, Dhuhr, Asr, Maghrib and Isha can each be switched on/off and assigned an Azan recording.
+- Save schedules the next prayer alarms and posts an Azan playback notification when they fire.
+- The exact-alarm settings screen and notification permission are available from the schedule page.
+- Android host-project requirements: declare SCHEDULE_EXACT_ALARM and RECEIVE_BOOT_COMPLETED and provide a manifest boot receiver for exact/background/reboot persistence. In-script dynamic receivers cannot guarantee delivery after force-stop or reboot.
+
+3) Hijri date correction:
+- Prayer times now request the device's local Gregorian date explicitly.
+- The displayed Hijri date comes from the same AlAdhan response; a saved -2 to +2 day control allows local moon-sighting correction.
+- No country-wide offset is forced. For 24 September 2026 the API returned 13 Rabi al-Thani 1448 for Abbottabad; use the adjustment control if the local moon-sighting calendar differs.
+
+4) Advanced search:
+- Surah/reciter/translation/dua filters, fuzzy matching, English meanings, and Arabic/Urdu search within the listed duas.
+- Microphone button starts Android's speech-recognition intent; it requires an installed speech-recognition provider.
+
+5) Duas:
+- 130 unique, category-labelled entries after merging six duplicate text/audio rows.
+- 119 entries have audio recordings; 11 remain text-first. The original category assignments are kept; duplicate text/audio entries now share one row.
+- English meaning/description is included for all 130 entries. The 40 Rabbana Quranic supplications include English meanings and Quran references; short Arabic/Urdu duas have English meanings. For audio-only recordings without transcripts, the English text is a topic description, not a verbatim translation.
+
+--- FEATURES CARRIED FORWARD FROM V2.5 ---
+
+1) Eight whole-surah audio translation collections, each mapped for all 114 surahs: English (Ibrahim Walk), English (Mishary), Hindi, Bengali, French, Sindhi, Pashto and Farsi.
+2) Urdu Whole-Surah Qari audio: Waheed Zafar Qasmi and Shakir Qasmi, 114 surahs each.
+3) Farsi ayah-by-ayah translations: Fooladvand/Hedayatfar and Makarem/Kabiri.
+4) Original Urdu two-voice ayah audio, Hindi/Punjabi/English/Sindhi translation paths, 30-Para playback, downloads and offline cache.
+5) Existing Quran reading/player, speed and repeat controls, Tafseer, Hadith, Tasbeeh, names, bookmarks, daily duas, prayer-time city entry, Hijri display and accessibility descriptions retained.
+
+Audio source maps remain inline in this one Lua file; no JSON/module sidecar is needed. New live sources are only used where availability was checked; the extra language list is unchanged from v2.5 because the existing mapped sources already cover the requested translation set.
+
+--- CREDITS ---
+Lead Developer: Numan Khan.
+May Allah accept our continuous efforts!
