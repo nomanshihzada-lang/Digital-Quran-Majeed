@@ -17,9 +17,12 @@ import "java.net.URLEncoder"
 import "java.io.BufferedReader"
 import "java.io.InputStreamReader"
 import "android.text.TextWatcher"
+import "android.speech.RecognizerIntent"
+import "java.util.Calendar"
+import "java.util.TimeZone"
 
 --------------------------------------------------
--- QURAN MAJEED v2.5 - Speed/Repeat on players, Para 14 fix, Hijri, richer Duas
+-- QURAN MAJEED v2.6 - City Azan schedules, Azan player, Hijri adjustment, English Duas, voice search
 -- Lead: Numan Khan
 --------------------------------------------------
 -- NOTE (v2.2): screen-off/background playback fix (MediaPlayer.setWakeMode,
@@ -81,6 +84,9 @@ if not File(duaAudioDir).exists() then File(duaAudioDir).mkdirs() end
 
 local paraAudioDir = publicDownloadsRoot .. "/Para_Audio/"
 if not File(paraAudioDir).exists() then File(paraAudioDir).mkdirs() end
+
+local azanAudioDir = publicDownloadsRoot .. "/Azan_Audio/"
+if not File(azanAudioDir).exists() then File(azanAudioDir).mkdirs() end
 
 local duaMp = nil
 
@@ -185,6 +191,8 @@ local prayerIsha = prefs.getString("pIsha", "20:30")
 -- hoti hai, bas ab tak use nahi ho raha tha)
 local prayerSunrise = prefs.getString("pSunrise", "06:15")
 local savedHijriDate = prefs.getString("hijriDate", "Update location for Hijri Date")
+local hijriDayOffset = prefs.getInt("hijriDayOffset", 0)
+local savedPrayerTimezone = prefs.getString("prayerTimeZone", "Asia/Karachi")
 
 --------------------------------------------------
 -- Small helper: sanitize a reciter name into a safe filename fragment
@@ -301,14 +309,14 @@ local function fetchPrayerTimes(c, cntry, onDone)
       -- 1-2 days behind Saudi Umm al-Qura. Aladhan default Hijri ~ Umm al-Qura
       -- (e.g. 12 Rabi-ul-Thani jab Pakistan mein 10 ho). Country Pakistan/
       -- India/Bangladesh par adjustment=-2 taake real local tareekh aaye.
+      -- v2.6: Quran Majeed date is the primary date source. No country-wide
+      -- hard-coded correction: lunar sighting differs by locality. The user
+      -- can apply a persistent -2..+2 day correction in the Home date panel.
       local adj = 0
-      local cnLower = tostring(cntry or ""):lower()
-      if cnLower:find("pakistan", 1, true) or cnLower:find("india", 1, true) or cnLower:find("bangladesh", 1, true) then
-        adj = -2
-      end
-      local adjQ = (adj ~= 0) and ("&adjustment=" .. adj) or ""
-      local byCity = "https://api.aladhan.com/v1/timingsByCity?city="..URLEncoder.encode(c).."&country="..URLEncoder.encode(cntry).."&method=1"..adjQ
-      local byAddress = "https://api.aladhan.com/v1/timingsByAddress?address="..URLEncoder.encode(c..", "..cntry).."&method=1"..adjQ
+      local adjQ = ""
+      local todayApiDate = os.date("%d-%m-%Y")
+      local byCity = "https://api.aladhan.com/v1/timingsByCity/"..todayApiDate.."?city="..URLEncoder.encode(c).."&country="..URLEncoder.encode(cntry).."&method=1"..adjQ
+      local byAddress = "https://api.aladhan.com/v1/timingsByAddress/"..todayApiDate.."?address="..URLEncoder.encode(c..", "..cntry).."&method=1"..adjQ
       local result = tryEndpoint(byCity)
       if not result then result = tryEndpoint(byAddress) end
       local success = (result ~= nil)
@@ -334,17 +342,41 @@ local function fetchPrayerTimes(c, cntry, onDone)
             -- JSON mein PEHLA "year" pakad leta tha (Gregorian 2026) - is
             -- wajah se Hijri date galat/confusing dikhti thi. Ab strictly
             -- hijri block ke andar se year nikalte hain.
-            local hjDay = result:match('"hijri":{.-"day":"(.-)"')
-            local hjMonthNum = result:match('"hijri":{.-"month":{"number":(%d+)')
+            local hijriPayload = result
+            if hijriDayOffset ~= 0 then
+              -- Ask the same official date API for the Gregorian day shifted
+              -- by the user's local moon-sighting correction. Lua os.time
+              -- normalizes month/year boundaries safely.
+              local shiftedCal=Calendar.getInstance(TimeZone.getTimeZone(savedPrayerTimezone))
+              shiftedCal.setTimeInMillis(os.time()*1000)
+              shiftedCal.add(Calendar.DAY_OF_MONTH,hijriDayOffset)
+              local gregDate=string.format("%02d-%02d-%04d",shiftedCal.get(Calendar.DAY_OF_MONTH),shiftedCal.get(Calendar.MONTH)+1,shiftedCal.get(Calendar.YEAR))
+              local cvOk, converted = pcall(function()
+                local con=URL("https://api.aladhan.com/v1/gToH/" .. gregDate).openConnection()
+                con.setConnectTimeout(8000) con.setReadTimeout(10000)
+                local rd=BufferedReader(InputStreamReader(con.getInputStream()))
+                local body="" local ln=rd.readLine()
+                while ln do body=body..ln ln=rd.readLine() end
+                rd.close()
+                if body:find('"hijri"') then return body end
+                return nil
+              end)
+              if cvOk and converted then hijriPayload=converted end
+            end
+            local hjDay = hijriPayload:match('"hijri":{.-"day":"(.-)"')
+            local hjMonthNum = hijriPayload:match('"hijri":{.-"month":{"number":(%d+)')
             local hjMonth = hjMonthNum and hijriMonthNames[tonumber(hjMonthNum)]
-            local hjYear = result:match('"hijri":{.-"year":"(%d+)"')
+            local hjYear = hijriPayload:match('"hijri":{.-"year":"(%d+)"')
+            local tzName = result:match('"timezone":"(.-)"') or savedPrayerTimezone
             if f then
               savedCity = c savedCountry = cntry
+              savedPrayerTimezone = tzName or savedPrayerTimezone
               prayerFajr = f prayerDhuhr = d prayerAsr = a prayerMaghrib = m prayerIsha = i
               if sr then prayerSunrise = sr end
               if hjDay and hjMonth and hjYear then savedHijriDate = hjDay.." "..hjMonth.." "..hjYear else savedHijriDate = "Hijri Fetch Error" end
               lastPrayerFetchDate = todayDateString()
-              prefs.edit().putString("userCity", c).putString("userCountry", cntry).putString("pFajr", f).putString("pDhuhr", d).putString("pAsr", a).putString("pMaghrib", m).putString("pIsha", i).putString("pSunrise", prayerSunrise).putString("hijriDate", savedHijriDate).putString("lastPrayerFetchDate", lastPrayerFetchDate).apply()
+              prefs.edit().putString("userCity", c).putString("userCountry", cntry).putString("pFajr", f).putString("pDhuhr", d).putString("pAsr", a).putString("pMaghrib", m).putString("pIsha", i).putString("pSunrise", prayerSunrise).putString("hijriDate", savedHijriDate).putString("prayerTimeZone", savedPrayerTimezone).putString("lastPrayerFetchDate", lastPrayerFetchDate).apply()
+              pcall(function() scheduleCityAzans() end)
               ok = true
             end
           end
@@ -810,6 +842,1252 @@ local function buildSindhiSurahUrl(surahIdx)
   return URLBASES.sindhi .. urlEncodeBytes(fn)
 end
 
+-- ======================================================================
+-- v2.5 AUDIO TRANSLATIONS: INLINE MAPS (114 surahs per collection)
+-- All filenames are embedded in this main Lua file; no require/dofile.
+-- ======================================================================
+local V25 = { items = {}, files = {}, modes = {}, qariItems = {}, qariFiles = {} }
+V25.items["EN"] = "Qur_aan"
+V25.files["EN"] = {
+    ["1"] = "001-SurahAl-faatiha.mp3",
+    ["2"] = "002-SurahAl-baqarah.mp3",
+    ["3"] = "003-SurahAal-imraan.mp3",
+    ["4"] = "004-SurahAn-nisaa.mp3",
+    ["5"] = "005-SurahAl-maaidah.mp3",
+    ["6"] = "006-SurahAl-anaam.mp3",
+    ["7"] = "007-SurahAl-araaf.mp3",
+    ["8"] = "008-SurahAl-anfaal.mp3",
+    ["9"] = "009-SurahAt-tawbah.mp3",
+    ["10"] = "010-SurahYunus.mp3",
+    ["11"] = "011-SurahHud.mp3",
+    ["12"] = "012-SurahYusuf.mp3",
+    ["13"] = "013-SurahAr-rad.mp3",
+    ["14"] = "014-SurahIbraheem.mp3",
+    ["15"] = "015-SurahAl-hijr.mp3",
+    ["16"] = "016-SurahAn-nahl.mp3",
+    ["17"] = "017-SurahAl-israa.mp3",
+    ["18"] = "018-SurahAl-kahf.mp3",
+    ["19"] = "019-SurahMaryam.mp3",
+    ["20"] = "020-SurahTaa-haa.mp3",
+    ["21"] = "021-SurahAl-anbiyaa.mp3",
+    ["22"] = "022-SurahAl-hajj.mp3",
+    ["23"] = "023-SurahAl-muminun.mp3",
+    ["24"] = "024-SurahAn-nur.mp3",
+    ["25"] = "025-SurahAl-furqaan.mp3",
+    ["26"] = "026-SurahAsh-shuaraa.mp3",
+    ["27"] = "027-SurahAn-naml.mp3",
+    ["28"] = "028-SurahAl-qasas.mp3",
+    ["29"] = "029-SurahAl-ankabut.mp3",
+    ["30"] = "030-SurahAr-rum.mp3",
+    ["31"] = "031-SurahLuqmaan.mp3",
+    ["32"] = "032-SurahAs-sajdah.mp3",
+    ["33"] = "033-SurahAl-ahzaab.mp3",
+    ["34"] = "034-SurahSaba.mp3",
+    ["35"] = "035-SurahFaatir.mp3",
+    ["36"] = "036-SurahYaa-seen.mp3",
+    ["37"] = "037-SurahAs-saaffaat.mp3",
+    ["38"] = "038-SurahSaad.mp3",
+    ["39"] = "039-SurahAz-zumar.mp3",
+    ["40"] = "040-SurahGhaafir.mp3",
+    ["41"] = "041-SurahFussilat.mp3",
+    ["42"] = "042-SurahAsh-shura.mp3",
+    ["43"] = "043-SurahAz-zukhruf.mp3",
+    ["44"] = "044-SurahAd-dukhaan.mp3",
+    ["45"] = "045-SurahAl-jaathiyah.mp3",
+    ["46"] = "046-SurahAl-ahqaaf.mp3",
+    ["47"] = "047-SurahMuhammad.mp3",
+    ["48"] = "048-SurahAl-fath.mp3",
+    ["49"] = "049-SurahAl-hujuraat.mp3",
+    ["50"] = "050-SurahQaaf.mp3",
+    ["51"] = "051-SurahAdh-dhaariyaat.mp3",
+    ["52"] = "052-SurahAt-tur.mp3",
+    ["53"] = "053-SurahAn-najm.mp3",
+    ["54"] = "054-SurahAl-qamar.mp3",
+    ["55"] = "055-SurahAr-rahmaan.mp3",
+    ["56"] = "056-SurahAl-waaqiah.mp3",
+    ["57"] = "057-SurahAl-hadeed.mp3",
+    ["58"] = "058-SurahAl-mujaadalah.mp3",
+    ["59"] = "059-SurahAl-hashr.mp3",
+    ["60"] = "060-SurahAl-mumtahinah.mp3",
+    ["61"] = "061-SurahAs-saff.mp3",
+    ["62"] = "062-SurahAl-jumuah.mp3",
+    ["63"] = "063-SurahAl-munaafiqun.mp3",
+    ["64"] = "064-SurahAt-taghaabun.mp3",
+    ["65"] = "065-SurahAt-talaaq.mp3",
+    ["66"] = "066-SurahAt-tahreem.mp3",
+    ["67"] = "067-SurahAl-mulk.mp3",
+    ["68"] = "068-SurahAl-qalam.mp3",
+    ["69"] = "069-SurahAl-haaqqah.mp3",
+    ["70"] = "070-SurahAl-maaarij.mp3",
+    ["71"] = "071-SurahNuh.mp3",
+    ["72"] = "072-SurahAl-jinn.mp3",
+    ["73"] = "073-SurahAl-muzzammil.mp3",
+    ["74"] = "074-SurahAl-muddaththir.mp3",
+    ["75"] = "075-SurahAl-qiyaamah.mp3",
+    ["76"] = "076-SurahAl-insaan.mp3",
+    ["77"] = "077-SurahAl-mursalaat.mp3",
+    ["78"] = "078-SurahAn-naba.mp3",
+    ["79"] = "079-SurahAl-naaziaat.mp3",
+    ["80"] = "080-Surahabasa.mp3",
+    ["81"] = "081-SurahAt-takweer.mp3",
+    ["82"] = "082-SurahAl-infitaar.mp3",
+    ["83"] = "083-SurahAl-mutaffifeen.mp3",
+    ["84"] = "084-SurahInshiqaaq.mp3",
+    ["85"] = "085-SurahAl-burooj.mp3",
+    ["86"] = "086-SurahAt-taariq.mp3",
+    ["87"] = "087-SurahAl-alaa.mp3",
+    ["88"] = "088-SurahAl-ghaashiyah.mp3",
+    ["89"] = "089-SurahAl-fajr.mp3",
+    ["90"] = "090-SurahAl-balad.mp3",
+    ["91"] = "091-SurahAsh-shams.mp3",
+    ["92"] = "092-SurahAl-layl.mp3",
+    ["93"] = "093-SurahAd-duha.mp3",
+    ["94"] = "094-SurahAsh-sharh.mp3",
+    ["95"] = "095-SurahAt-teen.mp3",
+    ["96"] = "096-SurahAl-alaq.mp3",
+    ["97"] = "097-SurahAl-qadr.mp3",
+    ["98"] = "098-SurahAl-bayyinah.mp3",
+    ["99"] = "099-SurahAz-zalzaalah.mp3",
+    ["100"] = "100-SurahAl-aadiyaat.mp3",
+    ["101"] = "101-SurahAl-qaariah.mp3",
+    ["102"] = "102-SurahAt-takaathur.mp3",
+    ["103"] = "103-SurahAl-asr.mp3",
+    ["104"] = "104-SurahAl-humazah.mp3",
+    ["105"] = "105-SurahAl-feel.mp3",
+    ["106"] = "106-SurahQuraysh.mp3",
+    ["107"] = "107-SurahAl-maaun.mp3",
+    ["108"] = "108-SurahAl-kawthar.mp3",
+    ["109"] = "109-SurahAl-kaafirun.mp3",
+    ["110"] = "110-SurahAn-nasr.mp3",
+    ["111"] = "111-SurahAl-masad.mp3",
+    ["112"] = "112-SurahAl-ikhlaas.mp3",
+    ["113"] = "113-SurahAl-falaq.mp3",
+    ["114"] = "114-SurahAn-naas.mp3",
+  }
+V25.items["EN2"] = "MishaariRashid-TheNobelQuran-English"
+V25.files["EN2"] = {
+    ["1"] = "001 surah_al_fatihah.mp3",
+    ["2"] = "002 surah_al_baqarah.mp3",
+    ["3"] = "003 surah_al_imran.mp3",
+    ["4"] = "004 surah_an_nisa.mp3",
+    ["5"] = "005 surah_al_maidah.mp3",
+    ["6"] = "006 surah_al_anam.mp3",
+    ["7"] = "007 surah_al_araf.mp3",
+    ["8"] = "008 surah_al_anfal.mp3",
+    ["9"] = "009 surah_at_tawbah.mp3",
+    ["10"] = "010 surah_yunus.mp3",
+    ["11"] = "011 surah_hud.mp3",
+    ["12"] = "012 surah_yusuf.mp3",
+    ["13"] = "013 surah_ar_rad.mp3",
+    ["14"] = "014 surah_ibrahim.mp3",
+    ["15"] = "015 surah_al_hijr.mp3",
+    ["16"] = "016 surah_an_nahl.mp3",
+    ["17"] = "017 surah_al_isra.mp3",
+    ["18"] = "018 surah_al_kahf.mp3",
+    ["19"] = "019 surah_maryam.mp3",
+    ["20"] = "020 surah_ta_ha.mp3",
+    ["21"] = "021 surah_al_anbiya.mp3",
+    ["22"] = "022 surah_al_hajj.mp3",
+    ["23"] = "023 surah_al_muminun.mp3",
+    ["24"] = "024 surah_an_nur.mp3",
+    ["25"] = "025 surah_al_furqan.mp3",
+    ["26"] = "026 surah_ash_shuara.mp3",
+    ["27"] = "027 surah_an_naml.mp3",
+    ["28"] = "028 surah_al_qasas.mp3",
+    ["29"] = "029 surah_al_ankabut.mp3",
+    ["30"] = "030 surah_ar_rum.mp3",
+    ["31"] = "031 surah_luqman.mp3",
+    ["32"] = "032 surah_as_sajdah.mp3",
+    ["33"] = "033 surah_al_ahzab.mp3",
+    ["34"] = "034 surah_saba.mp3",
+    ["35"] = "035 surah_fatir.mp3",
+    ["36"] = "036 surah_ya_sin.mp3",
+    ["37"] = "037 surah_as_safat.mp3",
+    ["38"] = "038 surah_sad.mp3",
+    ["39"] = "039 surah_az_zumar.mp3",
+    ["40"] = "040 surah_ghafir.mp3",
+    ["41"] = "041 surah_fussilat.mp3",
+    ["42"] = "042 surah_ash_shura.mp3",
+    ["43"] = "043 surah_az_zukhruf.mp3",
+    ["44"] = "044 surah_ad_dukhan.mp3",
+    ["45"] = "045 surah_al_jathiyah.mp3",
+    ["46"] = "046 surah_al_ahqaf.mp3",
+    ["47"] = "047 surah_muhammad.mp3",
+    ["48"] = "048 surah_al_fath.mp3",
+    ["49"] = "049 surah_al_hujurat.mp3",
+    ["50"] = "050 surah_qaf.mp3",
+    ["51"] = "051 surah_adh_dhariyat.mp3",
+    ["52"] = "052 surah_at_tur.mp3",
+    ["53"] = "053 surah_an_najm.mp3",
+    ["54"] = "054 surah_al_qamar.mp3",
+    ["55"] = "055 surah_ar_rahman.mp3",
+    ["56"] = "056 surah_al_waqiah.mp3",
+    ["57"] = "057 surah_al_hadid.mp3",
+    ["58"] = "058 surah_al_mujadilah.mp3",
+    ["59"] = "059 surah_al_hashr.mp3",
+    ["60"] = "060 surah_al_mumtahanah.mp3",
+    ["61"] = "061 surah_as_saff.mp3",
+    ["62"] = "062 surah_al_jumuah.mp3",
+    ["63"] = "063 surah_al_munafiqun.mp3",
+    ["64"] = "064 surah_at_taghabun.mp3",
+    ["65"] = "065 surah_at_talaq.mp3",
+    ["66"] = "066 surah_at_tahrim.mp3",
+    ["67"] = "067 surah_al_mulk.mp3",
+    ["68"] = "068 surah_al_qalam.mp3",
+    ["69"] = "069 surah_al_haqqah.mp3",
+    ["70"] = "070 surah_al_maarij.mp3",
+    ["71"] = "071 surah_nuh.mp3",
+    ["72"] = "072 surah_al_jinn.mp3",
+    ["73"] = "073 surah_al_muzzammil.mp3",
+    ["74"] = "074 surah_al_muddaththir.mp3",
+    ["75"] = "075 surah_al_qiyamah.mp3",
+    ["76"] = "076 surah_al_insan.mp3",
+    ["77"] = "077 surah_al_mursalat.mp3",
+    ["78"] = "078 surah_an_naba.mp3",
+    ["79"] = "079 surah_an_naziat.mp3",
+    ["80"] = "080 surah_abasa.mp3",
+    ["81"] = "081 surah_at_takwir.mp3",
+    ["82"] = "082 surah_al_infitar.mp3",
+    ["83"] = "083 surah_al_mutaffifin.mp3",
+    ["84"] = "084 surah_al_inshiqaq.mp3",
+    ["85"] = "085 surah_al_buruj.mp3",
+    ["86"] = "086 surah_at_tariq.mp3",
+    ["87"] = "087 surah_al_ala.mp3",
+    ["88"] = "088 surah_al_ghashiyah.mp3",
+    ["89"] = "089 surah_al_fajr.mp3",
+    ["90"] = "090 surah_al_balad.mp3",
+    ["91"] = "091 surah_ash_shams.mp3",
+    ["92"] = "092 surah_al_layl.mp3",
+    ["93"] = "093 surah_ad_duha.mp3",
+    ["94"] = "094 surah_ash_sharh.mp3",
+    ["95"] = "095 surah_at_tin.mp3",
+    ["96"] = "096 surah_al_alaq.mp3",
+    ["97"] = "097 surah_al_qadr.mp3",
+    ["98"] = "098 surah_al_bayyinah.mp3",
+    ["99"] = "099 surah_az_zalzalah.mp3",
+    ["100"] = "100 surah_al_adiyat.mp3",
+    ["101"] = "101 surah_al_qariah.mp3",
+    ["102"] = "102 surah_at_takathur.mp3",
+    ["103"] = "103 surah_al_asr.mp3",
+    ["104"] = "104 surah_al_humazah.mp3",
+    ["105"] = "105 surah_al_fil.mp3",
+    ["106"] = "106 surah_quraysh.mp3",
+    ["107"] = "107 surah_al_maun.mp3",
+    ["108"] = "108 surah_al_kawthar.mp3",
+    ["109"] = "109 surah_al_kafirun.mp3",
+    ["110"] = "110 surah_an_nasr.mp3",
+    ["111"] = "111 surah_al_masad.mp3",
+    ["112"] = "112 surah_al_ikhlas.mp3",
+    ["113"] = "113 surah_al_falaq.mp3",
+    ["114"] = "114 surah_an_nas.mp3",
+  }
+V25.items["HI"] = "hindi-meal"
+V25.files["HI"] = {
+    ["1"] = "001-Al-Fatiha.mp3",
+    ["2"] = "002-Al-Baqarah2.mp3",
+    ["3"] = "003-Al-imran.mp3",
+    ["4"] = "004-An-Nisa.mp3",
+    ["5"] = "005-Al-Maidah.mp3",
+    ["6"] = "006-Enam.mp3",
+    ["7"] = "007-Al-Araf.mp3",
+    ["8"] = "008-Al-Anfal.mp3",
+    ["9"] = "009.At-Taubah.mp3",
+    ["10"] = "010-Yunus.mp3",
+    ["11"] = "011-Hud.mp3",
+    ["12"] = "012-Yusuf.mp3",
+    ["13"] = "013-Ar-Rad.mp3",
+    ["14"] = "014-ibrahim.mp3",
+    ["15"] = "015-Al-Hijr.mp3",
+    ["16"] = "016-An-Nahl.mp3",
+    ["17"] = "017-Al-Isra.mp3",
+    ["18"] = "018-Al-Kahf.mp3",
+    ["19"] = "019.Maryam.mp3",
+    ["20"] = "020.Ta-Ha.mp3",
+    ["21"] = "021-Al-Anbiya.mp3",
+    ["22"] = "022-Al-Hajj.mp3",
+    ["23"] = "023-Al-Mu-minun.mp3",
+    ["24"] = "024-An-Nur.mp3",
+    ["25"] = "025-Al-Furqan.mp3",
+    ["26"] = "026-Ash-Shu-ara.mp3",
+    ["27"] = "027-An-Naml.mp3",
+    ["28"] = "028-Al-Qasas.mp3",
+    ["29"] = "029-Al-Ankabut.mp3",
+    ["30"] = "030-Ar-Rum.mp3",
+    ["31"] = "031-Luqman.mp3",
+    ["32"] = "032-As-Sajdah.mp3",
+    ["33"] = "033-Al-Ahzab.mp3",
+    ["34"] = "034-Saba..mp3",
+    ["35"] = "035-Fatir.mp3",
+    ["36"] = "036-Ya-Sin.mp3",
+    ["37"] = "037-As-Saffat.mp3",
+    ["38"] = "038-Sad.mp3",
+    ["39"] = "039-Az-Zumar.mp3",
+    ["40"] = "040-Mumin-Ghafir.mp3",
+    ["41"] = "041-Fussilat.mp3",
+    ["42"] = "042-Ash-Shura.mp3",
+    ["43"] = "043-Az-Zukhruf.mp3",
+    ["44"] = "044-Ad-Dukhan.mp3",
+    ["45"] = "045-Al-Jathiyah.mp3",
+    ["46"] = "046-Al-Ahqaf.mp3",
+    ["47"] = "047-Muhammad.mp3",
+    ["48"] = "048-Al-Fath.mp3",
+    ["49"] = "049-Al-Hujurat.mp3",
+    ["50"] = "050-Qaf.mp3",
+    ["51"] = "051-Adh-Dhariyat.mp3",
+    ["52"] = "052-At-Tur.mp3",
+    ["53"] = "053-An-Najm.mp3",
+    ["54"] = "054-Al-Qamar.mp3",
+    ["55"] = "055-Ar-Rahman.mp3",
+    ["56"] = "056-Al-Waqi-ah.mp3",
+    ["57"] = "057-Al-Hadid.mp3",
+    ["58"] = "058-Al-Mujadilah.mp3",
+    ["59"] = "059-Al-Hashr.mp3",
+    ["60"] = "060-Al-Mumtahanah.mp3",
+    ["61"] = "061-As-Saff.mp3",
+    ["62"] = "062-Al-Jumu-ah.mp3",
+    ["63"] = "063-Al-Munafiqun.mp3",
+    ["64"] = "064-At-Taghabun.mp3",
+    ["65"] = "065-At-Talaq.mp3",
+    ["66"] = "066-At-Tahrim.mp3",
+    ["67"] = "067-Al-Mulk.mp3",
+    ["68"] = "068-Al-Qalam.mp3",
+    ["69"] = "069-Al-Haqqah.mp3",
+    ["70"] = "070-Al-Maarij.mp3",
+    ["71"] = "071-Nuh.mp3",
+    ["72"] = "072-Al-Jinn.mp3",
+    ["73"] = "073-Al-Muzzammil.mp3",
+    ["74"] = "074-Al-Muddaththir.mp3",
+    ["75"] = "075-Al-Qiyamah.mp3",
+    ["76"] = "076-Al-Insan.mp3",
+    ["77"] = "077-Al-Mursalat.mp3",
+    ["78"] = "078-Al-Naba.mp3",
+    ["79"] = "079-Al-Naaze.mp3",
+    ["80"] = "080-Abasa.mp3",
+    ["81"] = "081-Al-Takweer.mp3",
+    ["82"] = "082-Al-Infitaar.mp3",
+    ["83"] = "083-Al-Mutaffifeen.mp3",
+    ["84"] = "084-Al-Inshiqaaq.mp3",
+    ["85"] = "085-Al-Burooj.mp3",
+    ["86"] = "086-Al-Taareq.mp3",
+    ["87"] = "087-Al-A-alaa.mp3",
+    ["88"] = "088-Al-Ghaasheyah.mp3",
+    ["89"] = "089-Al-Fajr.mp3",
+    ["90"] = "090-Al-Balad.mp3",
+    ["91"] = "091-Al-Shams.mp3",
+    ["92"] = "092-Al-Layl.mp3",
+    ["93"] = "093-Al-Duhaa.mp3",
+    ["94"] = "094-Al-insirah.mp3",
+    ["95"] = "095-Al-Teen.mp3",
+    ["96"] = "096-Al-Alaq.mp3",
+    ["97"] = "097-Al-Qadr.mp3",
+    ["98"] = "098-Al-Bayyinah.mp3",
+    ["99"] = "099-Al-Zilzalaha.mp3",
+    ["100"] = "100-Al-Aadeyat.mp3",
+    ["101"] = "101-Al-Qaare-ah.mp3",
+    ["102"] = "102-Al-Takasur.mp3",
+    ["103"] = "103-Al-Asr.mp3",
+    ["104"] = "104-Al-Humazah.mp3",
+    ["105"] = "105-Al-Feel.mp3",
+    ["106"] = "106-Al-Quraishinsirah.mp3",
+    ["107"] = "107-Al-Maa-oon.mp3",
+    ["108"] = "108-Al-Kausar.mp3",
+    ["109"] = "109-Al-Kaaferoon.mp3",
+    ["110"] = "110-Al-Nasr.mp3",
+    ["111"] = "111-Al-Masad.mp3",
+    ["112"] = "112-Al-Ikhlaas.mp3",
+    ["113"] = "113-Al-Falaq.mp3",
+    ["114"] = "114-Al-Naas.mp3",
+  }
+V25.items["BN"] = "AlQuranWithBengaliBanglaTranslation-ReciterMisharyRashidAl-Afasy"
+V25.files["BN"] = {
+    ["1"] = "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3",
+    ["2"] = "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
+    ["3"] = "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3",
+    ["4"] = "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
+    ["5"] = "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3",
+    ["6"] = "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
+    ["7"] = "007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3",
+    ["8"] = "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
+    ["9"] = "009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3",
+    ["10"] = "010 - Yunus ( Jonah ) - سورة يونس.mp3",
+    ["11"] = "011 - Hud - سورة هود.mp3",
+    ["12"] = "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
+    ["13"] = "013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3",
+    ["14"] = "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
+    ["15"] = "015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3",
+    ["16"] = "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
+    ["17"] = "017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3",
+    ["18"] = "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
+    ["19"] = "019 - Maryam ( Mary ) - سورة مريم.mp3",
+    ["20"] = "020 - Taha - سورة طه.mp3",
+    ["21"] = "021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3",
+    ["22"] = "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
+    ["23"] = "023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3",
+    ["24"] = "024 - An-Noor ( The Light ) - سورة النور.mp3",
+    ["25"] = "025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3",
+    ["26"] = "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
+    ["27"] = "027 - An-Naml (The Ants ) - سورة النمل.mp3",
+    ["28"] = "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
+    ["29"] = "029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3",
+    ["30"] = "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
+    ["31"] = "031 - Luqman - سورة لقمان.mp3",
+    ["32"] = "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
+    ["33"] = "033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3",
+    ["34"] = "034 - Saba ( Sheba ) - سورة سبأ.mp3",
+    ["35"] = "035 - Fatir ( The Orignator ) - سورة فاطر.mp3",
+    ["36"] = "036 - Ya-seen - سورة يس.mp3",
+    ["37"] = "037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3",
+    ["38"] = "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
+    ["39"] = "039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3",
+    ["40"] = "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
+    ["41"] = "041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3",
+    ["42"] = "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
+    ["43"] = "043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3",
+    ["44"] = "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
+    ["45"] = "045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3",
+    ["46"] = "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
+    ["47"] = "047 - Muhammad - سورة محمد.mp3",
+    ["48"] = "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
+    ["49"] = "049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3",
+    ["50"] = "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
+    ["51"] = "051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3",
+    ["52"] = "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
+    ["53"] = "053 - An-Najm ( The Star ) - سورة النجم.mp3",
+    ["54"] = "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
+    ["55"] = "055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3",
+    ["56"] = "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
+    ["57"] = "057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3",
+    ["58"] = "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
+    ["59"] = "059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3",
+    ["60"] = "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
+    ["61"] = "061 - As-Saff ( The Row ) - سورة الصف.mp3",
+    ["62"] = "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
+    ["63"] = "063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3",
+    ["64"] = "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
+    ["65"] = "065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3",
+    ["66"] = "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
+    ["67"] = "067 - Al-Mulk ( Dominion ) - سورة الملك.mp3",
+    ["68"] = "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
+    ["69"] = "069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3",
+    ["70"] = "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
+    ["71"] = "071 - Nooh - سورة نوح.mp3",
+    ["72"] = "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
+    ["73"] = "073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3",
+    ["74"] = "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
+    ["75"] = "075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3",
+    ["76"] = "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
+    ["77"] = "077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3",
+    ["78"] = "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
+    ["79"] = "079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3",
+    ["80"] = "080 - Abasa ( He frowned ) - سورة عبس.mp3",
+    ["81"] = "081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3",
+    ["82"] = "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
+    ["83"] = "083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3",
+    ["84"] = "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
+    ["85"] = "085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3",
+    ["86"] = "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
+    ["87"] = "087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3",
+    ["88"] = "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
+    ["89"] = "089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3",
+    ["90"] = "090 - Al-Balad ( The City ) - سورة البلد.mp3",
+    ["91"] = "091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3",
+    ["92"] = "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
+    ["93"] = "093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3",
+    ["94"] = "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
+    ["95"] = "095 - At-Tin ( The Fig ) - سورة التين.mp3",
+    ["96"] = "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
+    ["97"] = "097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3",
+    ["98"] = "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
+    ["99"] = "099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3",
+    ["100"] = "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
+    ["101"] = "101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3",
+    ["102"] = "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
+    ["103"] = "103 - Al-Asr ( The Time ) - سورة العصر.mp3",
+    ["104"] = "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
+    ["105"] = "105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3",
+    ["106"] = "106 - Quraish - سورة قريش.mp3",
+    ["107"] = "107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3",
+    ["108"] = "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
+    ["109"] = "109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3",
+    ["110"] = "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
+    ["111"] = "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3",
+    ["112"] = "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
+    ["113"] = "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3",
+    ["114"] = "114 - An-Nas ( Mankind ) - سورة الناس.mp3",
+  }
+V25.items["FR"] = "QuranMisharyAlAfasyWithFrenchTranslation"
+V25.files["FR"] = {
+    ["1"] = "001.Al-Fatiha.mp3",
+    ["2"] = "002.Al-Baqarah.mp3",
+    ["3"] = "003.Ali-Imran.mp3",
+    ["4"] = "004.An-Nisa.mp3",
+    ["5"] = "005.Al-Maidah.mp3",
+    ["6"] = "006.Al-Anaam.mp3",
+    ["7"] = "007.Al-Araf.mp3",
+    ["8"] = "008.Al-Anfal.mp3",
+    ["9"] = "009.At-Tawbah.mp3",
+    ["10"] = "010.Yunus.mp3",
+    ["11"] = "011.Hud.mp3",
+    ["12"] = "012.Yusuf.mp3",
+    ["13"] = "013.Ar-Raad.mp3",
+    ["14"] = "014.Ibrahim.mp3",
+    ["15"] = "015.Al-Hijr.mp3",
+    ["16"] = "016.An-Nahl.mp3",
+    ["17"] = "017.Al-Isra.mp3",
+    ["18"] = "018.Al-Kahf.mp3",
+    ["19"] = "019.Maryam.mp3",
+    ["20"] = "020.Ta-Ha.mp3",
+    ["21"] = "021.Al-Anbiya.mp3",
+    ["22"] = "022.Al-Hajj.mp3",
+    ["23"] = "023.Al-Muminun.mp3",
+    ["24"] = "024.An-Nur.mp3",
+    ["25"] = "025.Al-Furqan.mp3",
+    ["26"] = "026.As-Shuaraa.mp3",
+    ["27"] = "027.An-Naml.mp3",
+    ["28"] = "028.Al-Qasas.mp3",
+    ["29"] = "029.Al-Ankabut.mp3",
+    ["30"] = "030.Ar-Rum.mp3",
+    ["31"] = "031.Luqman.mp3",
+    ["32"] = "032.As-Sajda.mp3",
+    ["33"] = "033.Al-Ahzab.mp3",
+    ["34"] = "034.Saba.mp3",
+    ["35"] = "035.Fatir.mp3",
+    ["36"] = "036.Ya-Sin.mp3",
+    ["37"] = "037.As-Saffat.mp3",
+    ["38"] = "038.Sad.mp3",
+    ["39"] = "039.Az-Zumar.mp3",
+    ["40"] = "040.Gafir.mp3",
+    ["41"] = "041.Fussilat.mp3",
+    ["42"] = "042.Achoura.mp3",
+    ["43"] = "043.Az-Zukhruf.mp3",
+    ["44"] = "044.Ad-Dukhan.mp3",
+    ["45"] = "045.Al-Jathya.mp3",
+    ["46"] = "046.Al-Ahqaf.mp3",
+    ["47"] = "047.Muhammad.mp3",
+    ["48"] = "048.Al-Fath.mp3",
+    ["49"] = "049.Al-Hujurat.mp3",
+    ["50"] = "050.Qaf.mp3",
+    ["51"] = "051.Ad-Dariyat.mp3",
+    ["52"] = "052.At-Tur.mp3",
+    ["53"] = "053.An-Najm.mp3",
+    ["54"] = "054.Al-Qamar.mp3",
+    ["55"] = "055.Ar-Rahman.mp3",
+    ["56"] = "056.Al-Waqia.mp3",
+    ["57"] = "057.Al-Hadid.mp3",
+    ["58"] = "058.Al-Mujadalah.mp3",
+    ["59"] = "059.Al-Hashr.mp3",
+    ["60"] = "060.Al-Mumtahanah.mp3",
+    ["61"] = "061.As-Saff.mp3",
+    ["62"] = "062.Al-Jumua.mp3",
+    ["63"] = "063.Al-Munafiqun.mp3",
+    ["64"] = "064.At-Tagabun.mp3",
+    ["65"] = "065.At-Talaq.mp3",
+    ["66"] = "066.At-Tahrim.mp3",
+    ["67"] = "067.Al-Mulk.mp3",
+    ["68"] = "068.Al-Qalam.mp3",
+    ["69"] = "069.Al-Haqqah.mp3",
+    ["70"] = "070.Al-Maarij.mp3",
+    ["71"] = "071.Nuh.mp3",
+    ["72"] = "072.Al-Jinn.mp3",
+    ["73"] = "073.Al-Muzzamil.mp3",
+    ["74"] = "074.Al-Muddattir.mp3",
+    ["75"] = "075.Al-Qiyamah.mp3",
+    ["76"] = "076.Al-Insan.mp3",
+    ["77"] = "077.Al-Mursalat.mp3",
+    ["78"] = "078.An-Naba.mp3",
+    ["79"] = "079.An-Naziat.mp3",
+    ["80"] = "080.Abasa.mp3",
+    ["81"] = "081.At-Takwir.mp3",
+    ["82"] = "082.Al-Infitar.mp3",
+    ["83"] = "083.Al-Mutaffifun.mp3",
+    ["84"] = "084.Al-Insiqaq.mp3",
+    ["85"] = "085.Al-Buruj.mp3",
+    ["86"] = "086.At-Tariq.mp3",
+    ["87"] = "087.Al-Ala.mp3",
+    ["88"] = "088.Al-Gashiyah.mp3",
+    ["89"] = "089.Al-Fajr.mp3",
+    ["90"] = "090.Al-Balad.mp3",
+    ["91"] = "091.Ach-Chams.mp3",
+    ["92"] = "092.Al-Layl.mp3",
+    ["93"] = "093.Ad-Duha.mp3",
+    ["94"] = "094.Al-Inshirah.mp3",
+    ["95"] = "095.At-Tin.mp3",
+    ["96"] = "096.Al-Alaq.mp3",
+    ["97"] = "097.Al-Qadr.mp3",
+    ["98"] = "098.Al-Bayyinah.mp3",
+    ["99"] = "099.Az-Zalzalah.mp3",
+    ["100"] = "100.Al-Adiyat.mp3",
+    ["101"] = "101.Al-Qariah.mp3",
+    ["102"] = "102.At-Takatur.mp3",
+    ["103"] = "103.Al-Asr.mp3",
+    ["104"] = "104.Al-Humazah.mp3",
+    ["105"] = "105.Al-Fil.mp3",
+    ["106"] = "106.Qoraish.mp3",
+    ["107"] = "107.Al-Maun.mp3",
+    ["108"] = "108.Al-Kawtar.mp3",
+    ["109"] = "109.Al-Kafirun.mp3",
+    ["110"] = "110.An-Nasr.mp3",
+    ["111"] = "111.Al-Masad.mp3",
+    ["112"] = "112.Al-Ihlas.mp3",
+    ["113"] = "113.Al-Falaq.mp3",
+    ["114"] = "114.An-Nas.mp3",
+  }
+V25.items["SD"] = "Al-quran-with-sindhi-translation------high-quality-audio-mp3"
+V25.files["SD"] = {
+    ["1"] = "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3",
+    ["2"] = "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
+    ["3"] = "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3",
+    ["4"] = "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
+    ["5"] = "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3",
+    ["6"] = "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
+    ["7"] = "007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3",
+    ["8"] = "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
+    ["9"] = "009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3",
+    ["10"] = "010 - Yunus ( Jonah ) - سورة يونس.mp3",
+    ["11"] = "011 - Hud - سورة هود.mp3",
+    ["12"] = "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
+    ["13"] = "013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3",
+    ["14"] = "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
+    ["15"] = "015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3",
+    ["16"] = "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
+    ["17"] = "017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3",
+    ["18"] = "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
+    ["19"] = "019 - Maryam ( Mary ) - سورة مريم.mp3",
+    ["20"] = "020 - Taha - سورة طه.mp3",
+    ["21"] = "021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3",
+    ["22"] = "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
+    ["23"] = "023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3",
+    ["24"] = "024 - An-Noor ( The Light ) - سورة النور.mp3",
+    ["25"] = "025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3",
+    ["26"] = "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
+    ["27"] = "027 - An-Naml (The Ants ) - سورة النمل.mp3",
+    ["28"] = "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
+    ["29"] = "029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3",
+    ["30"] = "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
+    ["31"] = "031 - Luqman - سورة لقمان.mp3",
+    ["32"] = "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
+    ["33"] = "033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3",
+    ["34"] = "034 - Saba ( Sheba ) - سورة سبأ.mp3",
+    ["35"] = "035 - Fatir ( The Orignator ) - سورة فاطر.mp3",
+    ["36"] = "036 - Ya-seen - سورة يس.mp3",
+    ["37"] = "037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3",
+    ["38"] = "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
+    ["39"] = "039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3",
+    ["40"] = "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
+    ["41"] = "041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3",
+    ["42"] = "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
+    ["43"] = "043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3",
+    ["44"] = "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
+    ["45"] = "045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3",
+    ["46"] = "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
+    ["47"] = "047 - Muhammad - سورة محمد.mp3",
+    ["48"] = "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
+    ["49"] = "049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3",
+    ["50"] = "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
+    ["51"] = "051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3",
+    ["52"] = "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
+    ["53"] = "053 - An-Najm ( The Star ) - سورة النجم.mp3",
+    ["54"] = "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
+    ["55"] = "055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3",
+    ["56"] = "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
+    ["57"] = "057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3",
+    ["58"] = "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
+    ["59"] = "059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3",
+    ["60"] = "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
+    ["61"] = "061 - As-Saff ( The Row ) - سورة الصف.mp3",
+    ["62"] = "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
+    ["63"] = "063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3",
+    ["64"] = "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
+    ["65"] = "065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3",
+    ["66"] = "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
+    ["67"] = "067 - Al-Mulk ( Dominion ) - سورة الملك.mp3",
+    ["68"] = "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
+    ["69"] = "069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3",
+    ["70"] = "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
+    ["71"] = "071 - Nooh - سورة نوح.mp3",
+    ["72"] = "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
+    ["73"] = "073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3",
+    ["74"] = "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
+    ["75"] = "075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3",
+    ["76"] = "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
+    ["77"] = "077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3",
+    ["78"] = "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
+    ["79"] = "079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3",
+    ["80"] = "080 - Abasa ( He frowned ) - سورة عبس.mp3",
+    ["81"] = "081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3",
+    ["82"] = "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
+    ["83"] = "083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3",
+    ["84"] = "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
+    ["85"] = "085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3",
+    ["86"] = "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
+    ["87"] = "087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3",
+    ["88"] = "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
+    ["89"] = "089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3",
+    ["90"] = "090 - Al-Balad ( The City ) - سورة البلد.mp3",
+    ["91"] = "091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3",
+    ["92"] = "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
+    ["93"] = "093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3",
+    ["94"] = "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
+    ["95"] = "095 - At-Tin ( The Fig ) - سورة التين.mp3",
+    ["96"] = "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
+    ["97"] = "097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3",
+    ["98"] = "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
+    ["99"] = "099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3",
+    ["100"] = "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
+    ["101"] = "101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3",
+    ["102"] = "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
+    ["103"] = "103 - Al-Asr ( The Time ) - سورة العصر.mp3",
+    ["104"] = "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
+    ["105"] = "105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3",
+    ["106"] = "106 - Quraish - سورة قريش.mp3",
+    ["107"] = "107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3",
+    ["108"] = "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
+    ["109"] = "109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3",
+    ["110"] = "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
+    ["111"] = "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3",
+    ["112"] = "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
+    ["113"] = "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3",
+    ["114"] = "114 - An-Nas ( Mankind ) - سورة الناس.mp3",
+  }
+V25.items["PS"] = "AlQuranWithPushtoTranslationMisharyBinRashidAlafasyCD"
+V25.files["PS"] = {
+    ["1"] = "01 Al Fatiha.mp3",
+    ["2"] = "02 Al Baqara.mp3",
+    ["3"] = "03 Ale Imran.mp3",
+    ["4"] = "04 An Nisa.mp3",
+    ["5"] = "05 Al Maeda.mp3",
+    ["6"] = "06 Al Anaam.mp3",
+    ["7"] = "07 Al Aaraf.mp3",
+    ["8"] = "08 Al Anfaal.mp3",
+    ["9"] = "09 Al Tauba.mp3",
+    ["10"] = "10 Younus.mp3",
+    ["11"] = "11 Hood.mp3",
+    ["12"] = "12 Yousuf.mp3",
+    ["13"] = "13 Al Raad.mp3",
+    ["14"] = "14 Ibrahim.mp3",
+    ["15"] = "15 Al Hijr.mp3",
+    ["16"] = "16 Al Nahal.mp3",
+    ["17"] = "17 Al-Isra.mp3",
+    ["18"] = "18 Al Kahf.mp3",
+    ["19"] = "19 Mariyam.mp3",
+    ["20"] = "20 Taha.mp3",
+    ["21"] = "21 Al Ambia.mp3",
+    ["22"] = "22 Al Hajj.mp3",
+    ["23"] = "23 Al Mouminoon.mp3",
+    ["24"] = "24 Al Noor.mp3",
+    ["25"] = "25 Al Furqaan.mp3",
+    ["26"] = "26 Al Shuara.mp3",
+    ["27"] = "27 Al Naml.mp3",
+    ["28"] = "28 Al Qasas.mp3",
+    ["29"] = "29 Al Ankaboot.mp3",
+    ["30"] = "30 Al Room.mp3",
+    ["31"] = "31 Luqman.mp3",
+    ["32"] = "32 Al Sajdah.mp3",
+    ["33"] = "33 Al Ahzab.mp3",
+    ["34"] = "34 Saba.mp3",
+    ["35"] = "35 Faatir.mp3",
+    ["36"] = "36 Yaseen.mp3",
+    ["37"] = "37 Al Safaat.mp3",
+    ["38"] = "38 Suaad.mp3",
+    ["39"] = "39 Al Zumr.mp3",
+    ["40"] = "40 Al-Ghafir.mp3",
+    ["41"] = "41 Fussilat.mp3",
+    ["42"] = "42 Al Shoorah.mp3",
+    ["43"] = "43 Al Zukhraf.mp3",
+    ["44"] = "44 Al Dukhan.mp3",
+    ["45"] = "45 Al Jasiya.mp3",
+    ["46"] = "46 Al Ahqaaf.mp3",
+    ["47"] = "47 Muhammad.mp3",
+    ["48"] = "48 Al Fatha.mp3",
+    ["49"] = "49 Al Hujraat.mp3",
+    ["50"] = "50 Qaaf.mp3",
+    ["51"] = "51 Al Zarriyaat.mp3",
+    ["52"] = "52 Al Toor.mp3",
+    ["53"] = "53 Al Najam.mp3",
+    ["54"] = "54 Al Qamar.mp3",
+    ["55"] = "55 Al Rehman.mp3",
+    ["56"] = "56 Al Waqiya.mp3",
+    ["57"] = "57 Al Hadeed.mp3",
+    ["58"] = "58 Al Mujadlah.mp3",
+    ["59"] = "59 Al Hashar.mp3",
+    ["60"] = "60 Al Mumtinah.mp3",
+    ["61"] = "61 Al Saff.mp3",
+    ["62"] = "62 Al Juma.mp3",
+    ["63"] = "63 Al Munafiqoon.mp3",
+    ["64"] = "64 Al Taghabun.mp3",
+    ["65"] = "65 Al Talaaq.mp3",
+    ["66"] = "66 Al Tahreem.mp3",
+    ["67"] = "67 Al Mulk.mp3",
+    ["68"] = "68 Al Qalam.mp3",
+    ["69"] = "69 Al Haqqah.mp3",
+    ["70"] = "70 Al Muarij.mp3",
+    ["71"] = "71 Nuh.mp3",
+    ["72"] = "72 Al Jinn.mp3",
+    ["73"] = "73 Al Muzzamil.mp3",
+    ["74"] = "74 Al Muddasir.mp3",
+    ["75"] = "75 Al Qiyyamah.mp3",
+    ["76"] = "76 Al-Insan.mp3",
+    ["77"] = "77 Al Mursalat.mp3",
+    ["78"] = "78 Al Naba.mp3",
+    ["79"] = "79 Al Naziaat.mp3",
+    ["80"] = "80 Al Abas.mp3",
+    ["81"] = "81 Al Takwir.mp3",
+    ["82"] = "82 Al Infitar.mp3",
+    ["83"] = "83 Al Mutafafin.mp3",
+    ["84"] = "84 Al Inshiqaq.mp3",
+    ["85"] = "85 Al Buruj.mp3",
+    ["86"] = "86 Al Tariq.mp3",
+    ["87"] = "87 Al Aala.mp3",
+    ["88"] = "88 Al Ghashiyah.mp3",
+    ["89"] = "89 Al Fajar.mp3",
+    ["90"] = "90 Al Balad.mp3",
+    ["91"] = "91 Al Shams.mp3",
+    ["92"] = "92 Al Lail.mp3",
+    ["93"] = "93 Al Duha.mp3",
+    ["94"] = "94 Ash-Sharh.mp3",
+    ["95"] = "95 Al Teen.mp3",
+    ["96"] = "96 Al Alaq.mp3",
+    ["97"] = "97 Al Qadar.mp3",
+    ["98"] = "98 Al Bayyinah.mp3",
+    ["99"] = "99 Al Zilzal.mp3",
+    ["100"] = "100 Al Aadiat.mp3",
+    ["101"] = "101 Al Qariyah.mp3",
+    ["102"] = "102 Al Takasur.mp3",
+    ["103"] = "103 Al Aasar.mp3",
+    ["104"] = "104 Al Humzah.mp3",
+    ["105"] = "105 Al Feel.mp3",
+    ["106"] = "106 Al Quraish.mp3",
+    ["107"] = "107 Al Maoon.mp3",
+    ["108"] = "108 Al Kausar.mp3",
+    ["109"] = "109 Al kafirun.mp3",
+    ["110"] = "110 Al Nasar.mp3",
+    ["111"] = "111 Al Lahab.mp3",
+    ["112"] = "112 Al Ikhlas.mp3",
+    ["113"] = "113 Al Falaq.mp3",
+    ["114"] = "114 Al Naas.mp3",
+  }
+V25.items["FA"] = "QuranFarsiTranslation"
+V25.files["FA"] = {
+    ["1"] = "001-alFatiha.mp3",
+    ["2"] = "002-alBaqara01.mp3",
+    ["3"] = "003-alImran01.mp3",
+    ["4"] = "004-anNisa01.mp3",
+    ["5"] = "005-alMaeda01.mp3",
+    ["6"] = "006-alAnam01.mp3",
+    ["7"] = "007-alAraf01.mp3",
+    ["8"] = "008-AlAnfal01.mp3",
+    ["9"] = "009-alTawba01.mp3",
+    ["10"] = "010-yunus01.mp3",
+    ["11"] = "011-hud01.mp3",
+    ["12"] = "012-yusuf01.mp3",
+    ["13"] = "013-alRad.mp3",
+    ["14"] = "014-Ibrahim.mp3",
+    ["15"] = "015-alHijr.mp3",
+    ["16"] = "016-alNahal01.mp3",
+    ["17"] = "017-baniIsrail01.mp3",
+    ["18"] = "018-alKahaf01.mp3",
+    ["19"] = "019-Mariyum.mp3",
+    ["20"] = "020-Taha01.mp3",
+    ["21"] = "021-alAnbia01.mp3",
+    ["22"] = "022-alHajj01.mp3",
+    ["23"] = "023-alMouminoon01.mp3",
+    ["24"] = "024-alNoor01.mp3",
+    ["25"] = "025-alFurqan.mp3",
+    ["26"] = "026-alShaura01.mp3",
+    ["27"] = "027-alNamal01.mp3",
+    ["28"] = "028-alQasas.mp3",
+    ["29"] = "029-alAnkaboor01.mp3",
+    ["30"] = "030-alRoom.mp3",
+    ["31"] = "031-LUQMAN.mp3",
+    ["32"] = "032-alSajdha.mp3",
+    ["33"] = "033-alAhzab01.mp3",
+    ["34"] = "034-Saba.mp3",
+    ["35"] = "035-Fatir.mp3",
+    ["36"] = "036-Yaseen.mp3",
+    ["37"] = "037-AsSafaat.mp3",
+    ["38"] = "038-Suaad.mp3",
+    ["39"] = "039-azZumr01.mp3",
+    ["40"] = "040-AlMumin.mp3",
+    ["41"] = "041-hameemAlSajdha.mp3",
+    ["42"] = "042-AlShoorah.mp3",
+    ["43"] = "043-alZukhruf01.mp3",
+    ["44"] = "044-alDukhaan.mp3",
+    ["45"] = "045-alJasiya.mp3",
+    ["46"] = "046-alAhqaf.mp3",
+    ["47"] = "047-MUHAMMAD.mp3",
+    ["48"] = "048-alFatha01.mp3",
+    ["49"] = "049-alHujrat.mp3",
+    ["50"] = "050-QAAF.mp3",
+    ["51"] = "051-azZariyat.mp3",
+    ["52"] = "052-alToor.mp3",
+    ["53"] = "053-alNajm.mp3",
+    ["54"] = "054-alQamar.mp3",
+    ["55"] = "055-alRehman.mp3",
+    ["56"] = "056-alWaqiya.mp3",
+    ["57"] = "057-alHadeed.mp3",
+    ["58"] = "058-alMujaadlah.mp3",
+    ["59"] = "059-alHashr.mp3",
+    ["60"] = "060-alMumtahina.mp3",
+    ["61"] = "061-alSaff.mp3",
+    ["62"] = "062-alJumma.mp3",
+    ["63"] = "063-alMunafoqoon.mp3",
+    ["64"] = "064-alTaghabun.mp3",
+    ["65"] = "065-alTalaq.mp3",
+    ["66"] = "066-alTahreem.mp3",
+    ["67"] = "067-alMulk.mp3",
+    ["68"] = "068-alQalm.mp3",
+    ["69"] = "069-alHaqqah.mp3",
+    ["70"] = "070-alMaurij.mp3",
+    ["71"] = "071-Nuh.mp3",
+    ["72"] = "072-alJin.mp3",
+    ["73"] = "073-alMuzamil.mp3",
+    ["74"] = "074-alMudasir.mp3",
+    ["75"] = "075-alQiyamah.mp3",
+    ["76"] = "076-alDuhar.mp3",
+    ["77"] = "077-AlMursilat.mp3",
+    ["78"] = "078-anNaba.mp3",
+    ["79"] = "079-alNaziaat.mp3",
+    ["80"] = "080-ABASA.mp3",
+    ["81"] = "081-alTakwir.mp3",
+    ["82"] = "082-alInfitar.mp3",
+    ["83"] = "083-alMutafafin.mp3",
+    ["84"] = "084-alInshiqaq.mp3",
+    ["85"] = "085-alBuruj.mp3",
+    ["86"] = "086-alTariq.mp3",
+    ["87"] = "087-AlAala.mp3",
+    ["88"] = "088-alGhashiyah.mp3",
+    ["89"] = "089-alFajr.mp3",
+    ["90"] = "090-alBalad.mp3",
+    ["91"] = "091-alShams.mp3",
+    ["92"] = "092-alLail.mp3",
+    ["93"] = "093-alDuha.mp3",
+    ["94"] = "094-alamNashrah.mp3",
+    ["95"] = "095-AlTeen.mp3",
+    ["96"] = "096-alAlaq.mp3",
+    ["97"] = "097-alQadar.mp3",
+    ["98"] = "098-alBayyinah.mp3",
+    ["99"] = "099-alZizal.mp3",
+    ["100"] = "100-alAadiat.mp3",
+    ["101"] = "101-alQariyah.mp3",
+    ["102"] = "102-AlTakasur.mp3",
+    ["103"] = "103-alAsar.mp3",
+    ["104"] = "104-alHumazah.mp3",
+    ["105"] = "105-AlFeel.mp3",
+    ["106"] = "106-QURAISH.mp3",
+    ["107"] = "107-alMaoon.mp3",
+    ["108"] = "108-alKausar.mp3",
+    ["109"] = "109-alKafiroon.mp3",
+    ["110"] = "110-AlNasar.mp3",
+    ["111"] = "111-alLahab.mp3",
+    ["112"] = "112-AlIkhlas.mp3",
+    ["113"] = "113-alFalaq.mp3",
+    ["114"] = "114-AlNaas.mp3",
+  }
+V25.qariItems["waheed"] = "AlQuranWithUrduTranslationRecitationByQariWaheedZafarQasmiTranslationByMaulanaFatehMuhammadJalandhry"
+V25.qariFiles["waheed"] = {
+    ["1"] = "001-Surah_Al-Fatiha.mp3",
+    ["2"] = "002-Surah_Al-Baqarah.mp3",
+    ["3"] = "003-Surah_Aal-Imran.mp3",
+    ["4"] = "004-Surah_An-Nissa.mp3",
+    ["5"] = "005-Surah_Al-Maidah.mp3",
+    ["6"] = "006-Surah_Al-An'am.mp3",
+    ["7"] = "007-Surah_Al-A'raf.mp3",
+    ["8"] = "008-Surah_Al-Anfal.mp3",
+    ["9"] = "009-Surah_At-Tawba.mp3",
+    ["10"] = "010-Surah_Yunus.mp3",
+    ["11"] = "011-Surah_Hud.mp3",
+    ["12"] = "012-Surah_Yusuf.mp3",
+    ["13"] = "013-Surah_Ar-Ra'd.mp3",
+    ["14"] = "014-Surah_Ibrahim.mp3",
+    ["15"] = "015-Surah_Al-Hijr.mp3",
+    ["16"] = "016-Surah_Al-Nahl.mp3",
+    ["17"] = "017-Surah_Al-Israa.mp3",
+    ["18"] = "018-Surah_Al-Kahf.mp3",
+    ["19"] = "019-Surah_Marium.mp3",
+    ["20"] = "020-Surah_Ta-ha.mp3",
+    ["21"] = "021-Surah_Al-Anbiyaa.mp3",
+    ["22"] = "022-Surah_Al-Hajj.mp3",
+    ["23"] = "023-Surah_Al-Muminun.mp3",
+    ["24"] = "024-Surah_An-Nur.mp3",
+    ["25"] = "025-Surah_Al-Furqan.mp3",
+    ["26"] = "026-Surah_Ash-Shu'araa.mp3",
+    ["27"] = "027-Surah_An-Naml.mp3",
+    ["28"] = "028-Surah_Al-Qasas.mp3",
+    ["29"] = "029-Surah_Al-'Ankabut.mp3",
+    ["30"] = "030-Surah_Ar-Rum.mp3",
+    ["31"] = "031-Surah_Luqman.mp3",
+    ["32"] = "032-Surah_As-Sajda.mp3",
+    ["33"] = "033-Surah_Al-Ahzab.mp3",
+    ["34"] = "034-Surah_Saba.mp3",
+    ["35"] = "035-Surah_Fatir.mp3",
+    ["36"] = "036-Surah_Yaseen.mp3",
+    ["37"] = "037-Surah_As-Saffat.mp3",
+    ["38"] = "038-Surah_Su'aad.mp3",
+    ["39"] = "039-Surah_Az_Zumar.mp3",
+    ["40"] = "040-Surah_Momin.mp3",
+    ["41"] = "041-Surah_HamimSajda.mp3",
+    ["42"] = "042-Surah_Ash_Shura.mp3",
+    ["43"] = "043-Surah_Az_Zukhruf.mp3",
+    ["44"] = "044-Surah_Ad_Dukhan.mp3",
+    ["45"] = "045-Surah_Al_Jathiya.mp3",
+    ["46"] = "046-Surah_Al_Ahqaf.mp3",
+    ["47"] = "047-Surah_Muhammad.mp3",
+    ["48"] = "048-Surah_Al_Fath.mp3",
+    ["49"] = "049-Surah_Al_Hujurat.mp3",
+    ["50"] = "050-Surah_Qaf.mp3",
+    ["51"] = "051-Surah_Az_Zariyat.mp3",
+    ["52"] = "052-Surah_At_Tur.mp3",
+    ["53"] = "053-Surah_An_Najm.mp3",
+    ["54"] = "054-Surah_Al_Qamar.mp3",
+    ["55"] = "055-Surah_Ar_Rahman.mp3",
+    ["56"] = "056-Surah_Al_Waqi'a.mp3",
+    ["57"] = "057-Surah_Al_Hadid.mp3",
+    ["58"] = "058-Surah_Al_Mujadila.mp3",
+    ["59"] = "059-Surah_Al_Hashr.mp3",
+    ["60"] = "060-Surah_Al_Mumtahana.mp3",
+    ["61"] = "061-Surah_As_Saff.mp3",
+    ["62"] = "062-Surah_Al_Jumu'a.mp3",
+    ["63"] = "063-Surah_Al_Munafiqun.mp3",
+    ["64"] = "064-Surah_At_Tagabun.mp3",
+    ["65"] = "065-Surah_At_Talaq.mp3",
+    ["66"] = "066-Surah_At_Tahrim.mp3",
+    ["67"] = "067-Surah_Al_Mulk.mp3",
+    ["68"] = "068-Surah_Al_Qalam.mp3",
+    ["69"] = "069-Surah_Al_Haqqa.mp3",
+    ["70"] = "070-Surah_Al_Ma'arij.mp3",
+    ["71"] = "071-Surah_Nuh.mp3",
+    ["72"] = "072-Surah_Al_Jinn.mp3",
+    ["73"] = "073-Surah_Al_Muzzammil.mp3",
+    ["74"] = "074-Surah_Al_Muddaththir.mp3",
+    ["75"] = "075-Surah_Al_Qiyamat.mp3",
+    ["76"] = "076-Surah_Al_Insan.mp3",
+    ["77"] = "077-Surah_Al_Mursalat.mp3",
+    ["78"] = "078-Surah_An_Nabaa.mp3",
+    ["79"] = "079-Surah_An_Naziat.mp3",
+    ["80"] = "080-Surah_Abasa.mp3",
+    ["81"] = "081-Surah_At_Takwir.mp3",
+    ["82"] = "082-Surah_Al_Infita.mp3",
+    ["83"] = "083-Surah_Al_Mutaffifeen.mp3",
+    ["84"] = "084-Surah_Al_Inshiqaq.mp3",
+    ["85"] = "085-Surah_Al_Buruj.mp3",
+    ["86"] = "086-Surah_At_Tariq.mp3",
+    ["87"] = "087-Surah_Al_Ala.mp3",
+    ["88"] = "088-Surah_Al_Gashiya.mp3",
+    ["89"] = "089-Surah_Al_Fajr.mp3",
+    ["90"] = "090-Surah_Al_Balad.mp3",
+    ["91"] = "091-Surah_Ash_Shams.mp3",
+    ["92"] = "092-Surah_Al_Lail.mp3",
+    ["93"] = "093-Surah_Ad_Dhuha.mp3",
+    ["94"] = "094-Surah_Al_Sharh.mp3",
+    ["95"] = "095-Surah_At_Tin.mp3",
+    ["96"] = "096-Surah_Al_Alaq.mp3",
+    ["97"] = "097-Surah_Al_Qadr.mp3",
+    ["98"] = "098-Surah_Al_Baiyina.mp3",
+    ["99"] = "099-Surah_Al_Zalzalah.mp3",
+    ["100"] = "100-Surah_Al_Adiyat.mp3",
+    ["101"] = "101-Surah_Al_Qaria.mp3",
+    ["102"] = "102-Surah_At_Takathur.mp3",
+    ["103"] = "103-Surah_Al_Asr.mp3",
+    ["104"] = "104-Surah_Al_Humaza.mp3",
+    ["105"] = "105-Surah_Al_Fil.mp3",
+    ["106"] = "106-Surah_Quraish.mp3",
+    ["107"] = "107-Surah_Al_Maun.mp3",
+    ["108"] = "108-Surah_Al_Kauthar.mp3",
+    ["109"] = "109-Surah_Al_Kafirun.mp3",
+    ["110"] = "110-Surah_An_Nasr.mp3",
+    ["111"] = "111-Surah_Al_Masad.mp3",
+    ["112"] = "112-Surah_Al_Ikhlas.mp3",
+    ["113"] = "113-Surah_Al_Falaq.mp3",
+    ["114"] = "114-Surah_An_Nas.mp3",
+  }
+V25.qariItems["shakir"] = "QuranByQariShakirQasmi"
+V25.qariFiles["shakir"] = {
+    ["1"] = "Surah001Al-fateha-TheOpening.mp3",
+    ["2"] = "Surah002Al-baqarah-TheCow.mp3",
+    ["3"] = "Surah003Aal-e-imran-TheFamilyOfImran.mp3",
+    ["4"] = "Surah004An-nisa-Women.mp3",
+    ["5"] = "Surah005Al-maedah-TheTableSpread.mp3",
+    ["6"] = "Surah006Al-anaam-Livestock.mp3",
+    ["7"] = "Surah007Al-aaraaf-TheHeights.mp3",
+    ["8"] = "Surah008Al-anfal-SpoilsOfWar.mp3",
+    ["9"] = "Surah009At-tawba-Repentance.mp3",
+    ["10"] = "Surah010Yunus-Jonah.mp3",
+    ["11"] = "Surah011Hood-Hud.mp3",
+    ["12"] = "Surah012Yusuf-Joseph.mp3",
+    ["13"] = "Surah013Ar-raad-TheThunder.mp3",
+    ["14"] = "Surah014Ibrahim-Abraham.mp3",
+    ["15"] = "Surah015Al-hijr-StoneLand.mp3",
+    ["16"] = "Surah016An-nahl-TheBee.mp3",
+    ["17"] = "Surah017BaniIsraeel-ChildrenOfIsrael.mp3",
+    ["18"] = "Surah018Al-kahf-TheCave.mp3",
+    ["19"] = "Surah019Maryam-Mary.mp3",
+    ["20"] = "Surah020TaHa-TaHa.mp3",
+    ["21"] = "Surah021Al-ambiya-TheProphets.mp3",
+    ["22"] = "Surah022Al-hajj-ThePilgrimage.mp3",
+    ["23"] = "Surah023Al-momenoon-TheBelievers.mp3",
+    ["24"] = "Surah024An-noor-TheLight.mp3",
+    ["25"] = "Surah025Al-furqan-TheCriterion.mp3",
+    ["26"] = "Surah026Ash-shuara-ThePoets.mp3",
+    ["27"] = "Surah027An-naml-TheAnt.mp3",
+    ["28"] = "Surah028Al-qasas-TheStory.mp3",
+    ["29"] = "Surah029Al-ankaboot-TheSpider.mp3",
+    ["30"] = "Surah030Ar-room-TheRomans.mp3",
+    ["31"] = "Surah031Luqman-Luqman.mp3",
+    ["32"] = "Surah032As-sajda-TheProstration.mp3",
+    ["33"] = "Surah033Al-ahzab-TheClans.mp3",
+    ["34"] = "Surah034Saba-Sheba.mp3",
+    ["35"] = "Surah035Fatir-TheOriginatorOfCreation.mp3",
+    ["36"] = "Surah036YaSeen-YaSin.mp3",
+    ["37"] = "Surah037As-saffaat-DrawnUpInRanks.mp3",
+    ["38"] = "Surah038Saad-ArabicLettersaad.mp3",
+    ["39"] = "Surah039Az-zumar-TheTroops.mp3",
+    ["40"] = "Surah040Al-momin-TheBeliever.mp3",
+    ["41"] = "Surah041Haameem-HaMim.mp3",
+    ["42"] = "Surah042Ash-shoora-Consultation.mp3",
+    ["43"] = "Surah043Az-zukhruf-OrnamentsOfGold.mp3",
+    ["44"] = "Surah044Ad-dukhan-Smoke.mp3",
+    ["45"] = "Surah045Al-jaseyah-Crouching.mp3",
+    ["46"] = "Surah046Al-ahqaf-TheDunes.mp3",
+    ["47"] = "Surah047Muhammad-Mohammed.mp3",
+    ["48"] = "Surah048Al-fatah-Victory.mp3",
+    ["49"] = "Surah049Al-hujurat-ThePrivateAppartments.mp3",
+    ["50"] = "Surah050Qaaf-ArabicLetterqaaf.mp3",
+    ["51"] = "Surah051Az-zariat-TheWinnowingWinds.mp3",
+    ["52"] = "Surah052At-toor-TheMount.mp3",
+    ["53"] = "Surah053An-najm-TheStar.mp3",
+    ["54"] = "Surah054Al-qamar-TheMoon.mp3",
+    ["55"] = "Surah055Ar-rahman-TheBeneficient.mp3",
+    ["56"] = "Surah056Al-waqia-TheEvent.mp3",
+    ["57"] = "Surah057Al-hadeed-TheIron.mp3",
+    ["58"] = "Surah058Al-mujadila-SheThatDisputeth.mp3",
+    ["59"] = "Surah059Al-hashr-Exile.mp3",
+    ["60"] = "Surah060Al-mumtahina-ExaminingHer.mp3",
+    ["61"] = "Surah061As-saf-TheRanks.mp3",
+    ["62"] = "Surah062Jummah-TheCongregation.mp3",
+    ["63"] = "Surah063Al-munafiqoon-TheHypocrites.mp3",
+    ["64"] = "Surah064At-tagabun-MutualDisillusion.mp3",
+    ["65"] = "Surah065At-talaq-Divorce.mp3",
+    ["66"] = "Surah066At-tahreem-Prohibition.mp3",
+    ["67"] = "Surah067Al-mulk-TheSovereignty.mp3",
+    ["68"] = "Surah068Al-qalam-ThePen.mp3",
+    ["69"] = "Surah069Al-haaqah-TheReality.mp3",
+    ["70"] = "Surah070Al-maarij-TheAscendingStairways.mp3",
+    ["71"] = "Surah071Nuh-Noah.mp3",
+    ["72"] = "Surah072Al-jinn-TheJinn.mp3",
+    ["73"] = "Surah073Al-muzammil-TheEnshroudedOne.mp3",
+    ["74"] = "Surah074Al-muddassir-TheCloakedOne.mp3",
+    ["75"] = "Surah075Al-qiyama-TheResurrection.mp3",
+    ["76"] = "Surah076Al-insan-Man.mp3",
+    ["77"] = "Surah077Al-mursalat-TheEmissaries.mp3",
+    ["78"] = "Surah078An-naba-TheTidings.mp3",
+    ["79"] = "Surah079An-naziat-ThoseWhoDragForth.mp3",
+    ["80"] = "Surah080Abasa-HeFrowned.mp3",
+    ["81"] = "Surah081At-takwir-TheOverthrowing.mp3",
+    ["82"] = "Surah082Al-infitar-TheCleaving.mp3",
+    ["83"] = "Surah083Al-mutaffifin-Defrauding.mp3",
+    ["84"] = "Surah084Al-inshiqaq-TheSundering.mp3",
+    ["85"] = "Surah085Al-burooj-TheMansionsOfTheStars.mp3",
+    ["86"] = "Surah086At-tariq-TheMorningStar1.mp3",
+    ["87"] = "Surah087Al-ala-TheMostHigh.mp3",
+    ["88"] = "Surah088Al-ghashiya-TheOverwhelming.mp3",
+    ["89"] = "Surah089Al-fajr-TheDawn.mp3",
+    ["90"] = "Surah090Al-balad-TheCity.mp3",
+    ["91"] = "Surah091Ash-shams-TheSun.mp3",
+    ["92"] = "Surah092Al-lail-TheNight.mp3",
+    ["93"] = "Surah093Ad-dhuha-TheMorningHours.mp3",
+    ["94"] = "Surah094AlmNashra-Solace.mp3",
+    ["95"] = "Surah095At-tin-TheFig.mp3",
+    ["96"] = "Surah096Al-alaq-TheClot.mp3",
+    ["97"] = "Surah097Al-qadr-Power.mp3",
+    ["98"] = "Surah098Al-bayyina-TheClearProof.mp3",
+    ["99"] = "Surah099Az-zalzala-TheEarthquake.mp3",
+    ["100"] = "Surah100Al-adiyat-TheCoursers.mp3",
+    ["101"] = "Surah101Al-qaria-TheCalamity.mp3",
+    ["102"] = "Surah102At-takathur-Competition.mp3",
+    ["103"] = "Surah103Al-asr-TheDecliningDay.mp3",
+    ["104"] = "Surah104Al-humaza-TheTraducer.mp3",
+    ["105"] = "Surah105Al-fil-TheElephant.mp3",
+    ["106"] = "Surah106Quraish-Quraysh.mp3",
+    ["107"] = "Surah107Al-maun-SmallKindnesses.mp3",
+    ["108"] = "Surah108Al-kauther-Abundance.mp3",
+    ["109"] = "Surah109Al-kafiroon-TheDisbelievers.mp3",
+    ["110"] = "Surah110An-nasr-DivineSupport.mp3",
+    ["111"] = "Surah111Al-masadd-TheFlame.mp3",
+    ["112"] = "Surah112Al-ikhlas-TheUnityOfGod.mp3",
+    ["113"] = "Surah113Al-falaq-TheDaybreak.mp3",
+    ["114"] = "Surah114An-nas-Mankind.mp3",
+  }
+
+V25.modes = {
+  ["English"] = {kind="translation", key="EN", label="English (Ibrahim Walk)"},
+  ["English (Mishary)"] = {kind="translation", key="EN2", label="English (Mishary)"},
+  ["Hindi"] = {kind="translation", key="HI", label="Hindi"},
+  ["Bengali"] = {kind="translation", key="BN", label="Bengali"},
+  ["French"] = {kind="translation", key="FR", label="French"},
+  ["Sindhi"] = {kind="translation", key="SD", label="Sindhi"},
+  ["Pashto"] = {kind="translation", key="PS", label="Pashto"},
+  ["Farsi"] = {kind="translation", key="FA", label="Farsi"},
+  ["Urdu (Waheed Zafar)"] = {kind="qari", key="waheed", label="Urdu Whole-Surah (Waheed Zafar)"},
+  ["Urdu (Shakir Qasmi)"] = {kind="qari", key="shakir", label="Urdu Whole-Surah (Shakir Qasmi)"},
+}
+local function v25UrlEncodeBytes(str)
+  return (str:gsub("[^%w%-%.%_%~]", function(c) return string.format("%%%02X", string.byte(c)) end))
+end
+local function buildV25WholeTrack(mode, surahIdx)
+  local cfg = V25.modes[mode]
+  if not cfg or surahIdx < 1 or surahIdx > 114 then return nil, nil end
+  local files, item
+  if cfg.kind == "qari" then
+    files, item = V25.qariFiles[cfg.key], V25.qariItems[cfg.key]
+  else
+    files, item = V25.files[cfg.key], V25.items[cfg.key]
+  end
+  local fn = files and files[tostring(surahIdx)]
+  if not fn or not item then return nil, nil end
+  local url = "https://archive.org/download/" .. item .. "/" .. v25UrlEncodeBytes(fn)
+  local pathName = "v25_" .. cfg.key .. "_surah_" .. string.format("%03d", surahIdx) .. ".mp3"
+  return url, pathName
+end
+
+local V25_TRANSLATION_LABELS = {
+  "Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi",
+  "English (Mishary)", "Bengali", "French", "Pashto", "Farsi",
+  "Urdu (Waheed Zafar)", "Urdu (Shakir Qasmi)"
+}
+
+-- Farsi per-ayah voice selection; URLs use EveryAyah's per-ayah numbering.
+local farsiVoice = prefs.getString("farsiAyahVoice", "Fooladvand")
+local function saveFarsiVoice(v)
+  farsiVoice = v
+  prefs.edit().putString("farsiAyahVoice", v).apply()
+end
+local function buildFarsiAyahUrl(surahIdx, ayahNum)
+  local folder = (farsiVoice == "Makarem") and "Makarem_Kabiri_16Kbps" or "Fooladvand_Hedayatfar_40Kbps"
+  return "https://everyayah.com/data/translations/" .. folder .. "/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
+end
+-- Azan audio directory and 11 available recordings (ten direct tracks plus one archive sample).
+local ADHAN_ARCHIVE="https://archive.org/download/90---azan---90---azan--many----sound----mp3---alazan/"
+local AZAN_TRACKS = {
+  {name="Adhan 1 (Archive)", url=ADHAN_ARCHIVE.."001-.mp3"},
+  {name="Adhan 2 (Archive)", url=ADHAN_ARCHIVE.."002--.mp3"},
+  {name="Adhan 3 (Archive)", url=ADHAN_ARCHIVE.."003--.mp3"},
+  {name="Adhan 4 (Archive)", url=ADHAN_ARCHIVE.."004----1.mp3"},
+  {name="Adhan 5 (Archive)", url=ADHAN_ARCHIVE.."005----2.mp3"},
+  {name="Adhan 6 (Archive)", url=ADHAN_ARCHIVE.."006--.mp3"},
+  {name="Adhan 7 (Archive)", url=ADHAN_ARCHIVE.."007--.mp3"},
+  {name="Adhan 8 (Archive)", url=ADHAN_ARCHIVE.."008--.mp3"},
+  {name="Adhan 9 (Archive)", url=ADHAN_ARCHIVE.."009--.mp3"},
+  {name="Adhan 10 (Archive)", url=ADHAN_ARCHIVE.."010--.mp3"},
+  {name="Adhan Makkah (IslamCan)", url="https://www.islamcan.com/audio/adhan/azan3.mp3"},
+  {name="Adhan (IslamCan 4)", url="https://www.islamcan.com/audio/adhan/azan4.mp3"},
+  {name="Adhan (IslamCan 5)", url="https://www.islamcan.com/audio/adhan/azan5.mp3"},
+  {name="Adhan (IslamCan 7)", url="https://www.islamcan.com/audio/adhan/azan7.mp3"},
+  {name="Adhan (IslamCan 10)", url="https://www.islamcan.com/audio/adhan/azan10.mp3"},
+}
+local function getAzanLocalPath(i) return azanAudioDir .. "azan_" .. tostring(i) .. ".mp3" end
+
+
+
 -- FIX (v2.2): Chinese tarjuma hata di gayi hai (uska audio source
 -- reliably kaam nahi kar raha tha) - agar kisi ne pehle se Chinese
 -- select ki hui thi, usay khud-ba-khud "Off" par wapis kar dete hain
@@ -873,6 +2151,9 @@ local function buildEnglishAyahUrl(surahIdx, ayahNum)
 end
 local function getEnglishAyahAudioLocal(surahIdx, ayahNum)
   return ayahAudioDir .. "english_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
+end
+local function getFarsiAyahAudioLocal(surahIdx, ayahNum)
+  return ayahAudioDir .. "farsi_" .. string.lower(farsiVoice) .. "_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
 end
 
 -- FIX (crash): "Download All Ayahs" pehle DownloadManager use kar raha tha -
@@ -1087,148 +2368,142 @@ end
 local function dailyDuas()
   if not _lazyCache.dailyDuas then
     _lazyCache.dailyDuas = {
-  {cat="Khaana Peena", title="Khana Khane Ke Baad", ar="الْحَمْدُ لِلَّهِ الَّذِي أَطْعَمَنِي هَٰذَا وَرَزَقَنِيهِ مِنْ غَيْرِ حَوْلٍ مِنِّي وَلَا قُوَّةٍ", ur="تمام تعریفیں اللہ کے لیے جس نے مجھے یہ کھلایا اور رزق دیا", tip="Khana khatam hone ke baad parhein", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Doodh Peene Ke Baad", ar="اللَّهُمَّ بَارِكْ لَنَا فِيهِ وَزِدْنَا مِنْهُ", ur="اے اللہ اس میں برکت دے اور اس سے زیادہ عطا فرما", tip="Doodh peene ke khaas baad ki dua", audio="", src=""},
-  {cat="Sona Uthna", title="Sone Se Pehle Ki Dua", ar="بِاسْمِكَ اللَّهُمَّ أَمُوتُ وَأَحْيَا", ur="اے اللہ! تیرے نام سے میں مرتا ہوں اور جیتا ہوں", tip="Bistar par lait kar dayin karwat par parhein (Sahih Bukhari)", audio="", src=""},
-  {cat="Sona Uthna", title="Neend Se Uthne Ki Dua", ar="الْحَمْدُ لِلَّهِ الَّذِي أَحْيَانَا بَعْدَ مَا أَمَاتَنَا وَإِلَيْهِ النُّشُورُ", ur="تمام تعریفیں اللہ کے لیے جس نے ہمیں مارنے کے بعد زندہ کیا اور اسی کی طرف اٹھنا ہے", tip="Neend se uthte hi sab se pehle parhein", audio="", src=""},
-  {cat="Sona Uthna", title="Karwat Badalte Waqt", ar="لَا إِلَٰهَ إِلَّا اللَّهُ الْوَاحِدُ الْقَهَّارُ رَبُّ السَّمَاوَاتِ وَالْأَرْضِ وَمَا بَيْنَهُمَا الْعَزِيزُ الْغَفَّارُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ اکیلا غالب ہے، آسمانوں اور زمین اور جو ان کے درمیان ہے سب کا رب، عزت والا بخشنے والا", tip="Raat ko neend mein karwat lete waqt", audio="", src=""},
-  {cat="Baithna Ghar", title="Majlis Mein Baithne Ki Dua", ar="سُبْحَانَكَ اللَّهُمَّ وَبِحَمْدِكَ أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا أَنْتَ أَسْتَغْفِرُكَ وَأَتُوبُ إِلَيْكَ", ur="اے اللہ تو پاک ہے اور تیری ہی تعریف ہے، میں گواہی دیتا ہوں کہ تیرے سوا کوئی معبود نہیں، تجھ سے معافی مانگتا ہوں اور تیری طرف توبہ کرتا ہوں", tip="Kaffaratul Majlis - majlis se uthte waqt bhi parhein", audio="", src=""},
-  {cat="Hifazat", title="Sayyid-ul-Istighfar", ar="اللَّهُمَّ أَنْتَ رَبِّي لَا إِلَٰهَ إِلَّا أَنْتَ خَلَقْتَنِي وَأَنَا عَبْدُكَ", ur="اے اللہ تو میرا رب ہے، تیرے سوا کوئی معبود نہیں، تو نے مجھے پیدا کیا اور میں تیرا بندہ ہوں", tip="Sab se afzal istighfar (Sahih Bukhari)", audio="", src=""},
-  {cat="Hifazat", title="Durood-e-Ibrahimi", ar="اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ وَعَلَى آلِ مُحَمَّدٍ كَمَا صَلَّيْتَ عَلَى إِبْرَاهِيمَ وَعَلَى آلِ إِبْرَاهِيمَ إِنَّكَ حَمِيدٌ مَجِيدٌ", ur="اے اللہ محمد ﷺ اور ان کی آل پر رحمت نازل فرما جیسے ابراہیم اور ان کی آل پر نازل فرمائی، بیشک تو تعریف والا بزرگی والا ہے", tip="Namaz ke Tashahhud mein aur Juma ke din", audio="", src=""},
+  {cat="Khaana Peena", title="Khana Khane Ke Baad", en="All praise is for Allah, who fed me this and provided it for me without any power or strength on my part.", ar="الْحَمْدُ لِلَّهِ الَّذِي أَطْعَمَنِي هَٰذَا وَرَزَقَنِيهِ مِنْ غَيْرِ حَوْلٍ مِنِّي وَلَا قُوَّةٍ", ur="تمام تعریفیں اللہ کے لیے جس نے مجھے یہ کھلایا اور رزق دیا", tip="Khana khatam hone ke baad parhein", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Doodh Peene Ke Baad", en="O Allah, bless it for us and give us more of it.", ar="اللَّهُمَّ بَارِكْ لَنَا فِيهِ وَزِدْنَا مِنْهُ", ur="اے اللہ اس میں برکت دے اور اس سے زیادہ عطا فرما", tip="Doodh peene ke khaas baad ki dua", audio="", src=""},
+  {cat="Sona Uthna", title="Sone Se Pehle Ki Dua", en="In Your name, O Allah, I die and I live.", ar="بِاسْمِكَ اللَّهُمَّ أَمُوتُ وَأَحْيَا", ur="اے اللہ! تیرے نام سے میں مرتا ہوں اور جیتا ہوں", tip="Bistar par lait kar dayin karwat par parhein (Sahih Bukhari)", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-sleeping.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-before-sleeping.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
+  {cat="Sona Uthna", title="Neend Se Uthne Ki Dua", en="All praise is for Allah, who gave us life after causing us to die, and to Him is the resurrection.", ar="الْحَمْدُ لِلَّهِ الَّذِي أَحْيَانَا بَعْدَ مَا أَمَاتَنَا وَإِلَيْهِ النُّشُورُ", ur="تمام تعریفیں اللہ کے لیے جس نے ہمیں مارنے کے بعد زندہ کیا اور اسی کی طرف اٹھنا ہے", tip="Neend se uthte hi sab se pehle parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--8-.mp3", audioAlternates={"https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--8-.mp3"}, src="TheSufi.com (Arabic+Urdu)", audioSrcAlt="TheSufi.com (Arabic+Urdu)"},
+  {cat="Sona Uthna", title="Karwat Badalte Waqt", en="There is no deity but Allah, the One, the Subduer, Lord of the heavens, earth, and all between them, the Almighty, the Forgiving.", ar="لَا إِلَٰهَ إِلَّا اللَّهُ الْوَاحِدُ الْقَهَّارُ رَبُّ السَّمَاوَاتِ وَالْأَرْضِ وَمَا بَيْنَهُمَا الْعَزِيزُ الْغَفَّارُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ اکیلا غالب ہے، آسمانوں اور زمین اور جو ان کے درمیان ہے سب کا رب، عزت والا بخشنے والا", tip="Raat ko neend mein karwat lete waqt", audio="", src=""},
+  {cat="Baithna Ghar", title="Majlis Mein Baithne Ki Dua", en="Glory and praise be to You, O Allah. I bear witness there is no deity but You; I seek Your forgiveness and turn to You in repentance.", ar="سُبْحَانَكَ اللَّهُمَّ وَبِحَمْدِكَ أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا أَنْتَ أَسْتَغْفِرُكَ وَأَتُوبُ إِلَيْكَ", ur="اے اللہ تو پاک ہے اور تیری ہی تعریف ہے، میں گواہی دیتا ہوں کہ تیرے سوا کوئی معبود نہیں، تجھ سے معافی مانگتا ہوں اور تیری طرف توبہ کرتا ہوں", tip="Kaffaratul Majlis - majlis se uthte waqt bhi parhein", audio="", src=""},
+  {cat="Hifazat", title="Sayyid-ul-Istighfar", en="O Allah, You are my Lord; there is no deity except You. You created me, and I am Your servant.", ar="اللَّهُمَّ أَنْتَ رَبِّي لَا إِلَٰهَ إِلَّا أَنْتَ خَلَقْتَنِي وَأَنَا عَبْدُكَ", ur="اے اللہ تو میرا رب ہے، تیرے سوا کوئی معبود نہیں، تو نے مجھے پیدا کیا اور میں تیرا بندہ ہوں", tip="Sab se afzal istighfar (Sahih Bukhari)", audio="", src=""},
+  {cat="Hifazat", title="Durood-e-Ibrahimi", en="O Allah, send blessings upon Muhammad and the family of Muhammad as You sent blessings upon Ibrahim and his family. You are Praiseworthy and Glorious.", ar="اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ وَعَلَى آلِ مُحَمَّدٍ كَمَا صَلَّيْتَ عَلَى إِبْرَاهِيمَ وَعَلَى آلِ إِبْرَاهِيمَ إِنَّكَ حَمِيدٌ مَجِيدٌ", ur="اے اللہ محمد ﷺ اور ان کی آل پر رحمت نازل فرما جیسے ابراہیم اور ان کی آل پر نازل فرمائی، بیشک تو تعریف والا بزرگی والا ہے", tip="Namaz ke Tashahhud mein aur Juma ke din", audio="", src=""},
   -- NAYA (v2.5): zyada masnoon text duas (Urdu + Arabic) - category-wise
-  {cat="Hifazat", title="Ayatul Kursi", ar="اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ الْحَيُّ الْقَيُّومُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ زندہ ہے اور سب کو قائم رکھنے والا ہے", tip="Har namaz ke baad aur sone se pehle", audio="", src=""},
-  {cat="Hifazat", title="Qul Huwallahu Ahad (Ikhlas)", ar="قُلْ هُوَ اللَّهُ أَحَدٌ اللَّهُ الصَّمَدُ", ur="کہو وہ اللہ ایک ہے، اللہ بے نیاز ہے", tip="Hifazat ke liye 3 martaba", audio="", src=""},
-  {cat="Subah Shaam", title="Subah Ki Masnoon Dua (Full)", ar="أَصْبَحْنَا وَأَصْبَحَ الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے صبح کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Fajr ke baad", audio="", src=""},
-  {cat="Subah Shaam", title="Shaam Ki Masnoon Dua", ar="أَمْسَيْنَا وَأَمْسَى الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے شام کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Maghrib ke baad", audio="", src=""},
-  {cat="Safar", title="Safar Ki Dua", ar="سُبْحَانَ الَّذِي سَخَّرَ لَنَا هَٰذَا وَمَا كُنَّا لَهُ مُقْرِنِينَ وَإِنَّا إِلَىٰ رَبِّنَا لَمُنْقَلِبُونَ", ur="پاک ہے وہ ذات جس نے ہمارے لیے اس سواری کو مسخر کیا اور ہم اس کے قابو میں لانے والے نہ تھے، اور بیشک ہم اپنے رب کی طرف لوٹنے والے ہیں", tip="Sawari par baithte waqt", audio="", src=""},
-  {cat="Khaana Peena", title="Khana Khane Se Pehle", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے شروع", tip="Khana shuru karte waqt Bismillah", audio="", src=""},
-  {cat="Tahaarat", title="Wuzu Se Pehle", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے", tip="Wuzu shuru karte waqt", audio="", src=""},
-  {cat="Tahaarat", title="Wuzu Ke Baad", ar="أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا اللَّهُ وَحْدَهُ لَا شَرِيكَ لَهُ وَأَشْهَدُ أَنَّ مُحَمَّدًا عَبْدُهُ وَرَسُولُهُ", ur="میں گواہی دیتا ہوں کہ اللہ کے سوا کوئی معبود نہیں وہ اکیلا ہے اس کا کوئی شریک نہیں اور محمد ﷺ اس کے بندے اور رسول ہیں", tip="Wuzu ke baad", audio="", src=""},
-  {cat="Masjid", title="Masjid Mein Dakhil Hone Ki Dua", ar="اللَّهُمَّ افْتَحْ لِي أَبْوَابَ رَحْمَتِكَ", ur="اے اللہ میرے لیے اپنی رحمت کے دروازے کھول دے", tip="Masjid mein dakhil hote waqt", audio="", src=""},
-  {cat="Masjid", title="Masjid Se Nikalne Ki Dua", ar="اللَّهُمَّ إِنِّي أَسْأَلُكَ مِنْ فَضْلِكَ", ur="اے اللہ میں تجھ سے تیرا فضل مانگتا ہوں", tip="Masjid se nikalte waqt", audio="", src=""},
+  {cat="Hifazat", title="Ayatul Kursi", en="Allah—there is no deity except Him, the Ever-Living, the Sustainer of all.", ar="اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ الْحَيُّ الْقَيُّومُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ زندہ ہے اور سب کو قائم رکھنے والا ہے", tip="Har namaz ke baad aur sone se pehle", audio="", src=""},
+  {cat="Hifazat", title="Qul Huwallahu Ahad (Ikhlas)", en="Say: He is Allah, the One; Allah, the Eternal Refuge.", ar="قُلْ هُوَ اللَّهُ أَحَدٌ اللَّهُ الصَّمَدُ", ur="کہو وہ اللہ ایک ہے، اللہ بے نیاز ہے", tip="Hifazat ke liye 3 martaba", audio="", src=""},
+  {cat="Subah Shaam", title="Subah Ki Masnoon Dua (Full)", en="We have entered the morning, and all sovereignty belongs to Allah; all praise belongs to Allah.", ar="أَصْبَحْنَا وَأَصْبَحَ الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے صبح کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Fajr ke baad", audio="", src=""},
+  {cat="Subah Shaam", title="Shaam Ki Masnoon Dua", en="We have entered the evening, and all sovereignty belongs to Allah; all praise belongs to Allah.", ar="أَمْسَيْنَا وَأَمْسَى الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے شام کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Maghrib ke baad", audio="", src=""},
+  {cat="Safar", title="Safar Ki Dua", en="Glory be to the One who placed this at our service; we could not have done so ourselves, and to our Lord we will return.", ar="سُبْحَانَ الَّذِي سَخَّرَ لَنَا هَٰذَا وَمَا كُنَّا لَهُ مُقْرِنِينَ وَإِنَّا إِلَىٰ رَبِّنَا لَمُنْقَلِبُونَ", ur="پاک ہے وہ ذات جس نے ہمارے لیے اس سواری کو مسخر کیا اور ہم اس کے قابو میں لانے والے نہ تھے، اور بیشک ہم اپنے رب کی طرف لوٹنے والے ہیں", tip="Sawari par baithte waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--28-.mp3", audioAlternates={"https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--28-.mp3"}, src="TheSufi.com (Arabic+Urdu)", audioSrcAlt="TheSufi.com (Arabic+Urdu)"},
+  {cat="Khaana Peena", title="Khana Khane Se Pehle", en="In the name of Allah.", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے شروع", tip="Khana shuru karte waqt Bismillah", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-eating.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-before-eating.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
+  {cat="Tahaarat", title="Wuzu Se Pehle", en="In the name of Allah.", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے", tip="Wuzu shuru karte waqt", audio="", src=""},
+  {cat="Tahaarat", title="Wuzu Ke Baad", en="I bear witness there is no deity but Allah alone, without partner, and Muhammad is His servant and Messenger.", ar="أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا اللَّهُ وَحْدَهُ لَا شَرِيكَ لَهُ وَأَشْهَدُ أَنَّ مُحَمَّدًا عَبْدُهُ وَرَسُولُهُ", ur="میں گواہی دیتا ہوں کہ اللہ کے سوا کوئی معبود نہیں وہ اکیلا ہے اس کا کوئی شریک نہیں اور محمد ﷺ اس کے بندے اور رسول ہیں", tip="Wuzu ke baad", audio="", src=""},
+  {cat="Masjid", title="Masjid Mein Dakhil Hone Ki Dua", en="O Allah, open for me the gates of Your mercy.", ar="اللَّهُمَّ افْتَحْ لِي أَبْوَابَ رَحْمَتِكَ", ur="اے اللہ میرے لیے اپنی رحمت کے دروازے کھول دے", tip="Masjid mein dakhil hote waqt", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-masjid.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-for-entering-masjid.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
+  {cat="Masjid", title="Masjid Se Nikalne Ki Dua", en="O Allah, I ask You for Your bounty.", ar="اللَّهُمَّ إِنِّي أَسْأَلُكَ مِنْ فَضْلِكَ", ur="اے اللہ میں تجھ سے تیرا فضل مانگتا ہوں", tip="Masjid se nikalte waqt", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-exiting-masjid.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-for-exiting-masjid.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
   -- Neeche di gayi duas ka audio verify hokar mila hai (TheSufi.com, Arabic+Urdu translation):
-  {cat="Subah Shaam", title="Subah Ki Dua (Morning Prayer)", ar="", ur="Subah ki masnoon dua", tip="Fajr ke baad parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications-Morning-Prayer.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Sona Uthna", title="Neend Se Uthne Ki Dua (Audio)", ar="", ur="Neend se uthne ki masnoon dua", tip="Neend se uthte hi parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--8-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Sona Uthna", title="Buri Neend/Darawana Khawab Aane Ki Dua", ar="", ur="Bura khawab ya neend ki bechaini ki dua", tip="Darawana khawab ane par parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--7-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Namaz", title="Namaz Ke Baad Ki Dua", ar="", ur="Namaz mukammal karne ke baad ki dua", tip="Har farz namaz ke baad", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--15-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Roza", title="Sehri Ki Dua", ar="", ur="Roza shuru karne (Sehri) ki niyat wali dua", tip="Sehri ke waqt parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--22-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Roza", title="Iftar Ki Dua", ar="", ur="Roza kholte waqt ki dua", tip="Iftar ke waqt parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--23-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Safar", title="Safar Shuru Karne Ki Dua (Audio)", ar="", ur="Safar shuru karte waqt ki dua", tip="Rawangi se pehle parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--28-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Dua-e-Haajit", ar="", ur="Zaroorat poori hone ki dua", tip="Kisi khaas zaroorat ke waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--1-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Fot Hone Par Taziyat Ki Dua", ar="", ur="Kisi ki wafat par sabr/taziyat ki dua", tip="Ghum ke waqt aur taziyat karte waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--55-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Kamyabi/Muqable Mein Kamyabi Ki Dua", ar="", ur="Muqable ya mushkil mein kamyabi ki dua", tip="Imtihan ya mushkil kaam se pehle", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--57-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Sabaat Aur Rehmat Ki Dua", ar="", ur="Deen par sabaat (istiqamat) aur rehmat ki dua", tip="Rozmarra ki dua ke tor par", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--58-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Barkat Aur Maghfirat Ki Dua", ar="", ur="Barkat aur bakhshish maangne ki dua", tip="Rozmarra ki dua ke tor par", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--64-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Subah Shaam", title="Subah Ki Dua (Morning Prayer)", en="Morning supplication asking Allah for blessing and protection.", ar="", ur="Subah ki masnoon dua", tip="Fajr ke baad parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications-Morning-Prayer.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Sona Uthna", title="Buri Neend/Darawana Khawab Aane Ki Dua", en="Supplication for seeking refuge and safety after a disturbing dream.", ar="", ur="Bura khawab ya neend ki bechaini ki dua", tip="Darawana khawab ane par parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--7-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Namaz", title="Namaz Ke Baad Ki Dua", en="Supplication to be recited after completing the obligatory prayer.", ar="", ur="Namaz mukammal karne ke baad ki dua", tip="Har farz namaz ke baad", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--15-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Roza", title="Sehri Ki Dua", en="Supplication/intention associated with beginning the fast at Suhoor.", ar="", ur="Roza shuru karne (Sehri) ki niyat wali dua", tip="Sehri ke waqt parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--22-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Roza", title="Iftar Ki Dua", en="Supplication for breaking the fast at Iftar.", ar="", ur="Roza kholte waqt ki dua", tip="Iftar ke waqt parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--23-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Khaas Mawaqe", title="Dua-e-Haajit", en="Supplication asking Allah to fulfil a need.", ar="", ur="Zaroorat poori hone ki dua", tip="Kisi khaas zaroorat ke waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--1-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Khaas Mawaqe", title="Fot Hone Par Taziyat Ki Dua", en="Supplication of condolence and patience after a death.", ar="", ur="Kisi ki wafat par sabr/taziyat ki dua", tip="Ghum ke waqt aur taziyat karte waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--55-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Khaas Mawaqe", title="Kamyabi/Muqable Mein Kamyabi Ki Dua", en="Supplication asking Allah for help and success in a difficult task.", ar="", ur="Muqable ya mushkil mein kamyabi ki dua", tip="Imtihan ya mushkil kaam se pehle", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--57-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Khaas Mawaqe", title="Sabaat Aur Rehmat Ki Dua", en="Supplication asking Allah for steadfastness and mercy.", ar="", ur="Deen par sabaat (istiqamat) aur rehmat ki dua", tip="Rozmarra ki dua ke tor par", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--58-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+  {cat="Khaas Mawaqe", title="Barkat Aur Maghfirat Ki Dua", en="Supplication asking Allah for blessing and forgiveness.", ar="", ur="Barkat aur bakhshish maangne ki dua", tip="Rozmarra ki dua ke tor par", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--64-.mp3", src="TheSufi.com (Arabic+Urdu)"},
   -- Neeche di gayi duas archive.org "Islamic Dua in Audio" collection se hain
   -- (83 individually-labeled files, verify ki gayi hain):
-  {cat="Khaana Peena", title="Pani Peene Ke Baad Ki Dua", ar="", ur="Pani peene ke baad ki masnoon dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-drinking-water.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Dawat Mein Khana Khane Ke Baad Ki Dua", ar="", ur="Kisi ki dawat mein khana khane ke baad ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating-dawat.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Tahaarat", title="Bathroom Se Nikalne Ki Dua", ar="", ur="Bathroom/toilet se nikalne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-exiting-from-the-toilet.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Baadal Chatne Ki Dua", ar="", ur="Baadal chatne (khulne) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-opening-clouds.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Qarz Wapis Milne Ki Dua", ar="", ur="Apna qarz wapis milne par shukr ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-receive-debts.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Naye Kapre Pehnne Ki Dua", ar="", ur="Naye kapre pehante waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-wearing-clothes.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Musafa (Handshake) Ki Dua", ar="", ur="Kisi se hath milate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-handshake.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Jamhai (Ubasi) Aane Ki Dua", ar="", ur="Ubasi/jamhai aane par karne wala amal", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-jamahi.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Chand Grehan Ki Dua", ar="", ur="Chand grehan (lunar eclipse) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-lunar-eclipse.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Barish Ke Waqt Ki Dua (Audio)", ar="", ur="Barish shuru hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-rain.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Tohfa Milne Ki Dua", ar="", ur="Kisi se tohfa (gift) milne par dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-receive-gift.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Suraj Grehan Ki Dua", ar="", ur="Suraj grehan (solar eclipse) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-solar-eclipse.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Aandhi/Toofan Ki Dua", ar="", ur="Tez aandhi/toofan ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-storm.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Suraj Nikalte Waqt Ki Dua", ar="", ur="Subah suraj nikalte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-sunrise.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Suraj Ghurub Hone Ki Dua", ar="", ur="Shaam ko suraj ghurub hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-sunset.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Doodh Peene Se Pehle Ki Dua (Audio)", ar="", ur="Doodh peene se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-drinking-milk.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Pani Peene Se Pehle Ki Dua (Audio)", ar="", ur="Pani peene se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-drinking-water.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Khana Khane Se Pehle Ki Dua (Audio)", ar="", ur="Khana shuru karne se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-eating.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Tahaarat", title="Bathroom Jaane Ki Dua", ar="", ur="Bathroom/toilet mein dakhil hone se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-entering-the-toilet.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Sona Uthna", title="Sone Se Pehle Ki Dua (Audio)", ar="", ur="Sone se pehle ki masnoon dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-sleeping.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Naya Kaam Shuru Karne Ki Dua", ar="", ur="Koi naya kaam shuru karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-starting-new-work.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Maghfirat Maangne Ki Dua", ar="", ur="Allah se maghfirat maangne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-asking-forgiveness.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Baithna Ghar", title="Ghar Mein Dakhil Hone Ki Dua (Audio)", ar="", ur="Ghar mein dakhil hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-house.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Masjid", title="Masjid Mein Dakhil Hone Ki Dua (Audio)", ar="", ur="Masjid mein dakhil hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-masjid.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Bazaar Mein Dakhil Hone Ki Dua", ar="", ur="Bazaar/market mein jaate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-the-marketplace.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Masjid", title="Masjid Se Nikalne Ki Dua (Audio)", ar="", ur="Masjid se nikalte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-exiting-masjid.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Shukriya Ada Karne Ki Dua", ar="", ur="Kisi ka shukriya ada karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-expressing-thanks.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Ramzan Ke Pehle Ashre Ki Dua", ar="", ur="Ramzan ke pehle ashre (rehmat) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-first-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Qarz Utarne Ki Dua", ar="", ur="Qarz jaldi utarne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-payment-of-debt.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Surma Lagane Ki Dua", ar="", ur="Aankhon mein surma lagate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-putting-on-surma.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Barish Ke Liye Dua (Istisqa)", ar="", ur="Barish na ho rahi ho to mangne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-rain-to-come.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Kitab Parhne Ki Dua", ar="", ur="Koi kitab parhna shuru karne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-reading-the-book.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Ramzan Ke Dusre Ashre Ki Dua", ar="", ur="Ramzan ke dusre ashre (maghfirat) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-second-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Kisi Ko Museebat Mein Dekh Kar Dua", ar="", ur="Kisi ko museebat/museebat zada dekh kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-seeing-someone-in-difficulty.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Ramzan Ke Teesre Ashre Ki Dua", ar="", ur="Ramzan ke teesre ashre (jahannam se azadi) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-third-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Mushkil/Museebat Ke Waqt Ki Dua", ar="", ur="Kisi mushkil ya museebat ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-trouble.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Seerhi/Upar Chadhte Waqt Ki Dua", ar="", ur="Upar chadhte (seerhi ya pahar) waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-upstairs.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Aaina Dekhne Ki Dua", ar="", ur="Aaine mein apni surat dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-when-looking-in-a-mirror.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Gussa Aane Par Dua", ar="", ur="Gussa aane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-when-one-suffers-anger.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Qurbani Ki Dua", ar="", ur="Qurbani karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-qurbani.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Shab-e-Qadr Ki Dua", ar="", ur="Shab-e-Qadr mein parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-shab-e-qadr.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Cheenk Aane Ki Dua", ar="", ur="Khud ko cheenk aane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-sneezing.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Taraweeh Ki Dua", ar="", ur="Taraweeh ki namaz se mutaliq dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-taraweeh.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Kisi Musalman Ko Khush Dekh Kar Dua", ar="", ur="Kisi musalman bhai ko muskurate dekh kar dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-asked-upon-beholding-a-muslim-smiling.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Jaanwar Ki Awaz", title="Murgh Ki Awaz Sun Kar Dua", ar="", ur="Murgh (rooster) ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-invoked-upon-hearing-the-crowing-of-a-rooster.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Safar", title="Sawari Par Baithne Ki Dua (Audio)", ar="", ur="Gaadi/sawari par baithte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-after-being-settled-onto-a-carriage.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Khana Saamne Rakhe Jaane Par Dua", ar="", ur="Khana saamne rakha jaye to parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-when-food-is-placed-before.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Bimari Mein Parhne Ki Dua", ar="", ur="Bimari ke waqt parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-while-feeling-sick.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Har Nawala Khane Ki Dua", ar="", ur="Har luqma/nawala khane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-eat-every-morsel.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Pehla Nawala Khane Ki Dua", ar="", ur="Khane ka pehla nawala uthate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-eat-first-morsel.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Thakan Dur Karne Ki Dua", ar="", ur="Thakan mehsoos hone par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-get-rid-of-tiredness.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Waswase Se Bachne Ki Dua", ar="", ur="Shaitani waswase se bachne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-get-rid-of-waswas.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Musalman Se Milte Waqt Ki Dua", ar="", ur="Kisi musalman bhai se milte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-meet-with-muslim.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Garaj (Thunder) Ke Waqt Ki Dua", ar="", ur="Baadal garajne (thunder) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-read-at-time-of-thunder.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Chand Sitare", title="Chand Dekhne Ki Dua", ar="", ur="Chand dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-moon.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Chand Sitare", title="Sitare Dekhne Ki Dua", ar="", ur="Sitare dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-stars.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Masjid", title="Masjid Dekhte Hi Ki Dua", ar="", ur="Masjid nazar aate hi parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-the-masjid.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Phal Khane Ki Dua", ar="", ur="Naya phal khane se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-take-fruit.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Jaanwar Ki Awaz", title="Gadhe Ki Awaz Sun Kar Dua", ar="", ur="Gadhe (donkey) ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-hearing-braying-of-a-donkey.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Jaanwar Ki Awaz", title="Kutte Ke Bhonkne Ki Awaz Sun Kar Dua", ar="", ur="Kutte ke bhonkne ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-hearing-the-barking-of-a-dog.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Chand Sitare", title="Naya Chand Dekhne Ki Dua", ar="", ur="Mahine ka naya chand dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-sighting-the-new-moon.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Baithna Ghar", title="Ghar Se Nikalte Waqt Ki Dua (Audio)", ar="", ur="Ghar se bahar nikalte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-exiting-the-home.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Kisi Ko Cheenkte Sun Kar Dua (Yarhamuk Allah)", ar="", ur="Kisi aur ko cheenkte sun kar jawab dena", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-hearing-someone-sneeze.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Chand Sitare", title="Tootay Hue Tare (Shooting Star) Dekhne Ki Dua", ar="", ur="Tootay hue tare ko dekh kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-seeing-shooting-star.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Hajj", title="Takbeer-e-Tashreeq", ar="", ur="Eid ke ayyam-e-tashreeq mein parhi jane wali takbeer", tip="", audio="https://archive.org/download/islamic-dua-in-audio/takbeer-e-tashreeq.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Hajj", title="Talbiyah", ar="", ur="Hajj/Umrah ke ihram ki talbiyah", tip="", audio="https://archive.org/download/islamic-dua-in-audio/talbiyah.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Pani Peene Ke Baad Ki Dua", en="Supplication of thanks after drinking water.", ar="", ur="Pani peene ke baad ki masnoon dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-drinking-water.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Dawat Mein Khana Khane Ke Baad Ki Dua", en="Supplication of thanks after eating at a host's meal.", ar="", ur="Kisi ki dawat mein khana khane ke baad ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating-dawat.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Tahaarat", title="Bathroom Se Nikalne Ki Dua", en="Supplication upon leaving the bathroom.", ar="", ur="Bathroom/toilet se nikalne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-exiting-from-the-toilet.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Baadal Chatne Ki Dua", en="Supplication for when clouds clear.", ar="", ur="Baadal chatne (khulne) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-opening-clouds.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Qarz Wapis Milne Ki Dua", en="Supplication of gratitude when a debt is repaid.", ar="", ur="Apna qarz wapis milne par shukr ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-receive-debts.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Naye Kapre Pehnne Ki Dua", en="Supplication upon wearing new clothes.", ar="", ur="Naye kapre pehante waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-wearing-clothes.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Musafa (Handshake) Ki Dua", en="Supplication/greeting when meeting and shaking hands.", ar="", ur="Kisi se hath milate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-handshake.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Jamhai (Ubasi) Aane Ki Dua", en="Prophetic guidance associated with yawning.", ar="", ur="Ubasi/jamhai aane par karne wala amal", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-jamahi.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Chand Grehan Ki Dua", en="Supplication and remembrance during a lunar eclipse.", ar="", ur="Chand grehan (lunar eclipse) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-lunar-eclipse.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Barish Ke Waqt Ki Dua (Audio)", en="Supplication when rain begins.", ar="", ur="Barish shuru hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-rain.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Tohfa Milne Ki Dua", en="Supplication of thanks when receiving a gift.", ar="", ur="Kisi se tohfa (gift) milne par dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-receive-gift.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Suraj Grehan Ki Dua", en="Supplication and remembrance during a solar eclipse.", ar="", ur="Suraj grehan (solar eclipse) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-solar-eclipse.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Aandhi/Toofan Ki Dua", en="Supplication asking Allah for protection during strong wind or storm.", ar="", ur="Tez aandhi/toofan ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-storm.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Suraj Nikalte Waqt Ki Dua", en="Morning remembrance at sunrise.", ar="", ur="Subah suraj nikalte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-sunrise.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Suraj Ghurub Hone Ki Dua", en="Evening remembrance at sunset.", ar="", ur="Shaam ko suraj ghurub hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-sunset.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Doodh Peene Se Pehle Ki Dua (Audio)", en="Supplication before drinking milk.", ar="", ur="Doodh peene se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-drinking-milk.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Pani Peene Se Pehle Ki Dua (Audio)", en="Supplication before drinking water.", ar="", ur="Pani peene se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-drinking-water.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Tahaarat", title="Bathroom Jaane Ki Dua", en="Supplication before entering the bathroom.", ar="", ur="Bathroom/toilet mein dakhil hone se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-entering-the-toilet.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Naya Kaam Shuru Karne Ki Dua", en="Supplication before beginning a new task.", ar="", ur="Koi naya kaam shuru karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-starting-new-work.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Maghfirat Maangne Ki Dua", en="Supplication asking Allah for forgiveness.", ar="", ur="Allah se maghfirat maangne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-asking-forgiveness.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Baithna Ghar", title="Ghar Mein Dakhil Hone Ki Dua (Audio)", en="Supplication upon entering one's home.", ar="", ur="Ghar mein dakhil hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-house.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Bazaar Mein Dakhil Hone Ki Dua", en="Supplication upon entering the marketplace.", ar="", ur="Bazaar/market mein jaate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-the-marketplace.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Shukriya Ada Karne Ki Dua", en="Supplication expressing gratitude.", ar="", ur="Kisi ka shukriya ada karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-expressing-thanks.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Ramzan", title="Ramzan Ke Pehle Ashre Ki Dua", en="Supplication for the first ten days of Ramadan.", ar="", ur="Ramzan ke pehle ashre (rehmat) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-first-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Qarz Utarne Ki Dua", en="Supplication asking Allah for help in repaying debt.", ar="", ur="Qarz jaldi utarne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-payment-of-debt.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Surma Lagane Ki Dua", en="Supplication associated with applying kohl.", ar="", ur="Aankhon mein surma lagate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-putting-on-surma.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Barish Ke Liye Dua (Istisqa)", en="Supplication asking Allah to send beneficial rain.", ar="", ur="Barish na ho rahi ho to mangne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-rain-to-come.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Kitab Parhne Ki Dua", en="Supplication before reading or studying.", ar="", ur="Koi kitab parhna shuru karne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-reading-the-book.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Ramzan", title="Ramzan Ke Dusre Ashre Ki Dua", en="Supplication for the middle ten days of Ramadan.", ar="", ur="Ramzan ke dusre ashre (maghfirat) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-second-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Kisi Ko Museebat Mein Dekh Kar Dua", en="Supplication when seeing someone afflicted by hardship.", ar="", ur="Kisi ko museebat/museebat zada dekh kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-seeing-someone-in-difficulty.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Ramzan", title="Ramzan Ke Teesre Ashre Ki Dua", en="Supplication for the final ten days of Ramadan.", ar="", ur="Ramzan ke teesre ashre (jahannam se azadi) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-third-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Mushkil/Museebat Ke Waqt Ki Dua", en="Supplication asking Allah for relief in hardship.", ar="", ur="Kisi mushkil ya museebat ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-trouble.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Seerhi/Upar Chadhte Waqt Ki Dua", en="Remembrance while ascending stairs or a height.", ar="", ur="Upar chadhte (seerhi ya pahar) waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-upstairs.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Aaina Dekhne Ki Dua", en="Supplication upon looking in a mirror.", ar="", ur="Aaine mein apni surat dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-when-looking-in-a-mirror.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Gussa Aane Par Dua", en="Supplication seeking refuge from anger.", ar="", ur="Gussa aane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-when-one-suffers-anger.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Ramzan", title="Qurbani Ki Dua", en="Supplication said when offering a sacrifice.", ar="", ur="Qurbani karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-qurbani.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Ramzan", title="Shab-e-Qadr Ki Dua", en="Supplication for the Night of Decree.", ar="", ur="Shab-e-Qadr mein parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-shab-e-qadr.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Cheenk Aane Ki Dua", en="Prophetic response/remembrance when sneezing.", ar="", ur="Khud ko cheenk aane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-sneezing.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Ramzan", title="Taraweeh Ki Dua", en="Supplication associated with Taraweeh prayers.", ar="", ur="Taraweeh ki namaz se mutaliq dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-taraweeh.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Kisi Musalman Ko Khush Dekh Kar Dua", en="Supplication when seeing a fellow Muslim cheerful.", ar="", ur="Kisi musalman bhai ko muskurate dekh kar dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-asked-upon-beholding-a-muslim-smiling.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Jaanwar Ki Awaz", title="Murgh Ki Awaz Sun Kar Dua", en="Remembrance upon hearing a rooster crow.", ar="", ur="Murgh (rooster) ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-invoked-upon-hearing-the-crowing-of-a-rooster.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Safar", title="Sawari Par Baithne Ki Dua (Audio)", en="Supplication upon mounting a vehicle or ride.", ar="", ur="Gaadi/sawari par baithte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-after-being-settled-onto-a-carriage.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Khana Saamne Rakhe Jaane Par Dua", en="Supplication when food is served.", ar="", ur="Khana saamne rakha jaye to parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-when-food-is-placed-before.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Bimari Mein Parhne Ki Dua", en="Supplication asking Allah for healing during illness.", ar="", ur="Bimari ke waqt parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-while-feeling-sick.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Har Nawala Khane Ki Dua", en="Supplication/remembrance while eating each morsel.", ar="", ur="Har luqma/nawala khane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-eat-every-morsel.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Pehla Nawala Khane Ki Dua", en="Supplication before eating the first morsel.", ar="", ur="Khane ka pehla nawala uthate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-eat-first-morsel.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Thakan Dur Karne Ki Dua", en="Supplication asking Allah for relief from tiredness.", ar="", ur="Thakan mehsoos hone par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-get-rid-of-tiredness.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaas Mawaqe", title="Waswase Se Bachne Ki Dua", en="Supplication seeking protection from intrusive whispers.", ar="", ur="Shaitani waswase se bachne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-get-rid-of-waswas.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Musalman Se Milte Waqt Ki Dua", en="Greeting and supplication when meeting another Muslim.", ar="", ur="Kisi musalman bhai se milte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-meet-with-muslim.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Mausam", title="Garaj (Thunder) Ke Waqt Ki Dua", en="Supplication upon hearing thunder.", ar="", ur="Baadal garajne (thunder) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-read-at-time-of-thunder.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Chand Sitare", title="Chand Dekhne Ki Dua", en="Supplication upon seeing the moon.", ar="", ur="Chand dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-moon.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Chand Sitare", title="Sitare Dekhne Ki Dua", en="Remembrance upon observing the stars.", ar="", ur="Sitare dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-stars.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Masjid", title="Masjid Dekhte Hi Ki Dua", en="Remembrance upon seeing a mosque.", ar="", ur="Masjid nazar aate hi parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-the-masjid.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Khaana Peena", title="Phal Khane Ki Dua", en="Supplication before eating fruit.", ar="", ur="Naya phal khane se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-take-fruit.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Jaanwar Ki Awaz", title="Gadhe Ki Awaz Sun Kar Dua", en="Supplication upon hearing a donkey bray.", ar="", ur="Gadhe (donkey) ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-hearing-braying-of-a-donkey.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Jaanwar Ki Awaz", title="Kutte Ke Bhonkne Ki Awaz Sun Kar Dua", en="Supplication upon hearing a dog bark.", ar="", ur="Kutte ke bhonkne ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-hearing-the-barking-of-a-dog.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Chand Sitare", title="Naya Chand Dekhne Ki Dua", en="Supplication upon sighting the new crescent.", ar="", ur="Mahine ka naya chand dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-sighting-the-new-moon.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Baithna Ghar", title="Ghar Se Nikalte Waqt Ki Dua (Audio)", en="Supplication upon leaving home.", ar="", ur="Ghar se bahar nikalte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-exiting-the-home.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Rozmarra", title="Kisi Ko Cheenkte Sun Kar Dua (Yarhamuk Allah)", en="Response when hearing another person sneeze.", ar="", ur="Kisi aur ko cheenkte sun kar jawab dena", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-hearing-someone-sneeze.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Chand Sitare", title="Tootay Hue Tare (Shooting Star) Dekhne Ki Dua", en="Remembrance when seeing a shooting star.", ar="", ur="Tootay hue tare ko dekh kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-seeing-shooting-star.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Hajj", title="Takbeer-e-Tashreeq", en="Takbeer recited during the days of Tashreeq.", ar="", ur="Eid ke ayyam-e-tashreeq mein parhi jane wali takbeer", tip="", audio="https://archive.org/download/islamic-dua-in-audio/takbeer-e-tashreeq.mp3", src="archive.org (Islamic Dua in Audio)"},
+  {cat="Hajj", title="Talbiyah", en="Pilgrimage response recited in Ihram: ‘Here I am, O Allah, here I am.’", ar="", ur="Hajj/Umrah ke ihram ki talbiyah", tip="", audio="https://archive.org/download/islamic-dua-in-audio/talbiyah.mp3", src="archive.org (Islamic Dua in Audio)"},
   -- NAYA (v2.1): "Rabbana..." - Quran mein maujood 40 duaein (archive.org:
   -- Rabbana-40-Supplications), verified, sab per-dua chhoti aur saaf files
-  {cat="Rabbana (Quranic Dua)", title="Allah Never Break His Promise", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/01%20Allah%20never%20break%20his%20promise.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="No Help For Zalimun", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/02%20No%20help%20for%20zalimun.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Grant Us What You Promised", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/03%20Grant%20us%20what%20You%20promised.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Believe", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/04%20We%20believe.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Provide Us Sustenance", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/05%20Provide%20us%20Sustenance.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="You Are The Best Judge", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/06%20You%20are%20the%20best%20judge.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Save Us By Your Mercy", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/07%20Save%20us%20by%20Your%20Mercy.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Nothing Is Hidden From Allah", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/08%20Nothing%20is%20hidden%20from%20Allah.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Fear Lest", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/09%20We%20fear%20lest.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Avert The Torment Of Hell", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/10%20Avert%20the%20Torment%20of%20Hell.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Leaders Of The Muttaqun", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/11%20Leaders%20of%20the%20Muttaqun.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Punish Us Not", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/12%20Punish%20us%20not.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Lay Not On Us A Burden", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/13%20Lay%20not%20on%20us%20a%20Burden.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Pardon And Grant Us Forgiveness", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/14%20Pardon%20and%20Grant%20us%20Forgiveness.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Forgive Us Our Sins", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/15%20Forgive%20us%20our%20Sins.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Victory Over Disbelievers", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/16%20Victory%20over%20Disbelievers.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Bestow Upon Us Your Mercy", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/17%20Bestow%20upon%20us%20Your%20Mercy.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Forgive Me And My Parents", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/18%20Forgive%20me%20and%20my%20Parents.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Grant Us Forgiveness", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/19%20Grant%20us%20Forgiveness.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Give Us In This World Good", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/20%20Give%20us%20in%20this%20World%20Good.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Save Us From Fire", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/21%20Save%20us%20from%20Fire.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Place Us Not With Zalimun", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/22%20Place%20us%20not%20with%20Zalimun.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Make Them Enter The Paradise", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/23%20Make%20them%20enter%20the%20Paradise.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Bestow Mercy From Yourself", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/24%20Bestow%20Mercy%20from%20Yourself.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Believe, Forgive Us", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/25%20We%20Believe%2C%20Forgive%20us.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Forgive Us And Our Brethren", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/26%20Forgive%20us%20and%20our%20Brethren.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Allah Is Full Of Kindness", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/27%20Allah%20is%20Full%20of%20Kindness.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Make Us Not A Trail", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/28%20Make%20us%20not%20a%20Trail.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Accept Our Repentance", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/29%20Accesp%20our%20Repentance.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Let Not Our Hearts Deviate", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/30%20Let%20not%20our%20Hearts%20Deviate.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Believe In What You Have Sent", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/31%20We%20believe%20in%20what%20You%20have%20sent.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Believe In Allah", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/32%20Believe%20in%20Allah.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Remit Our Evil Deeds", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/33%20Remit%20our%20Evil%20Deeds.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Forgive Those Who Repent", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/34%20Forgive%20those%20who%20Repent.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Turn In Repentance", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/35%20We%20Turn%20in%20Repentance.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Accept Our Service", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/36%20Accept%20our%20Service.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Give Us Patience", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/37%20Give%20us%20Patience.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="To Die As Muslim", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/38%20To%20Die%20as%20Muslim.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Accept My Invocation", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/39%20Accept%20my%20Invocation.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Allah Is Oft-Forgiving", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/40%20Allah%20is%20Oft-Forgiving.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Allah Never Break His Promise", en="Our Lord, surely You will gather the people for a Day about which there is no doubt. Indeed, Allah does not fail in His promise.", ref="Quran 3:9", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/01%20Allah%20never%20break%20his%20promise.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="No Help For Zalimun", en="Our Lord, do not place us with the wrongdoing people.", ref="Quran 7:47", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/02%20No%20help%20for%20zalimun.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Grant Us What You Promised", en="Our Lord, grant us what You promised through Your messengers, and do not disgrace us on the Day of Resurrection. Indeed, You do not fail in Your promise.", ref="Quran 3:194", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/03%20Grant%20us%20what%20You%20promised.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="We Believe", en="Our Lord, we have believed, so register us among the witnesses.", ref="Quran 5:83", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/04%20We%20believe.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Provide Us Sustenance", en="O Allah, our Lord, send down to us a table spread with food from heaven, as a sign from You and a provision; You are the best of providers.", ref="Quran 5:114", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/05%20Provide%20us%20Sustenance.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="You Are The Best Judge", en="Our Lord, decide between us and our people in truth; You are the best of those who decide.", ref="Quran 7:89", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/06%20You%20are%20the%20best%20judge.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Save Us By Your Mercy", en="Our Lord, make us not a trial for the wrongdoing people, and save us by Your mercy from the disbelieving people.", ref="Quran 10:85-86", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/07%20Save%20us%20by%20Your%20Mercy.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Nothing Is Hidden From Allah", en="Our Lord, You know what we conceal and what we declare; nothing on earth or in heaven is hidden from Allah.", ref="Quran 14:38", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/08%20Nothing%20is%20hidden%20from%20Allah.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="We Fear Lest", en="Our Lord, indeed we fear that he may hasten against us or transgress.", ref="Quran 20:45", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/09%20We%20fear%20lest.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Avert The Torment Of Hell", en="Our Lord, avert from us the punishment of Hell. Its punishment is ever adhering; indeed, it is an evil settlement and residence.", ref="Quran 25:65-66", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/10%20Avert%20the%20Torment%20of%20Hell.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Leaders Of The Muttaqun", en="Our Lord, grant us from among our spouses and offspring comfort to our eyes, and make us an example for the righteous.", ref="Quran 25:74", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/11%20Leaders%20of%20the%20Muttaqun.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Punish Us Not", en="Our Lord, do not impose blame on us if we forget or err.", ref="Quran 2:286", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/12%20Punish%20us%20not.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Lay Not On Us A Burden", en="Our Lord, lay not upon us a burden like that which You laid upon those before us.", ref="Quran 2:286", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/13%20Lay%20not%20on%20us%20a%20Burden.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Pardon And Grant Us Forgiveness", en="Our Lord, burden us not with what we cannot bear. Pardon us, forgive us, have mercy on us; You are our Protector, so help us against the disbelieving people.", ref="Quran 2:286", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/14%20Pardon%20and%20Grant%20us%20Forgiveness.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Forgive Us Our Sins", en="Our Lord, we have believed, so forgive us our sins and protect us from the punishment of the Fire.", ref="Quran 3:16", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/15%20Forgive%20us%20our%20Sins.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Victory Over Disbelievers", en="Our Lord, forgive us our sins and our excesses, make our feet firm, and grant us victory over the disbelieving people.", ref="Quran 3:147", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/16%20Victory%20over%20Disbelievers.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Bestow Upon Us Your Mercy", en="Our Lord, let not our hearts deviate after You have guided us, and grant us mercy from Yourself. Indeed, You are the Bestower.", ref="Quran 3:8", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/17%20Bestow%20upon%20us%20Your%20Mercy.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Forgive Me And My Parents", en="Our Lord, forgive me, my parents, and the believers on the Day the account is established.", ref="Quran 14:41", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/18%20Forgive%20me%20and%20my%20Parents.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Grant Us Forgiveness", en="Our Lord, forgive us and our brothers who preceded us in faith, and place no resentment in our hearts toward those who believe.", ref="Quran 59:10", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/19%20Grant%20us%20Forgiveness.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Give Us In This World Good", en="Our Lord, give us good in this world and good in the Hereafter, and protect us from the punishment of the Fire.", ref="Quran 2:201", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/20%20Give%20us%20in%20this%20World%20Good.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Save Us From Fire", en="Our Lord, You did not create this aimlessly. Glory be to You; protect us from the punishment of the Fire.", ref="Quran 3:191", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/21%20Save%20us%20from%20Fire.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Place Us Not With Zalimun", en="Our Lord, make us not a trial for the wrongdoing people.", ref="Quran 10:85", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/22%20Place%20us%20not%20with%20Zalimun.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Make Them Enter The Paradise", en="Our Lord, admit them to the Gardens of Eternity You promised them, together with the righteous among their forefathers, spouses, and offspring. You are the Exalted in Might, the Wise.", ref="Quran 40:8", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/23%20Make%20them%20enter%20the%20Paradise.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Bestow Mercy From Yourself", en="Our Lord, grant us mercy from Your presence and guide our affair to what is right.", ref="Quran 18:10", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/24%20Bestow%20Mercy%20from%20Yourself.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="We Believe, Forgive Us", en="Our Lord, we believe, so forgive us and have mercy on us; You are the best of the merciful.", ref="Quran 23:109", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/25%20We%20Believe%2C%20Forgive%20us.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Forgive Us And Our Brethren", en="Our Lord, forgive us and our brothers who preceded us in faith, and place no resentment in our hearts toward those who believe.", ref="Quran 59:10", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/26%20Forgive%20us%20and%20our%20Brethren.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Allah Is Full Of Kindness", en="Our Lord, You are indeed Kind and Merciful.", ref="Quran 59:10", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/27%20Allah%20is%20Full%20of%20Kindness.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Make Us Not A Trail", en="Our Lord, make us not a trial for those who do wrong.", ref="Quran 10:85", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/28%20Make%20us%20not%20a%20Trail.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Accept Our Repentance", en="Our Lord, we have wronged ourselves; if You do not forgive us and have mercy on us, we will surely be among the losers.", ref="Quran 7:23", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/29%20Accesp%20our%20Repentance.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Let Not Our Hearts Deviate", en="Our Lord, let not our hearts deviate after You have guided us, and grant us mercy from Yourself.", ref="Quran 3:8", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/30%20Let%20not%20our%20Hearts%20Deviate.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="We Believe In What You Have Sent", en="Our Lord, we believe in what You revealed and follow the Messenger; write us among the witnesses.", ref="Quran 3:53", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/31%20We%20believe%20in%20what%20You%20have%20sent.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Believe In Allah", en="Our Lord, we have heard a caller inviting us to faith: ‘Believe in your Lord,’ and we have believed.", ref="Quran 3:193", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/32%20Believe%20in%20Allah.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Remit Our Evil Deeds", en="Our Lord, forgive our sins, remove our misdeeds, and cause us to die among the righteous.", ref="Quran 3:193", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/33%20Remit%20our%20Evil%20Deeds.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Forgive Those Who Repent", en="Our Lord, You encompass all things in mercy and knowledge. Forgive those who repent and follow Your way, and protect them from Hellfire.", ref="Quran 40:7", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/34%20Forgive%20those%20who%20Repent.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="We Turn In Repentance", en="Our Lord, upon You we rely; to You we turn in repentance, and to You is the final destination.", ref="Quran 60:4", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/35%20We%20Turn%20in%20Repentance.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Accept Our Service", en="Our Lord, accept this from us. Indeed, You are the All-Hearing, the All-Knowing.", ref="Quran 2:127", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/36%20Accept%20our%20Service.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Give Us Patience", en="Our Lord, pour upon us patience, make our feet firm, and help us against the disbelieving people.", ref="Quran 2:250", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/37%20Give%20us%20Patience.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="To Die As Muslim", en="Our Lord, pour upon us patience and let us die as Muslims in submission to You.", ref="Quran 7:126", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/38%20To%20Die%20as%20Muslim.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Accept My Invocation", en="My Lord, make me an establisher of prayer, and from my descendants as well. Our Lord, accept my supplication.", ref="Quran 14:40", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/39%20Accept%20my%20Invocation.mp3", src="archive.org (Rabbana 40 Supplications)"},
+  {cat="Rabbana (Quranic Dua)", title="Allah Is Oft-Forgiving", en="Our Lord, perfect our light for us and forgive us. Indeed, You are over all things capable.", ref="Quran 66:8", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/40%20Allah%20is%20Oft-Forgiving.mp3", src="archive.org (Rabbana 40 Supplications)"},
 }
   end
   return _lazyCache.dailyDuas
@@ -1686,7 +2961,7 @@ end
 local function seekForward() if mp and mp.isPlaying() then local n = mp.getCurrentPosition()+(seekSeconds*1000) if n>mp.getDuration() then n=mp.getDuration() end mp.seekTo(n) Toast.makeText(activity,"Forward "..seekSeconds.."s",0).show() end end
 local function seekRewind() if mp and mp.isPlaying() then local n = mp.getCurrentPosition()-(seekSeconds*1000) if n<0 then n=0 end mp.seekTo(n) Toast.makeText(activity,"Rewind "..seekSeconds.."s",0).show() end end
 
-local showHome, showSettings, showAbout, showFeedback, showSurahList, showPlayer, showTasbeeh, showBookmarksScreen, showNamesOfAllah, showReadingMode, showDailyDuas, showPara, showParaSurahs, playNextSurah, playPrevSurah, downloadSurah, confirmDelete
+local showHome, showSettings, showAbout, showFeedback, showSurahList, showPlayer, showTasbeeh, showBookmarksScreen, showNamesOfAllah, showReadingMode, showDailyDuas, showPara, showParaSurahs, playNextSurah, playPrevSurah, downloadSurah, confirmDelete, showAzan
 
 --------------------------------------------------
 -- UI IMPLEMENTATIONS
@@ -1724,6 +2999,7 @@ local function moreSubTabs(activeTab)
       {Button, text="Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("hadith"), textColor=tabTextColor("hadith"), contentDescription="Hadith tab", onClick=function() showHadithScreen() end},
       {Button, text="Tafseer 2", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("israr"), textColor=tabTextColor("israr"), contentDescription="Tafseer Israr Ahmad tab", onClick=function() showIsrarTafseerScreen() end},
       {Button, text="40 Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("nawawi"), textColor=tabTextColor("nawawi"), contentDescription="40 Hadith Nawawi tab", onClick=function() showNawawiScreen() end},
+      {Button, text="Adhan", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("azan"), textColor=tabTextColor("azan"), contentDescription="Adhan audio tab", onClick=function() showAzan() end},
       {Button, text="Menu", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("menu"), textColor=tabTextColor("menu"), contentDescription="Menu tab", onClick=function() showSettings() end},
       {Button, text="Home", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Back to Home tab", onClick=function() showHome() end}
     }
@@ -1734,7 +3010,7 @@ local duaPlayerIndex = 1
 local audioDuasCache = {}
 local function buildAudioDuasList()
   audioDuasCache = {}
-  for _, d in ipairs(dailyDuas()) do if d.audio ~= "" then table.insert(audioDuasCache, d) end end
+  for _, d in ipairs(dailyDuas()) do if d.audio ~= "" then table.insert(audioDuasCache,d) end end
   return audioDuasCache
 end
 
@@ -1762,8 +3038,8 @@ local function buildSearchIndex()
     end})
   end
   -- NAYA (v2.1): Tarjuma (translation) bhi search se select ho sakta hai
-  for _, lang in ipairs({"Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi"}) do
-    table.insert(idx, {label="Tarjuma: " .. lang, action=function()
+  for _, lang in ipairs({"Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi", "English (Mishary)", "Bengali", "French", "Pashto", "Farsi", "Urdu (Waheed Zafar)", "Urdu (Shakir Qasmi)"}) do
+    table.insert(idx, {label="Tarjuma: " .. lang, searchText=lang, action=function()
       saveTranslationMode(lang)
       Toast.makeText(activity, "Tarjuma set to " .. lang, 1).show()
       showSurahList()
@@ -1771,7 +3047,7 @@ local function buildSearchIndex()
   end
   for i, r in ipairs(reciters) do
     local rName = r.name
-    table.insert(idx, {label="Reciter: " .. rName, action=function()
+    table.insert(idx, {label="Reciter: " .. rName, searchText=rName, action=function()
       currentReciter = i
       Toast.makeText(activity, "Reciter set to " .. rName .. " - ab Surah select karein", 1).show()
       showSurahList()
@@ -1779,12 +3055,12 @@ local function buildSearchIndex()
   end
   for _, d in ipairs(dailyDuas()) do
     if d.audio ~= "" then
-      table.insert(idx, {label="Dua (Audio): " .. d.title, action=function()
+      table.insert(idx, {label="Dua (Audio): " .. d.title, searchText=(d.title.." "..tostring(d.en or "").." "..tostring(d.ur or "").." "..tostring(d.ar or "")), action=function()
         buildAudioDuasList()
         for ai, ad in ipairs(audioDuasCache) do if ad == d then showDuaPlayer(ai) return end end
       end})
     else
-      table.insert(idx, {label="Dua (Text): " .. d.title, action=function()
+      table.insert(idx, {label="Dua (Text): " .. d.title, searchText=(d.title.." "..tostring(d.en or "").." "..tostring(d.ur or "").." "..tostring(d.ar or "")), action=function()
         AlertDialog.Builder(activity).setTitle(d.title).setMessage(d.ar .. "\n\n" .. d.ur).setPositiveButton("OK", nil).show()
       end})
     end
@@ -1843,11 +3119,13 @@ function showHome()
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor, focusable=true, focusableInTouchMode=true,
-    {TextView, text="Quran Majeed v2.5", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 5"},
+    {TextView, text="Quran Majeed v2.6", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 6"},
     {LinearLayout, orientation=0, layout_width=-1, padding="10dp", gravity="center_vertical",
-      {EditText, id="etHomeSearch", hint="Search Surah, Reciter, or Dua...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888"},
-      {Button, id="btnHomeSearch", text="Search", textSize="13sp", layout_marginLeft="5dp", backgroundColor=appColorStr, textColor=-1, contentDescription="Search"}
+      {EditText, id="etHomeSearch", hint="Search Surah, Reciter, Dua (Arabic/Urdu/English)...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888", contentDescription="Search Quran, duas and translations"},
+      {Button, id="btnHomeSearch", text="Search", textSize="12sp", layout_marginLeft="4dp", backgroundColor=appColorStr, textColor=-1, contentDescription="Search"},
+      {Button, id="btnVoiceSearch", text="🎙", textSize="16sp", layout_marginLeft="4dp", backgroundColor="#1565C0", textColor=-1, contentDescription="Start voice search"}
     },
+    {Spinner, id="homeSearchFilter", layout_width=-1, layout_marginLeft="10dp", layout_marginRight="10dp", contentDescription="Filter search results by type"},
     {TextView, id="txtHomeSearchStatus", text="", textSize="11sp", textColor="#777777", padding="4dp"},
     {ListView, id="homeSearchResults", layout_width=-1, layout_height="260dp"},
     {ScrollView, id="homeScroll", layout_width=-1, layout_height=0, layout_weight=1,
@@ -1859,7 +3137,16 @@ function showHome()
           {TextView, text=os.date("%d %B %Y (%A)"), textSize="12sp", textColor=textColor, layout_weight=1},
           {TextView, text="🔋 " .. (currentBatteryPercent() >= 0 and (currentBatteryPercent() .. "%") or "?"), textSize="12sp", textColor=textColor}
         },
-        {TextView, text=savedHijriDate, textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="2dp", gravity="center"},
+        {TextView, id="txtHijriDate", text=savedHijriDate .. "  (tap to adjust ±1 day)", textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="2dp", gravity="center", contentDescription="Islamic date. Tap to adjust local moon sighting offset", onClick=function()
+          local labels={"-2 days", "-1 day", "0 (API date)", "+1 day", "+2 days"}
+          AlertDialog.Builder(activity).setTitle("Hijri date correction for local moon sighting").setItems(labels, {onClick=function(d, which)
+            hijriDayOffset=which-2
+            prefs.edit().putInt("hijriDayOffset",hijriDayOffset).apply()
+            lastPrayerFetchDate=""
+            Toast.makeText(activity,"Refreshing Islamic date...",1).show()
+            fetchPrayerTimes(savedCity,savedCountry,function(ok) if ok and screen=="home" then showHome() end end)
+          end}).show()
+        end},
         {TextView, text=(function() local pd, pm, py = getPunjabiDate() return "Punjabi: " .. pd .. " " .. pm .. ", " .. py .. " Samat" end)(), textSize="12sp", textColor=textColor, layout_marginBottom="10dp", gravity="center"},
         (spot.kind=="ayah") and {LinearLayout, orientation=1,
           {TextView, text=tr("Ayat of the Day"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
@@ -1951,11 +3238,33 @@ function showHome()
         table.insert(matches, ayahResult)
         table.insert(labels, ayahResult.label)
       end
+      local function fuzzyMatch(hay, needle)
+        hay=tostring(hay or ""):lower()
+        needle=tostring(needle or ""):lower()
+        if needle=="" then return true end
+        if hay:find(needle,1,true) then return true end
+        -- Fuzzy subsequence fallback catches minor spacing/typing omissions.
+        local j=1
+        for i=1,#hay do
+          if hay:sub(i,i)==needle:sub(j,j) then
+            j=j+1
+            if j>#needle then return true end
+          end
+        end
+        return false
+      end
+      local filterNames={"All","Surahs","Reciters","Translations","Duas"}
+      local filter=filterNames[(homeSearchFilter.getSelectedItemPosition() or 0)+1] or "All"
       for _, item in ipairs(searchIndex) do
-        if item.label:lower():find(q, 1, true) then
-          table.insert(matches, item)
-          table.insert(labels, item.label)
-          if #matches >= 100 then break end
+        local label=item.label or ""
+        local allowed=(filter=="All") or
+          (filter=="Surahs" and (label:find("^Surah:") or label:find("^Play:"))) or
+          (filter=="Reciters" and label:find("^Reciter:")) or
+          (filter=="Translations" and label:find("^Tarjuma:")) or
+          (filter=="Duas" and label:find("^Dua "))
+        if allowed and fuzzyMatch(item.searchText or label,q) then
+          table.insert(matches,item) table.insert(labels,label)
+          if #matches>=100 then break end
         end
       end
       pcall(function() txtHomeSearchStatus.setText(#matches .. " result(s) - tap one to play/select it") end)
@@ -1967,9 +3276,224 @@ function showHome()
     end
   end
 
+  local searchFilters={"All", "Surahs", "Reciters", "Translations", "Duas"}
+  homeSearchFilter.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, searchFilters))
+  homeSearchFilter.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function() runHomeSearch() end})
   etHomeSearch.addTextChangedListener(TextWatcher{onTextChanged=function(c) runHomeSearch() end})
   btnHomeSearch.onClick = function() hideKeyboard(etHomeSearch) runHomeSearch() end
+  btnVoiceSearch.onClick = function()
+    local ok, err = pcall(function()
+      local i=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+      i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+      i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak a Surah, dua, reciter, or translation")
+      activity.startActivityForResult(i, 2606)
+    end)
+    if not ok then Toast.makeText(activity,"Speech recognition service is not available on this device.",1).show() end
+  end
 end
+
+
+function showAzanPlayer(trackIndex)
+  if trackIndex<1 or trackIndex>#AZAN_TRACKS then return end
+  screen="azanplayer"
+  stopPlayer()
+  local track=AZAN_TRACKS[trackIndex]
+  local path=getAzanLocalPath(trackIndex)
+  local downloaded=File(path).exists() and File(path).length()>1000
+  local bgColor,textColor=getThemeColors()
+  activity.setContentView(loadlayout{
+    LinearLayout,id="mainLayout",orientation=1,padding="18dp",layout_width=-1,layout_height=-1,gravity="center",backgroundColor=bgColor,
+    {LinearLayout,orientation=0,layout_width=-1,gravity="center_vertical",
+      {Button,text="Back",contentDescription="Back to Adhan audio list",onClick=function() showAzan() end},
+      {TextView,text="Adhan Player",textSize="20sp",typeface=Typeface.DEFAULT_BOLD,textColor=appColorStr,layout_marginLeft="10dp"}
+    },
+    {TextView,id="azanPlayerState",text=downloaded and "Offline playback" or "Online streaming",textSize="13sp",textColor=appColorStr,layout_marginTop="14dp",gravity="center"},
+    {TextView,text=track.name,textSize="22sp",typeface=Typeface.DEFAULT_BOLD,textColor=appColorStr,layout_marginTop="8dp",gravity="center"},
+    {TextView,text=savedCity..", "..savedCountry,textSize="13sp",textColor=textColor,layout_marginTop="4dp",gravity="center"},
+    {SeekBar,id="azanSeekBar",layout_width=-1,layout_marginTop="20dp"},
+    {LinearLayout,orientation=0,layout_width=-1,gravity="center",layout_marginBottom="8dp",
+      {TextView,id="azanCurrentTime",text="00:00",layout_weight=1,gravity="center",textColor=textColor},
+      {TextView,id="azanTotalTime",text="00:00",layout_weight=1,gravity="center",textColor=textColor}
+    },
+    {LinearLayout,orientation=0,layout_width=-1,gravity="center",
+      {Button,text="⏮",layout_weight=1,contentDescription="Previous Adhan",onClick=function() if trackIndex>1 then showAzanPlayer(trackIndex-1) end end},
+      {Button,text="⏪ "..seekSeconds.."s",layout_weight=1.3,contentDescription="Rewind Adhan",onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()-seekSeconds*1000 duaMp.seekTo(math.max(0,n)) end) end end},
+      {Button,id="btnAzanPlay",text="▶ Play",layout_weight=1.5,contentDescription="Play or pause Adhan",onClick=function()
+        if duaMp then pcall(function() if duaMp.isPlaying() then duaMp.pause() btnAzanPlay.setText("▶ Play") else duaMp.start() btnAzanPlay.setText("⏸ Pause") end end)
+        else
+          btnAzanPlay.setText("Loading...")
+          local u=track.url
+          playReliable(u,path,track.name,nil,function() pcall(function() if btnAzanPlay then btnAzanPlay.setText("▶ Play") end end) end)
+        end
+      end},
+      {Button,text=seekSeconds.."s ⏩",layout_weight=1.3,contentDescription="Fast forward Adhan",onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()+seekSeconds*1000 duaMp.seekTo(math.min(n,duaMp.getDuration())) end) end end},
+      {Button,text="⏭",layout_weight=1,contentDescription="Next Adhan",onClick=function() if trackIndex<#AZAN_TRACKS then showAzanPlayer(trackIndex+1) end end}
+    },
+    {Button,id="btnAzanDownload",text=downloaded and "Delete Offline Copy" or "Download Adhan",layout_width=-1,layout_marginTop="16dp",backgroundColor=downloaded and "#C62828" or "#1976D2",textColor=-1,contentDescription=downloaded and "Delete downloaded Adhan" or "Download Adhan for offline"},
+    {Button,text="Set as city Adhan",layout_width=-1,layout_marginTop="8dp",backgroundColor="#00695C",textColor=-1,contentDescription="Set this Adhan as the selected city prayer-call audio",onClick=function()
+      prefs.edit().putInt("azanDefaultTrack",trackIndex).apply()
+      Toast.makeText(activity,"Selected for city prayer schedule.",1).show()
+      showAzanSchedule()
+    end},
+    {Button,text="Prayer Schedule",layout_width=-1,layout_marginTop="6dp",onClick=function() showAzanSchedule() end}
+  })
+  applyWallpaper(mainLayout,bgColor)
+  btnAzanDownload.onClick=function()
+    if File(path).exists() then
+      confirmDelete(path,function() showAzanPlayer(trackIndex) end)
+    else
+      local ok,err=pcall(function()
+        local req=DownloadManager.Request(Uri.parse(track.url))
+        req.setTitle(track.name) req.setDescription("Adhan audio for offline use")
+        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+        req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,"Azan_Audio/"..File(path).getName())
+        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+      end)
+      if ok then Toast.makeText(activity,"Adhan download started; file is saved to Downloads/Azan_Audio.",1).show()
+      else showErrorDialog("Adhan Download Error",err) end
+    end
+  end
+  updateTask=Runnable({run=function()
+    if screen=="azanplayer" and duaMp then pcall(function()
+      local dur=duaMp.getDuration(); local pos=duaMp.getCurrentPosition()
+      if dur>0 then azanSeekBar.setMax(dur); azanSeekBar.setProgress(pos) end
+      local function tm(ms) local t=math.floor(ms/1000); return string.format("%02d:%02d",math.floor(t/60),t%60) end
+      azanCurrentTime.setText(tm(pos)); azanTotalTime.setText(tm(dur))
+      if duaMp.isPlaying() then btnAzanPlay.setText("⏸ Pause") end
+    end) end
+    if screen=="azanplayer" then handler.postDelayed(updateTask,1000) end
+  end})
+  handler.post(updateTask)
+  azanSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(b,pos,fromUser) if fromUser and duaMp then pcall(function() duaMp.seekTo(pos) end) end end})
+end
+
+
+local AZAN_PRAYERS={{key="Fajr",label="Fajr",timeKey="pFajr"},{key="Dhuhr",label="Dhuhr",timeKey="pDhuhr"},{key="Asr",label="Asr",timeKey="pAsr"},{key="Maghrib",label="Maghrib",timeKey="pMaghrib"},{key="Isha",label="Isha",timeKey="pIsha"}}
+local azanReceiverRegistered={}
+local function azanAction(key) return "quran_majeed_city_azan_"..key end
+local function registerCityAzanReceiver(key)
+  local action=azanAction(key)
+  if azanReceiverRegistered[action] then return end
+  local ok=pcall(function() activity.registerReceiver(IntentFilter(action)) end)
+  if ok then azanReceiverRegistered[action]=true end
+end
+function scheduleCityAzans()
+  local am=activity.getSystemService(Context.ALARM_SERVICE)
+  local now=os.time()
+  local flags=PendingIntent.FLAG_UPDATE_CURRENT
+  if Build.VERSION.SDK_INT>=23 then pcall(function() flags=flags+PendingIntent.FLAG_IMMUTABLE end) end
+  for n,item in ipairs(AZAN_PRAYERS) do
+    local action=azanAction(item.key)
+    registerCityAzanReceiver(item.key)
+    local intent=Intent(action)
+    intent.putExtra("prayer_name",item.label)
+    intent.putExtra("city_name",savedCity)
+    local pi=PendingIntent.getBroadcast(activity,7300+n,intent,flags)
+    pcall(function() am.cancel(pi) end)
+    if prefs.getBoolean("cityAzanOn_"..item.key,false) then
+      local clock=prefs.getString(item.timeKey,"00:00")
+      local hh,mm=clock:match("(%d+):(%d+)")
+      if hh and mm then
+        local cal=Calendar.getInstance(TimeZone.getTimeZone(savedPrayerTimezone))
+        cal.setTimeInMillis(now*1000)
+        cal.set(Calendar.HOUR_OF_DAY,tonumber(hh))
+        cal.set(Calendar.MINUTE,tonumber(mm))
+        cal.set(Calendar.SECOND,0)
+        cal.set(Calendar.MILLISECOND,0)
+        if cal.getTimeInMillis()<=now*1000 then cal.add(Calendar.DAY_OF_MONTH,1) end
+        local alarm=cal.getTimeInMillis()
+        local scheduled=false
+        if Build.VERSION.SDK_INT>=23 then
+          scheduled=pcall(function() am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP,alarm,pi) end)
+          if not scheduled then pcall(function() am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP,alarm,pi) end) end
+        else
+          pcall(function() am.set(AlarmManager.RTC_WAKEUP,alarm,pi) end)
+        end
+      end
+    end
+  end
+end
+
+function showAzanSchedule()
+  screen="azanschedule"
+  local bgColor,textColor=getThemeColors()
+  local root=LinearLayout(activity); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(18,12,18,12); root.setBackgroundColor(Color.parseColor(bgColor))
+  local scroll=ScrollView(activity); local body=LinearLayout(activity); body.setOrientation(LinearLayout.VERTICAL); body.setPadding(10,10,10,10)
+  local head=TextView(activity); head.setText("City prayer Azan schedule"); head.setTextSize(21); head.setTypeface(Typeface.DEFAULT_BOLD); head.setTextColor(Color.parseColor(appColorStr)); body.addView(head)
+  local city=TextView(activity); city.setText("Location: "..savedCity..", "..savedCountry.." ("..savedPrayerTimezone..")   |   Times from prayer-time settings"); city.setTextSize(13); city.setTextColor(Color.parseColor(textColor)); body.addView(city)
+  local controls={}; local names={}
+  for i,t in ipairs(AZAN_TRACKS) do names[i]=t.name end
+  for _,pr in ipairs(AZAN_PRAYERS) do
+    local row=LinearLayout(activity); row.setOrientation(LinearLayout.VERTICAL); row.setPadding(8,10,8,10)
+    local cb=CheckBox(activity); cb.setText(pr.label.."  ("..to12Hour(prefs.getString(pr.timeKey,"00:00"))..")"); cb.setTextColor(Color.parseColor(textColor)); cb.setChecked(prefs.getBoolean("cityAzanOn_"..pr.key,false)); row.addView(cb)
+    local sp=Spinner(activity); sp.setAdapter(ArrayAdapter(activity,android.R.layout.simple_spinner_dropdown_item,names))
+    local selected=prefs.getInt("cityAzanTrack_"..pr.key,prefs.getInt("azanDefaultTrack",1)); sp.setSelection(math.max(0,math.min(#names,selected)-1)); row.addView(sp)
+    local rule=View(activity); rule.setBackgroundColor(0x22000000); local lp=LinearLayout.LayoutParams(-1,1); row.addView(rule,lp)
+    body.addView(row); controls[pr.key]={check=cb,spinner=sp,timeKey=pr.timeKey}
+  end
+  local note=TextView(activity); note.setText("Enable Alarms & reminders for precise alarms. If exact-alarm access is unavailable, Android may deliver an inexact alarm. This in-script schedule requires the host app to keep its registered receiver available; force-stop/reboot persistence depends on the host project manifest and boot receiver."); note.setTextSize(12); note.setTextColor(0xFF9E3A00); note.setPadding(4,12,4,12); body.addView(note)
+  scroll.addView(body); root.addView(scroll)
+  local notify=Button(activity); notify.setText("Allow notifications"); notify.setContentDescription("Grant notification permission for scheduled Azan alerts"); root.addView(notify)
+  local exact=Button(activity); exact.setText("Open exact alarm access settings"); exact.setContentDescription("Open Android Alarms and reminders access"); root.addView(exact)
+  local save=Button(activity); save.setText("Save and schedule next prayers"); save.setContentDescription("Save city prayer settings and schedule Azan notifications"); root.addView(save)
+  local play=Button(activity); play.setText("Open Adhan audio player"); root.addView(play)
+  local back=Button(activity); back.setText("Back"); root.addView(back)
+  activity.setContentView(root)
+  notify.setOnClickListener(View.OnClickListener{onClick=function()
+    pcall(function()
+      if Build.VERSION.SDK_INT>=33 and activity.checkSelfPermission("android.permission.POST_NOTIFICATIONS")~=0 then
+        local perms=luajava.newArray("java.lang.String",1); perms[0]="android.permission.POST_NOTIFICATIONS"; activity.requestPermissions(perms,2607)
+      else Toast.makeText(activity,"Notifications are already allowed (or not runtime-gated on this Android version).",1).show() end
+    end)
+  end})
+  exact.setOnClickListener(View.OnClickListener{onClick=function()
+    pcall(function()
+      local i=Intent("android.settings.REQUEST_SCHEDULE_EXACT_ALARM")
+      i.setData(Uri.parse("package:"..activity.getPackageName()))
+      activity.startActivity(i)
+    end)
+  end})
+  save.setOnClickListener(View.OnClickListener{onClick=function()
+    local ed=prefs.edit()
+    for _,pr in ipairs(AZAN_PRAYERS) do local c=controls[pr.key]; ed.putBoolean("cityAzanOn_"..pr.key,c.check.isChecked()); ed.putInt("cityAzanTrack_"..pr.key,c.spinner.getSelectedItemPosition()+1) end
+    ed.apply(); scheduleCityAzans()
+    Toast.makeText(activity,"City-wise Azan schedule saved for "..savedCity..".",1).show()
+  end})
+  play.setOnClickListener(View.OnClickListener{onClick=function() showAzan() end})
+  back.setOnClickListener(View.OnClickListener{onClick=function() showAzan() end})
+end
+
+
+showAzan = function()
+  screen = "azan"
+  stopPlayer()
+  local bgColor, textColor = getThemeColors()
+  local labels = {}
+  for i, track in ipairs(AZAN_TRACKS) do
+    local downloaded = File(getAzanLocalPath(i)).exists()
+    labels[i] = track.name .. (downloaded and "  [Offline]" or "  [Download available]")
+  end
+  activity.setContentView(loadlayout{
+    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+      {Button, text="Back", contentDescription="Back to More", onClick=function() showMore() end},
+      {TextView, text="Adhan Audio", textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+    },
+    {TextView, text="City: "..savedCity..", "..savedCountry..". Tap a recording to open the Quran-style player.", textSize="12sp", textColor=textColor, padding="10dp"},
+    {Button,text="Set city prayer schedule",layout_width=-1,layout_margin="8dp",backgroundColor="#1976D2",textColor=-1,contentDescription="Set automatic city-wise prayer Azan schedule",onClick=function() showAzanSchedule() end},
+    {ListView, id="azanList", layout_width=-1, layout_height=0, layout_weight=1},
+    {Button, text="Back to More", layout_width=-1, contentDescription="Back to More", onClick=function() showMore() end}
+  })
+  applyWallpaper(mainLayout, bgColor)
+  azanList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
+  azanList.onItemClick = function(l, v, p, pos)
+    local i = pos + 1
+    local track = AZAN_TRACKS[i]
+    local path = getAzanLocalPath(i)
+    showAzanPlayer(i)
+  end
+end
+
 
 -- DAILY MASNOON DUAS SCREEN (Audio Duas alag, Text Duas alag - TalkBack labels ke saath)
 local function playDuaAtIndex(idx, refreshFn)
@@ -1999,6 +3523,8 @@ function showDuaPlayer(idx)
     {TextView, text=d.title, textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="8dp", textColor=appColorStr, gravity="center", contentDescription=d.title},
     {TextView, text=(d.ar and d.ar ~= "" and d.ar or ""), textSize="18sp", layout_marginBottom="6dp", textColor=appColorStr, gravity="center"},
     {TextView, text=d.ur or "", textSize="15sp", layout_marginBottom="8dp", textColor=textColor, gravity="center"},
+    {TextView, text=d.en or "", textSize="14sp", layout_marginBottom="8dp", textColor=textColor, gravity="center", contentDescription="English dua meaning or audio description"},
+    {TextView, text=d.en or "", textSize="14sp", layout_marginBottom="8dp", textColor=textColor, gravity="center", contentDescription="English meaning or audio description"},
     {TextView, text=(d.tip and d.tip ~= "" and ("💡 " .. d.tip) or (d.cat and ("Category: " .. d.cat) or "")), textSize="12sp", textColor="#777777", layout_marginBottom="12dp", gravity="center"},
 
     {SeekBar, id="skBar", layout_width=-1, layout_marginBottom="8dp"},
@@ -2122,6 +3648,7 @@ function showDailyDuas()
         {TextView, text=d.title, textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, contentDescription="Text dua: " .. d.title .. ", no audio available"},
         {TextView, text=d.ar, textSize="18sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="right", layout_marginTop="4dp"},
         {TextView, text=d.ur, textSize="14sp", textColor=textColor, gravity="right", layout_marginTop="2dp"},
+        {TextView, text=d.en or "", textSize="14sp", textColor=textColor, gravity="left", layout_marginTop="5dp", contentDescription="English translation or description"},
         {TextView, text="💡 " .. d.tip, textSize="11sp", textColor="#777777", layout_marginTop="4dp"}
       })
     end
@@ -2975,6 +4502,7 @@ function showMore()
       {Button, text="Hadith (Sahih Bukhari)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#4E342E", textColor=-1, onClick=function() showHadithScreen() end},
       {Button, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#5D4037", textColor=-1, onClick=function() showIsrarTafseerScreen() end},
       {Button, text="40 Hadith (An-Nawawi)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() showNawawiScreen() end},
+      {Button, text="Adhan Audio", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, contentDescription="Open Adhan recordings to play or download", onClick=function() showAzan() end},
       {Button, text="Menu", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", onClick=function() showSettings() end}
     }},
     moreSubTabs("")
@@ -3194,11 +4722,14 @@ function showSettings()
   -- NAYA (v2.1): Tarjuma (Translation) Off/Urdu spinner
   -- FIX (v2.2): Chinese option hata di gayi (uska audio source reliably
   -- kaam nahi kar raha tha). NAYA (v2.2): Sindhi tarjuma add ki gayi.
-  local tarjumaLabels = {"Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi"}
+  local tarjumaLabels = V25_TRANSLATION_LABELS
   local tarjumaIndex = 0 for i,v in ipairs(tarjumaLabels) do if v == translationMode then tarjumaIndex = i - 1 break end end
   local urduVoiceLabels = {"Shamshad Ali Khan", "Farhat Hashmi"}
   local urduVoiceValues = {"Shamshad", "Farhat"}
   local urduVoiceIndex = 0 for i,v in ipairs(urduVoiceValues) do if v == urduVoice then urduVoiceIndex = i - 1 break end end
+  local farsiVoiceLabels = {"Fooladvand + Hedayatfar", "Makarem + Kabiri"}
+  local farsiVoiceValues = {"Fooladvand", "Makarem"}
+  local farsiVoiceIndex = (farsiVoice == "Makarem") and 1 or 0
   -- NAYA (v2.2): Ayat-ba-Ayat mode mein Ayat kitni dafa repeat ho
   local repeatLabels = {"1x (No Repeat)", "2x", "3x", "5x", "10x"} local repeatValues = {1, 2, 3, 5, 10}
   local repeatIndex = 0 for i,v in ipairs(repeatValues) do if v == PS.ayahRepeat then repeatIndex = i - 1 break end end
@@ -3219,6 +4750,8 @@ function showSettings()
       {Spinner, id="tarjumaSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
       {TextView, text="Urdu Tarjuma Awaz (jab Tarjuma=Urdu ho):", textSize="16sp", textColor=textColor},
       {Spinner, id="urduVoiceSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+      {TextView, text="Farsi Ayah Tarjuma Awaz (jab Tarjuma=Farsi ho):", textSize="16sp", textColor=textColor},
+      {Spinner, id="farsiVoiceSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
       {TextView, text="Ayat Repeat Count (Ayat-ba-Ayat mode, hifz ke liye):", textSize="16sp", textColor=textColor},
       {Spinner, id="repeatCountSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
       {TextView, text="App Preferences:", textSize="16sp", textColor=appColorStr, typeface=Typeface.DEFAULT_BOLD},
@@ -3244,6 +4777,7 @@ function showSettings()
   sleepSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, sleepLabels)) sleepSpinner.setSelection(sleepIndex) sleepSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) sleepTimerMinutes=sleepValues[pos+1] end})
   tarjumaSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, tarjumaLabels)) tarjumaSpinner.setSelection(tarjumaIndex) tarjumaSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveTranslationMode(tarjumaLabels[pos+1]) end})
   urduVoiceSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, urduVoiceLabels)) urduVoiceSpinner.setSelection(urduVoiceIndex) urduVoiceSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveUrduVoice(urduVoiceValues[pos+1]) end})
+  farsiVoiceSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, farsiVoiceLabels)) farsiVoiceSpinner.setSelection(farsiVoiceIndex) farsiVoiceSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveFarsiVoice(farsiVoiceValues[pos+1]) end})
   repeatCountSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repeatLabels)) repeatCountSpinner.setSelection(repeatIndex) repeatCountSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveAyahRepeatCount(repeatValues[pos+1]) end})
   chkAutoNext.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) autoNextMode=isChecked end})
 end
@@ -3310,34 +4844,45 @@ function showAbout()
 
   local infoText = [[
 Assalam-o-Alaikum!
-Version: 2.5
+Version: 2.6
 
---- WHAT'S NEW IN V2.5 ---
+--- WHAT'S NEW IN V2.6 ---
 
-Play Speed Control (everywhere):
-- Speed spinner seedha Surah Player + Dua Player par (0.75x-2x)
-- 30 Para bhi isi Surah player ko use karte hain
-- Ayat-ba-Ayat, Ruku, Duas, Hadith, Tafseer par bhi speed apply
-- Speed prefs mein save - app restart ke baad bhi yaad
+1) Azan player:
+- Quran-player-style controls: Play/Pause, rewind, forward, seek bar, next/previous, download/delete offline.
+- 15 verified recordings are available in the list (10 Internet Archive recordings and 5 direct tracks).
+- Downloads save under Downloads/Azan_Audio; offline files play through the same player.
 
-Repeat Mode (player par, Menu se nahi):
-- Surah Player: 1x / 2x / 3x / 5x / Loop (poori Surah dobara)
-- Ayat-ba-Ayat: 1x / 2x / 3x / 5x / 10x spinner seedha us screen par
-- Settings wala spinner bhi same value save karta hai
+2) City-wise prayer Azan schedule:
+- Uses the saved City/Country and the prayer timings already shown on Home.
+- Fajr, Dhuhr, Asr, Maghrib and Isha can each be switched on/off and assigned an Azan recording.
+- Save schedules the next prayer alarms and posts an Azan playback notification when they fire.
+- The exact-alarm settings screen and notification permission are available from the schedule page.
+- Android host-project requirements: declare SCHEDULE_EXACT_ALARM and RECEIVE_BOOT_COMPLETED and provide a manifest boot receiver for exact/background/reboot persistence. In-script dynamic receivers cannot guarantee delivery after force-stop or reboot.
 
-30 Para fix:
-- Para 14 boundary theek: Al-Hijr (15:1) se shuru (pehle galti se
-  Ibrahim 14 set thi)
+3) Hijri date correction:
+- Prayer times now request the device's local Gregorian date explicitly.
+- The displayed Hijri date comes from the same AlAdhan response; a saved -2 to +2 day control allows local moon-sighting correction.
+- No country-wide offset is forced. For 24 September 2026 the API returned 13 Rabi al-Thani 1448 for Abbottabad; use the adjustment control if the local moon-sighting calendar differs.
 
-Islamic (Hijri) Date - REAL FIX:
-- Hijri year ab sahi block se (1448), na ke Gregorian 2026
-- Pakistan/India/Bangladesh: adjustment -2 (local moon-sighting)
-- Pehli dafa 2.5 open par cache clear + auto re-fetch
+4) Advanced search:
+- Surah/reciter/translation/dua filters, fuzzy matching, English meanings, and Arabic/Urdu search within the listed duas.
+- Microphone button starts Android's speech-recognition intent; it requires an installed speech-recognition provider.
 
-Duas:
-- Dua player Quran jaisa (Speed, seek seconds, Arabic+Urdu display)
-- Zyada masnoon text duas (Urdu+Arabic) category-wise add
-- Purani text duas ke Arabic/Urdu complete
+5) Duas:
+- 130 unique, category-labelled entries after merging six duplicate text/audio rows.
+- 119 entries have audio recordings; 11 remain text-first. The original category assignments are kept; duplicate text/audio entries now share one row.
+- English meaning/description is included for all 130 entries. The 40 Rabbana Quranic supplications include English meanings and Quran references; short Arabic/Urdu duas have English meanings. For audio-only recordings without transcripts, the English text is a topic description, not a verbatim translation.
+
+--- FEATURES CARRIED FORWARD FROM V2.5 ---
+
+1) Eight whole-surah audio translation collections, each mapped for all 114 surahs: English (Ibrahim Walk), English (Mishary), Hindi, Bengali, French, Sindhi, Pashto and Farsi.
+2) Urdu Whole-Surah Qari audio: Waheed Zafar Qasmi and Shakir Qasmi, 114 surahs each.
+3) Farsi ayah-by-ayah translations: Fooladvand/Hedayatfar and Makarem/Kabiri.
+4) Original Urdu two-voice ayah audio, Hindi/Punjabi/English/Sindhi translation paths, 30-Para playback, downloads and offline cache.
+5) Existing Quran reading/player, speed and repeat controls, Tafseer, Hadith, Tasbeeh, names, bookmarks, daily duas, prayer-time city entry, Hijri display and accessibility descriptions retained.
+
+Audio source maps remain inline in this one Lua file; no JSON/module sidecar is needed. New live sources are only used where availability was checked; the extra language list is unchanged from v2.5 because the existing mapped sources already cover the requested translation set.
 
 --- CREDITS ---
 Lead Developer: Numan Khan.
@@ -3987,6 +5532,8 @@ function showAyahByAyah(surahIdx, autoPlayAyat)
         playReliable(uUrl, uPath, surahNames[surahIdx] .. " Ayat " .. n .. " (Urdu)", nil, afterOneRound)
       elseif translationMode == "English" then
         playReliable(buildEnglishAyahUrl(surahIdx, n), getEnglishAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (English)", nil, afterOneRound)
+      elseif translationMode == "Farsi" then
+        playReliable(buildFarsiAyahUrl(surahIdx, n), getFarsiAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (Farsi)", nil, afterOneRound)
       else
         afterOneRound()
       end
@@ -4061,6 +5608,11 @@ function showAyahByAyah(surahIdx, autoPlayAyat)
     elseif translationMode == "English" then
       for a=1, totalAyahs do
         table.insert(items, {url=buildEnglishAyahUrl(surahIdx, a), path=getEnglishAyahAudioLocal(surahIdx, a)})
+      end
+      totalItems = totalAyahs * 2
+    elseif translationMode == "Farsi" then
+      for a=1, totalAyahs do
+        table.insert(items, {url=buildFarsiAyahUrl(surahIdx, a), path=getFarsiAyahAudioLocal(surahIdx, a)})
       end
       totalItems = totalAyahs * 2
     end
@@ -4174,6 +5726,10 @@ function showRukuPlayer(surahIdx, rukuIdx)
         playReliable(buildEnglishAyahUrl(surahIdx, n), getEnglishAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (English)", nil, function()
           if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
         end)
+      elseif translationMode == "Farsi" then
+        playReliable(buildFarsiAyahUrl(surahIdx, n), getFarsiAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (Farsi)", nil, function()
+          if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
+        end)
       else
         if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
       end
@@ -4219,6 +5775,11 @@ function showRukuPlayer(surahIdx, rukuIdx)
     elseif translationMode == "English" then
       for a = ruku.startAyah, ruku.endAyah do
         table.insert(items, {url=buildEnglishAyahUrl(surahIdx, a), path=getEnglishAyahAudioLocal(surahIdx, a)})
+      end
+      total = total * 2
+    elseif translationMode == "Farsi" then
+      for a = ruku.startAyah, ruku.endAyah do
+        table.insert(items, {url=buildFarsiAyahUrl(surahIdx, a), path=getFarsiAyahAudioLocal(surahIdx, a)})
       end
       total = total * 2
     end
@@ -4271,12 +5832,14 @@ function showPlayer(index)
   local isPunjabi = (translationMode == "Punjabi")
   local isEnglish = (translationMode == "English")
   local isSindhi = (translationMode == "Sindhi")
+  local v25OnlineUrl, v25FileName = buildV25WholeTrack(translationMode, index)
   -- NAYA (v2.1): Tarjuma ON ho to combined (Arabic+tarjuma, ek hi file)
   -- audio use hoti hai - isi liye download bhi EK hi hota hai, alag Surah
   -- aur alag tarjuma download nahi karni padti.
-  local fileName = isUrdu and ("urdu_surah_"..sID..".mp3") or isHindi and ("hindi_surah_"..sID..".mp3") or isPunjabi and ("punjabi_surah_"..sID..".mp3") or isEnglish and ("english_surah_"..sID..".mp3") or isSindhi and ("sindhi_surah_"..sID..".mp3") or ("reciter_"..reciterKey.."_surah_"..sID..".mp3")
+  local fileName = v25FileName or (isUrdu and ("urdu_surah_"..sID..".mp3") or isHindi and ("hindi_surah_"..sID..".mp3") or isPunjabi and ("punjabi_surah_"..sID..".mp3") or isEnglish and ("english_surah_"..sID..".mp3") or isSindhi and ("sindhi_surah_"..sID..".mp3") or ("reciter_"..reciterKey.."_surah_"..sID..".mp3"))
   local localFilePath = downloadDir .. fileName
-  local onlineUrl = isUrdu and buildUrduSurahUrl(index) or isHindi and buildHindiSurahUrl(index) or isPunjabi and buildPunjabiSurahUrl(index) or isEnglish and buildEnglishSurahUrl(index) or isSindhi and buildSindhiSurahUrl(index) or buildQuranUrl(currentReciter, index)
+  local onlineUrl = v25OnlineUrl or (isUrdu and buildUrduSurahUrl(index) or isHindi and buildHindiSurahUrl(index) or isPunjabi and buildPunjabiSurahUrl(index) or isEnglish and buildEnglishSurahUrl(index) or isSindhi and buildSindhiSurahUrl(index) or buildQuranUrl(currentReciter, index))
+  local selectedAudioLabel = (V25.modes[translationMode] and V25.modes[translationMode].label) or (isUrdu and "Urdu Tarjuma" or isHindi and "Hindi Tarjuma" or isPunjabi and "Punjabi Tarjuma" or isEnglish and "English Tarjuma" or isSindhi and "Sindhi Tarjuma" or reciters[currentReciter].name)
   local playUrl = File(localFilePath).exists() and localFilePath or onlineUrl
   local isDownloaded = File(localFilePath).exists()
 
@@ -4286,7 +5849,7 @@ function showPlayer(index)
     LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
     {TextView, text=isDownloaded and "Offline Mode" or "Online Stream", textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
     {TextView, text=surahName, textSize="26sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text="Reciter: " .. (isUrdu and "Mishary Rashid Alafasy (Urdu Tarjuma ke sath)" or isHindi and "Sheikh Abdur Rehman Al Sudes (Hindi Tarjuma ke sath)" or isPunjabi and "Qari Khushi Muhammad-ul-Azhari (Punjabi Tarjuma ke sath)" or isEnglish and "Ibrahim Walk (English Tarjuma ke sath)" or isSindhi and "Mishary Rashid Alafasy (Sindhi Tarjuma ke sath)" or reciters[currentReciter].name), textSize="14sp", layout_marginBottom="20dp", textColor=textColor},
+    {TextView, text="Reciter / Translation: " .. selectedAudioLabel, textSize="14sp", layout_marginBottom="20dp", textColor=textColor},
 
     {TextView, id="txtSleepTimer", text="", textSize="14sp", textColor="#E91E63", layout_marginBottom="10dp", typeface=Typeface.DEFAULT_BOLD},
 
@@ -4319,7 +5882,7 @@ function showPlayer(index)
   })
   applyWallpaper(mainLayout, bgColor)
 
-  btnDownload.onClick = function() if File(localFilePath).exists() then confirmDelete(localFilePath, function() showPlayer(currentIndex) end) else downloadSurah(onlineUrl, fileName, surahName .. (isUrdu and " (Urdu Tarjuma)" or isHindi and " (Hindi Tarjuma)" or isPunjabi and " (Punjabi Tarjuma)" or isEnglish and " (English Tarjuma)" or isSindhi and " (Sindhi Tarjuma)" or "")) end end
+  btnDownload.onClick = function() if File(localFilePath).exists() then confirmDelete(localFilePath, function() showPlayer(currentIndex) end) else downloadSurah(onlineUrl, fileName, surahName .. " (" .. selectedAudioLabel .. ")") end end
 
   -- NAYA (v2.5): player-screen speed + surah-repeat spinners
   do
@@ -4447,6 +6010,8 @@ function onKeyDown(keyCode, event)
     elseif screen == "feedback" or screen == "about" then showSettings() return true
     elseif screen == "dailyduas" then showHome() return true
     elseif screen == "more" then showHome() return true
+    elseif screen == "azan" then showMore() return true
+    elseif screen == "azanplayer" or screen == "azanschedule" then showAzan() return true
     elseif screen == "progresstracker" or screen == "storagemanager" then showMore() return true
     elseif screen == "duaplayer" then showDailyDuas() return true
     elseif screen == "para" then showMore() return true
@@ -4478,11 +6043,35 @@ end
 -- convention (onKeyDown jaisa hi) - is se notification ka Play/Pause button
 -- app khole bina kaam karta hai
 pcall(function() activity.registerReceiver(IntentFilter("quran_majeed_playpause")) end)
+pcall(function() for _,pr in ipairs(AZAN_PRAYERS) do registerCityAzanReceiver(pr.key) end; scheduleCityAzans() end)
+
+function onActivityResult(requestCode, resultCode, data)
+  if requestCode==2606 and resultCode==Activity.RESULT_OK and data then
+    pcall(function()
+      local spoken=data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+      if spoken and spoken.size()>0 and etHomeSearch then
+        etHomeSearch.setText(tostring(spoken.get(0)))
+        etHomeSearch.setSelection(etHomeSearch.length())
+      end
+    end)
+  end
+end
 
 function onReceive(context, intent)
   pcall(function()
     local action = intent.getAction()
-    if action == "quran_majeed_playpause" then
+    local azanPrayer=action and action:match("^quran_majeed_city_azan_(%a+)$")
+    if azanPrayer then
+      local trackIndex=prefs.getInt("cityAzanTrack_"..azanPrayer,prefs.getInt("azanDefaultTrack",1))
+      local track=AZAN_TRACKS[trackIndex]
+      if track then
+        local path=getAzanLocalPath(trackIndex)
+        playReliable(track.url,path,"Azan "..azanPrayer,function()
+          showPlaybackNotification("Azan - "..azanPrayer,savedCity..", "..savedCountry.." | "..track.name)
+        end,function() cancelNotification() end)
+      end
+      pcall(function() scheduleCityAzans() end)
+    elseif action == "quran_majeed_playpause" then
       if mp then
         if mp.isPlaying() then
           mp.pause()
