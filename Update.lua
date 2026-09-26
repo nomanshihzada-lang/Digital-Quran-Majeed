@@ -22,7 +22,8 @@ import "java.util.Calendar"
 import "java.util.TimeZone"
 
 --------------------------------------------------
--- QURAN MAJEED v2.6 - City Azan schedules, Azan player, Hijri adjustment, English Duas, voice search
+-- QURAN MAJEED v2.7 - V25 initialization-order fix, Waheed audio, OFFLINE
+-- Islamic (Hijri) date, aur 6 Kalme / Iman / Namaz audio section
 -- Lead: Numan Khan
 --------------------------------------------------
 -- NOTE (v2.2): screen-off/background playback fix (MediaPlayer.setWakeMode,
@@ -46,7 +47,10 @@ local isPaused = false
 -- NAYA (v2.5): speed/repeat state EK table mein (AndroLua 200-local limit)
 -- NOTE: prefs load NEICHE prefs define hone ke BAAD hota hai - yahan sirf
 -- table + helpers, taake activity nil hone par early crash na ho.
-local PS = {speed=1.0, ayahRepeat=1, surahRepeat=1, surahRepeatRem=0}
+local PS = {speed=1.0, ayahRepeat=1, surahRepeat=1, surahRepeatRem=0, externalPlayback=false, externalPreparing=false, externalPausePending=false, externalUrl=nil, externalPath=nil, externalLabel=nil, notifActionErrorShown=false}
+-- v2.7: V25 is deliberately global and initialized before first use,
+-- because early Hijri config and later audio maps both need this table.
+V25 = V25 or { items = {}, files = {}, modes = {}, qariItems = {}, qariFiles = {} }
 function savePlaybackSpeed(v)
   PS.speed = v
   pcall(function()
@@ -190,8 +194,22 @@ local prayerIsha = prefs.getString("pIsha", "20:30")
 -- yeh Aladhan API se hi milta hai (isi response mein "Sunrise" field
 -- hoti hai, bas ab tak use nahi ho raha tha)
 local prayerSunrise = prefs.getString("pSunrise", "06:15")
-local savedHijriDate = prefs.getString("hijriDate", "Update location for Hijri Date")
-local hijriDayOffset = prefs.getInt("hijriDayOffset", 0)
+-- NAYA (v2.7): Islamic (Hijri) date ab bilkul OFFLINE hai. Pehle yeh Aladhan
+-- API ke response se aati thi, jo kai dafa load hi nahi hoti thi aur Home
+-- screen par "Islamic tareekh" theek se nazar nahi aati thi - woh tareeqa
+-- hata diya gaya hai. Ab Punjabi date ki tarah local tabular (Kuwaiti)
+-- algorithm se device par hi compute hoti hai (neeche V25.getIslamicDate).
+-- Default correction 0 din hai kyunke tabular result South Asian calendars se
+-- match karta hai (e.g. 25 September 2026 = 12 Rabi-ul-Thani 1448); user
+-- chahe to Home par tap kar ke ±2 din ka manual correction laga sakta hai.
+function V25.getHijriOffset()
+  if prefs.getBoolean("hijriOffsetManual",false) then return prefs.getInt("hijriDayOffset",0) end
+  return 0
+end
+if prefs.getInt("hijriOffsetSchema",0)<272 then
+  prefs.edit().putBoolean("hijriOffsetManual",false).putInt("hijriDayOffset",0).putInt("hijriOffsetSchema",272).remove("hijriDate").apply()
+end
+V25.hijriDayOffset=prefs.getInt("hijriDayOffset",0)
 local savedPrayerTimezone = prefs.getString("prayerTimeZone", "Asia/Karachi")
 
 --------------------------------------------------
@@ -208,6 +226,12 @@ end
 -- dikhti hain. NOTE: internal storage (prayerFajr etc, aur Tahajjud ka
 -- calculation) 24-hour hi rehta hai - yeh function SIRF DISPLAY ke liye
 -- convert karta hai, taake koi aur calculation na tootay.
+function ft(ms)
+  ms=tonumber(ms) or 0
+  local sec=math.max(0,math.floor(ms/1000))
+  return string.format("%02d:%02d",math.floor(sec/60),sec%60)
+end
+
 local function to12Hour(t)
   local h, m = t:match("(%d+):(%d+)")
   if not h then return t end
@@ -246,6 +270,61 @@ local function getPunjabiDate()
   local dayOfMonth = math.floor((today - boundaries[monthIdx]) / 86400) + 1
   local nsYear = winStartYear - 1469 + 1 -- Nanakshahi epoch: 1469 CE (Samat 1)
   return dayOfMonth, punjabiMonths[monthIdx], nsYear
+end
+
+--------------------------------------------------
+-- NAYA (v2.7): اسلامی تاریخ (Islamic / Hijri date) - 100% OFFLINE
+--------------------------------------------------
+-- Pehle ye Islamic date Aladhan API ke response se aati thi, is liye jab bhi
+-- network/API ka masla hota tha to Home screen par "Islamic tareekh" load hi
+-- nahi hoti thi / kuch dikhta hi nahi tha. Ab bilkul getPunjabiDate() ki
+-- tarah - sirf os.date + ek tabular (Kuwaiti) Hijri algorithm - koi internet,
+-- koi API, koi download nahi. Urdu mahine ke naam + Roman mahina dono.
+V25.hijriMonthsUrdu = {"محرم","صفر","ربیع الاول","ربیع الثانی","جمادی الاول","جمادی الثانی","رجب","شعبان","رمضان","شوال","ذوالقعدہ","ذوالحجہ"}
+V25.hijriMonthsEn = {"Muharram","Safar","Rabi-ul-Awwal","Rabi-ul-Thani","Jumada-ul-Awwal","Jumada-ul-Thani","Rajab","Shaban","Ramadan","Shawwal","Dhul-Qadah","Dhul-Hijjah"}
+-- Gregorian -> Hijri (tabular / Kuwaiti algorithm, no tables, no network)
+function V25.gregToHijri(y, m, d)
+  if m < 3 then y = y - 1 m = m + 12 end
+  local a = math.floor(y / 100)
+  local b = 2 - a + math.floor(a / 4)
+  local jd = math.floor(365.25 * (y + 4716)) + math.floor(30.6001 * (m + 1)) + d + b - 1524
+  local l = jd - 1948440 + 10632
+  local n = math.floor((l - 1) / 10631)
+  l = l - 10631 * n + 354
+  local j = math.floor((10985 - l) / 5316) * math.floor((50 * l) / 17719) + math.floor(l / 5670) * math.floor((43 * l) / 15238)
+  l = l - math.floor((30 - j) / 15) * math.floor((17719 * j) / 50) - math.floor(j / 16) * math.floor((15238 * j) / 43) + 29
+  local mo = math.floor((24 * l) / 709)
+  local dd = l - math.floor((709 * mo) / 24)
+  local yy = 30 * n + j - 30
+  return yy, mo, dd
+end
+-- Aaj ki Islamic date: din, Urdu mahina, saal (hijri), Roman mahina
+function V25.getIslamicDate()
+  local off = V25.getHijriOffset()
+  local t = os.time() + (off * 86400)
+  local now = os.date("*t", t)
+  local hy, hm, hd = V25.gregToHijri(now.year, now.month, now.day)
+  return hd, V25.hijriMonthsUrdu[hm], hy, V25.hijriMonthsEn[hm]
+end
+-- Home screen ke liye poori line (Urdu + Roman, TalkBack-friendly)
+function V25.islamicDateLine()
+  local hd, hmU, hy, hmE = V25.getIslamicDate()
+  return "اسلامی تاریخ: " .. tostring(hd) .. " " .. tostring(hmU) .. " " .. tostring(hy) .. " ھ  |  " .. tostring(hd) .. " " .. tostring(hmE) .. " " .. tostring(hy) .. " AH"
+end
+
+-- v2.7-fix2: Islamic date poore din LIVE rehti hai aur AADHI RAAT par khud
+-- ba khud update ho jati hai - koi manual tap/entry wala kaam nahi.
+function V25.startDateTick()
+  if V25.dateTick then pcall(function() handler.removeCallbacks(V25.dateTick) end) end
+  V25.dateTick = Runnable({run = function()
+    pcall(function()
+      local h = tonumber(os.date("%H")) or 0
+      local m = tonumber(os.date("%M")) or 0
+      if screen == "home" and h == 0 and m <= 1 then safeRun("Midnight date refresh", showHome) end
+    end)
+    handler.postDelayed(V25.dateTick, 30000)
+  end})
+  handler.postDelayed(V25.dateTick, 30000)
 end
 
 local function calcTahajjud(maghrib, fajr)
@@ -330,52 +409,20 @@ local function fetchPrayerTimes(c, cntry, onDone)
             local m = result:match('"Maghrib":"(.-)"')
             local i = result:match('"Isha":"(.-)"')
             local sr = result:match('"Sunrise":"(.-)"')
-            -- FIX (v2.4): pehle Hijri mahine ka naam Aladhan API ke "en" field
-            -- se seedha liya jata tha, jisme IAST diacritic characters hote
-            -- hain (jaise "Rabi\u{12b}\u{2bf} al-th\u{101}n\u{12b}") - yeh na sirf ajeeb dikhte
-            -- hain balke TalkBack unhe theek se nahi bol pata, is liye
-            -- Islamic tareekh "ghalat" lagti thi. Ab month ka NUMBER liya
-            -- jata hai aur ek saaf, plain-ASCII naam table se match kiya
-            -- jata hai - hamesha sahi aur TalkBack-friendly.
-            local hijriMonthNames = {"Muharram","Safar","Rabi-ul-Awwal","Rabi-ul-Thani","Jumada-ul-Awwal","Jumada-ul-Thani","Rajab","Shaban","Ramadan","Shawwal","Dhul-Qadah","Dhul-Hijjah"}
-            -- FIX (v2.5): pehle hjYear = result:match('"year":"(.-)"') tha jo
-            -- JSON mein PEHLA "year" pakad leta tha (Gregorian 2026) - is
-            -- wajah se Hijri date galat/confusing dikhti thi. Ab strictly
-            -- hijri block ke andar se year nikalte hain.
-            local hijriPayload = result
-            if hijriDayOffset ~= 0 then
-              -- Ask the same official date API for the Gregorian day shifted
-              -- by the user's local moon-sighting correction. Lua os.time
-              -- normalizes month/year boundaries safely.
-              local shiftedCal=Calendar.getInstance(TimeZone.getTimeZone(savedPrayerTimezone))
-              shiftedCal.setTimeInMillis(os.time()*1000)
-              shiftedCal.add(Calendar.DAY_OF_MONTH,hijriDayOffset)
-              local gregDate=string.format("%02d-%02d-%04d",shiftedCal.get(Calendar.DAY_OF_MONTH),shiftedCal.get(Calendar.MONTH)+1,shiftedCal.get(Calendar.YEAR))
-              local cvOk, converted = pcall(function()
-                local con=URL("https://api.aladhan.com/v1/gToH/" .. gregDate).openConnection()
-                con.setConnectTimeout(8000) con.setReadTimeout(10000)
-                local rd=BufferedReader(InputStreamReader(con.getInputStream()))
-                local body="" local ln=rd.readLine()
-                while ln do body=body..ln ln=rd.readLine() end
-                rd.close()
-                if body:find('"hijri"') then return body end
-                return nil
-              end)
-              if cvOk and converted then hijriPayload=converted end
-            end
-            local hjDay = hijriPayload:match('"hijri":{.-"day":"(.-)"')
-            local hjMonthNum = hijriPayload:match('"hijri":{.-"month":{"number":(%d+)')
-            local hjMonth = hjMonthNum and hijriMonthNames[tonumber(hjMonthNum)]
-            local hjYear = hijriPayload:match('"hijri":{.-"year":"(%d+)"')
+            -- v2.7: Islamic date ka poora API block yahan se hata diya gaya hai.
+            -- Ab Hijri date V25.getIslamicDate() se 100% offline compute hoti
+            -- hai (tabular/Kuwaiti algorithm, koi API call nahi).
+            -- v2.7: yahan pehle Aladhan ke "hijri" block (hjDay/hjMonth/hjYear)
+            -- parse hota tha - woh sab hata diya gaya hai kyunke date ab offline
+            -- bunti hai aur usi liye kabhi "load nahi hui" wala masla bacha.
             local tzName = result:match('"timezone":"(.-)"') or savedPrayerTimezone
             if f then
               savedCity = c savedCountry = cntry
               savedPrayerTimezone = tzName or savedPrayerTimezone
               prayerFajr = f prayerDhuhr = d prayerAsr = a prayerMaghrib = m prayerIsha = i
               if sr then prayerSunrise = sr end
-              if hjDay and hjMonth and hjYear then savedHijriDate = hjDay.." "..hjMonth.." "..hjYear else savedHijriDate = "Hijri Fetch Error" end
               lastPrayerFetchDate = todayDateString()
-              prefs.edit().putString("userCity", c).putString("userCountry", cntry).putString("pFajr", f).putString("pDhuhr", d).putString("pAsr", a).putString("pMaghrib", m).putString("pIsha", i).putString("pSunrise", prayerSunrise).putString("hijriDate", savedHijriDate).putString("prayerTimeZone", savedPrayerTimezone).putString("lastPrayerFetchDate", lastPrayerFetchDate).apply()
+              prefs.edit().putString("userCity", c).putString("userCountry", cntry).putString("pFajr", f).putString("pDhuhr", d).putString("pAsr", a).putString("pMaghrib", m).putString("pIsha", i).putString("pSunrise", prayerSunrise).putString("prayerTimeZone", savedPrayerTimezone).putString("lastPrayerFetchDate", lastPrayerFetchDate).apply()
               pcall(function() scheduleCityAzans() end)
               ok = true
             end
@@ -846,7 +893,7 @@ end
 -- v2.5 AUDIO TRANSLATIONS: INLINE MAPS (114 surahs per collection)
 -- All filenames are embedded in this main Lua file; no require/dofile.
 -- ======================================================================
-local V25 = { items = {}, files = {}, modes = {}, qariItems = {}, qariFiles = {} }
+-- V25 data maps populate the shared table initialized near app state.
 V25.items["EN"] = "Qur_aan"
 V25.files["EN"] = {
     ["1"] = "001-SurahAl-faatiha.mp3",
@@ -2027,7 +2074,7 @@ V25.modes = {
   ["Sindhi"] = {kind="translation", key="SD", label="Sindhi"},
   ["Pashto"] = {kind="translation", key="PS", label="Pashto"},
   ["Farsi"] = {kind="translation", key="FA", label="Farsi"},
-  ["Urdu (Waheed Zafar)"] = {kind="qari", key="waheed", label="Urdu Whole-Surah (Waheed Zafar)"},
+  ["Urdu (Waheed Zafar)"] = {kind="qari", key="waheed", label="Urdu Audio - Whole Surah (Waheed Zafar)"},
   ["Urdu (Shakir Qasmi)"] = {kind="qari", key="shakir", label="Urdu Whole-Surah (Shakir Qasmi)"},
 }
 local function v25UrlEncodeBytes(str)
@@ -2045,7 +2092,7 @@ local function buildV25WholeTrack(mode, surahIdx)
   local fn = files and files[tostring(surahIdx)]
   if not fn or not item then return nil, nil end
   local url = "https://archive.org/download/" .. item .. "/" .. v25UrlEncodeBytes(fn)
-  local pathName = "v25_" .. cfg.key .. "_surah_" .. string.format("%03d", surahIdx) .. ".mp3"
+  local pathName = "v27_" .. cfg.key .. "_surah_" .. string.format("%03d", surahIdx) .. ".mp3"
   return url, pathName
 end
 
@@ -2092,8 +2139,11 @@ local function getAzanLocalPath(i) return azanAudioDir .. "azan_" .. tostring(i)
 -- reliably kaam nahi kar raha tha) - agar kisi ne pehle se Chinese
 -- select ki hui thi, usay khud-ba-khud "Off" par wapis kar dete hain
 -- taake koi purani/ghalat value atki na rahe
-local translationMode = prefs.getString("translationMode", "Off")  -- "Off", "Urdu", "Hindi", "Punjabi", "English", or "Sindhi"
+local translationMode = prefs.getString("translationMode", "Off")
 if translationMode == "Chinese" then translationMode = "Off" end
+if translationMode=="Waheed Zafar" or translationMode=="Urdu Audio - Whole Surah (Waheed Zafar)" or translationMode=="Urdu Whole-Surah (Waheed Zafar)" then translationMode="Urdu (Waheed Zafar)" end
+if translationMode=="Shakir Qasmi" or translationMode=="Urdu Audio - Whole Surah (Shakir Qasmi)" or translationMode=="Urdu Whole-Surah (Shakir Qasmi)" then translationMode="Urdu (Shakir Qasmi)" end
+prefs.edit().putString("translationMode",translationMode).apply()
 local function saveTranslationMode(v)
   translationMode = v
   prefs.edit().putString("translationMode", v).apply()
@@ -2368,6 +2418,35 @@ end
 local function dailyDuas()
   if not _lazyCache.dailyDuas then
     _lazyCache.dailyDuas = {
+  -- NAYA (v2.7-fix2): چھ کلمے / ایمان مفصل / ایمان مجمل / نماز کا سبق / نماز جنازہ
+  -- Ab ye sab ALAG ALAG tracks hain (ek lambi recording ke andar chhupe nahi):
+  --  * 6 Kalme - 6 alag entries, har ek usi recording ka alag clip (startAt).
+  --  * Namaz ka Sabaq - 8 alag alag verified files (har step ki apni file).
+  --  * Namaz-e-Janaza - poora audio + takbeer-wise 4 step entries.
+  -- Sab audio links archive.org se hain aur HTTP 200 + audio/mpeg verify kiye
+  -- gaye hain. Playback sirf ONLINE STREAM hai (auto-download band - hang fix).
+  {cat="6 Kalme / Iman / Namaz", title='Kalima Tayyiba (Pehla Kalma)', en='Pehla Kalma - La ilaha illallah Muhammad-ur-Rasool-Allah.', ar='لا إله إلا الله محمد رسول الله', ur='پہلا کلمہ: اللہ کے سوا کوئی معبود نہیں، محمد ﷺ اللہ کے رسول ہیں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=0, cacheKey="6kalimas_full", endAt=300},
+  {cat="6 Kalme / Iman / Namaz", title='Kalima Shahadat (Doosra Kalma)', en='Doosra Kalma - the testimony of faith.', ar='أشهد أن لا إله إلا الله وحده لا شريك له وأشهد أن محمدا عبده ورسوله', ur='دوسرا کلمہ: گواہی کہ اللہ اکیلا ہے، اس کا کوئی شریک نہیں اور محمد ﷺ اس کے بندے اور رسول ہیں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=245, cacheKey="6kalimas_full", endAt=545},
+  {cat="6 Kalme / Iman / Namaz", title='Kalima Tamjeed (Teesra Kalma)', en='Teesra Kalma - glorification of Allah.', ar='سبحان الله والحمد لله ولا إله إلا الله والله أكبر', ur='تیسرا کلمہ: اللہ پاک ہے، سب تعریف اللہ کے لیے، اللہ کے سوا کوئی معبود نہیں، اللہ سب سے بڑا ہے', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=368, cacheKey="6kalimas_full", endAt=668},
+  {cat="6 Kalme / Iman / Namaz", title='Kalima Tawheed (Chautha Kalma)', en='Chautha Kalma - the oneness of Allah.', ar='لا إله إلا الله وحده لا شريك له له الملك وله الحمد يحيي ويميت وهو حي لا يموت', ur='چوتھا کلمہ: اللہ کے سوا کوئی معبود نہیں، وہ اکیلا ہے، بادشاہی اور تعریف اسی کی ہے، وہی زندگی اور موت دیتا ہے', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=1090, cacheKey="6kalimas_full", endAt=1390},
+  {cat="6 Kalme / Iman / Namaz", title='Kalima Istighfar (Paanchwa Kalma)', en='Paanchwa Kalma - seeking forgiveness.', ar='أستغفر الله ربي من كل ذنب وأتوب إليه', ur='پانچواں کلمہ: میں اپنے رب اللہ سے ہر گناہ کی معافی مانگتا ہوں اور اسی کی طرف رجوع کرتا ہوں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=1288, cacheKey="6kalimas_full", endAt=1588},
+  {cat="6 Kalme / Iman / Namaz", title='Kalima Radd-e-Kufr (Chhata Kalma)', en='Chhata Kalma - rejection of disbelief.', ar='اللهم إني أعوذ بك من أن أشرك بك شيئا وأنا أعلم به وأستغفرك لما لا أعلم به', ur='چھٹا کلمہ: اے اللہ! میں تیری پناہ مانگتا ہوں کہ کسی چیز کو تیرا شریک بناؤں اور تیری بخشش مانگتا ہوں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=1486, cacheKey="6kalimas_full", endAt=1786},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Namaz ki Ahmiyat (Importance)', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Namaz ki Ahmiyat (Importance)', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz01_Introduction_and_Importance_1.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Auqat-e-Namaz (Timings)', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Auqat-e-Namaz (Timings)', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz04_Auqat1.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Azan aur Iqamat', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Azan aur Iqamat', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz09_Azan_Iqamat-1.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ka Tareeqa', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ka Tareeqa', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz12-Wuzu-1.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ke Masail', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ke Masail', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz20-Wuzu-2.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ki Sunnatain', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ki Sunnatain', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz21-Wuzu-3.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Taharat ke Masail', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Taharat ke Masail', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz13_Taharat-1_Masail-e-Istanja.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Ghusl aur Sunnatain', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Ghusl aur Sunnatain', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz22-Bathing-Sunnatain.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Poora Tareeqa (Molana Mehboob Elahi)', en='Complete Urdu lesson on offering Salah, step by step.', ar='', ur='نماز کا مکمل سبق - مولانا محبوب الٰہی صاحب', tip='Poora tareeqa ek recording mein', audio="https://archive.org/download/molana-mehboob-elahi-namaz-ka-tareeqa-www.aswatalislam.net/Molana%20Mehboob%20Elahi%20-%20Namaz%20Ka%20Tareeqa%20%28www.aswatalislam.net%29.mp3", src="archive.org (Molana Mehboob Elahi)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza ka Poora Tareeqa (Audio)', en='Complete method and masail of the funeral prayer, in Urdu.', ar='', ur='نماز جنازہ کا طریقہ اور مسائل', tip='Poora tareeqa sunne ke liye', audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)"},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Pehli Takbeer', en='Janaza namaz ka pehla hissa - is clip mein 1 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 1 تکبیر', tip="Chhota clip - sirf 1 takbeer ka hissa (poora audio upar)", audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)", startAt=0, cacheKey="janaza_full", endAt=420},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Doosri Takbeer', en='Janaza namaz ka doosra hissa - is clip mein 2 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 2 تکبیر', tip="Chhota clip - sirf 2 takbeer ka hissa (poora audio upar)", audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)", startAt=420, cacheKey="janaza_full", endAt=840},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Teesri Takbeer', en='Janaza namaz ka teesra hissa - is clip mein 3 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 3 تکبیر', tip="Chhota clip - sirf 3 takbeer ka hissa (poora audio upar)", audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)", startAt=840, cacheKey="janaza_full", endAt=1260},
+  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Chauthi Takbeer', en='Janaza namaz ka chautha hissa - is clip mein 4 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 4 تکبیر', tip="Chhota clip - sirf 4 takbeer ka hissa (poora audio upar)", audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)", startAt=1260, cacheKey="janaza_full", endAt=1680},
+  {cat="6 Kalme / Iman / Namaz", title='Iman-e-Mufassal', en='I believe in Allah, His Angels, His Books, His Messengers, the Last Day, and in Qadar - that good and evil are from Allah - and in the resurrection after death.', ar='آمَنْتُ بِاللَّهِ وَمَلَائِكَتِهِ وَكُتُبِهِ وَرُسُلِهِ وَالْيَوْمِ الْآخِرِ وَالْقَدْرِ خَيْرِهِ وَشَرِّهِ مِنَ اللَّهِ تَعَالَى وَالْبَعْثِ بَعْدَ الْمَوْتِ', ur='میں اللہ پر، اس کے فرشتوں پر، اس کی کتابوں پر، اس کے رسولوں پر، آخرت کے دن پر، اور تقدیر پر ایمان لایا', tip='Verified direct MP3 nahi mila - mukammal text + online link', audio="", src="", link="https://www.nooresunnat.com/Audios/iman-e-mufassal-in-english"},
+  {cat="6 Kalme / Iman / Namaz", title='Iman-e-Mujmal', en='I believe in Allah as He is, with His names and attributes, and I accept all His commands, with affirmation by the tongue and conviction in the heart.', ar='آمَنْتُ بِاللَّهِ كَمَا هُوَ بِأَسْمَائِهِ وَصِفَاتِهِ وَقَبِلْتُ جَمِيعَ أَحْكَامِهِ إِقْرَارٌ بِاللِّسَانِ وَتَصْدِيقٌ بِالْقَلْبِ', ur='میں اللہ پر ایمان لایا جیسا وہ اپنے ناموں اور صفات کے ساتھ ہے، اور اس کے تمام احکام قبول کیے', tip='Verified direct MP3 nahi mila - mukammal text + online link', audio="", src="", link="https://www.nooresunnat.com/Audios/iman-e-mujmal-with-translation"},
   {cat="Khaana Peena", title="Khana Khane Ke Baad", en="All praise is for Allah, who fed me this and provided it for me without any power or strength on my part.", ar="الْحَمْدُ لِلَّهِ الَّذِي أَطْعَمَنِي هَٰذَا وَرَزَقَنِيهِ مِنْ غَيْرِ حَوْلٍ مِنِّي وَلَا قُوَّةٍ", ur="تمام تعریفیں اللہ کے لیے جس نے مجھے یہ کھلایا اور رزق دیا", tip="Khana khatam hone ke baad parhein", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating.mp3", src="archive.org (Islamic Dua in Audio)"},
   {cat="Khaana Peena", title="Doodh Peene Ke Baad", en="O Allah, bless it for us and give us more of it.", ar="اللَّهُمَّ بَارِكْ لَنَا فِيهِ وَزِدْنَا مِنْهُ", ur="اے اللہ اس میں برکت دے اور اس سے زیادہ عطا فرما", tip="Doodh peene ke khaas baad ki dua", audio="", src=""},
   {cat="Sona Uthna", title="Sone Se Pehle Ki Dua", en="In Your name, O Allah, I die and I live.", ar="بِاسْمِكَ اللَّهُمَّ أَمُوتُ وَأَحْيَا", ur="اے اللہ! تیرے نام سے میں مرتا ہوں اور جیتا ہوں", tip="Bistar par lait kar dayin karwat par parhein (Sahih Bukhari)", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-sleeping.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-before-sleeping.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
@@ -2508,7 +2587,9 @@ local function dailyDuas()
   end
   return _lazyCache.dailyDuas
 end
-local function getDuaAudioLocal(d) return duaAudioDir .. "dua_" .. slug(d.title) .. ".mp3" end
+-- v2.7-fix2: agar entry clip hai (d.cacheKey) to usi ek recording ka ek hi
+-- offline copy use hoti hai - warna har item ka apna file:
+local function getDuaAudioLocal(d) return duaAudioDir .. "dua_" .. slug(d.cacheKey or d.title) .. ".mp3" end
 
 -- NAYA (v2.1): "Poori Quran (Continuous)" - poori Quran EK hi bari file
 -- mein (Urdu Shamshad Ali Khan tarjuma ke sath mixed), do reciters mein
@@ -2759,8 +2840,8 @@ local function showPlaybackNotification(title, text) pcall(function() local nm =
     builder.addAction(isPlayingNow and android.R.drawable.ic_media_pause or android.R.drawable.ic_media_play, isPlayingNow and "Pause" or "Play", playPausePI)
     builder.addAction(android.R.drawable.ic_media_next, "Next", nextPI)
   end)
-  if not actOk and not notifActionErrorShown then
-    notifActionErrorShown = true
+  if not actOk and not PS.notifActionErrorShown then
+    PS.notifActionErrorShown = true
     Toast.makeText(activity, "Notification controls add nahi ho sakay - error: " .. tostring(actErr), 1).show()
   end
 
@@ -2819,9 +2900,79 @@ end
 -- Replay hamesha kaam karega kyunke yeh function pehle hamesha local cache
 -- file check karta hai.
 -- urls: ek single URL string, YA fallback ke liye URLs ki table {url1, url2, ...}
-local function playReliable(urls, cachePath, label, refreshFn, onComplete)
+-- ==========================================================================
+-- v2.7-fix2 - HANG FIX: playback ab SIRF ONLINE STREAM hai. Asli bug: jab
+-- stream fail hoti thi to ye function CHUPKE se poore audio file ka
+-- DownloadManager download shuru kar deta tha aur phir 60 second tak ek
+-- Thread.sleep poll loop mein intezar karta rehta tha ("background mein
+-- download ho raha hai...") - isi se aap ka phone hang ho kar
+-- "isn't responding" deta tha. Ab auto-download POORI TARAH BAND hai.
+-- Stream fail ho to sirf saaf dialog: Retry online / Download / Cancel.
+-- Download sirf aap ke button dabane par hota hai (V25.downloadAudioFile).
+-- NAYA: startAt/endAt (clip) - taake ek lambi recording ka ek hissa (jaise
+-- ek kalima ya ek lafz) alag track ki tarah play ho sake.
+function V25.downloadAudioFile(url, cachePath, label)
+  local ok, err = pcall(function()
+    local req = DownloadManager.Request(Uri.parse(url))
+    req.setTitle(label)
+    req.setDescription("Quran Majeed - manual download")
+    req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+    local root = File(publicDownloadsRoot).getAbsolutePath()
+    local destination = File(cachePath).getAbsolutePath()
+    if destination:sub(1, #root + 1) ~= root .. "/" then
+      req.setDestinationUri(Uri.fromFile(File(cachePath)))
+    else
+      local relative = destination:sub(#root + 2)
+      local parent = File(cachePath).getParentFile()
+      if parent and not parent.exists() then parent.mkdirs() end
+      req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, relative)
+    end
+    activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+  end)
+  if ok then
+    Toast.makeText(activity, "Download shuru - khatam hone par is screen par Play karein (offline chalega).", 1).show()
+  else
+    showErrorDialog("Download Error - " .. tostring(label), err)
+  end
+end
+
+function V25.showStreamFailure(label, url, cachePath, retryFn)
+  local msg = "Online stream nahi chal saki.\n\n" .. tostring(label) .. "\n" .. tostring(url) ..
+    "\n\nv2.7-fix2 mein AUTO-DOWNLOAD band kar diya gaya hai (wahi phone ko hang kar raha tha). Ab aap khud chunein:"
+  local ok = pcall(function()
+    AlertDialog.Builder(activity)
+      .setTitle("⚠ Online stream fail")
+      .setMessage(msg)
+      .setPositiveButton("Retry online", {onClick=function() safeRun("Retry stream", retryFn) end})
+      .setNeutralButton("Download", {onClick=function() safeRun("Download audio", function() V25.downloadAudioFile(url, cachePath, label) end) end})
+      .setNegativeButton("Cancel", nil)
+      .show()
+  end)
+  if not ok then Toast.makeText(activity, "Online stream fail: " .. tostring(label), 1).show() end
+end
+
+local function playReliable(urls, cachePath, label, refreshFn, onComplete, startAt, endAt)
   local urlList = (type(urls) == "table") and urls or {urls}
-  local tryStream -- forward declare so the cached-file branch can fall back to it on async failure
+  local tryStream
+  if updateTask then pcall(function() handler.removeCallbacks(updateTask) end) end
+  if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) end
+
+  local function startClipWatcher(p)
+    if not (endAt and endAt > 0) then return end
+    local endMs = math.floor(endAt * 1000)
+    local startMs = math.floor((startAt or 0) * 1000)
+    V25.clipTask = Runnable({run = function()
+      pcall(function()
+        if p and p.isPlaying() and p.getCurrentPosition() >= endMs then
+          p.pause() p.seekTo(startMs)
+          if onComplete then onComplete() elseif refreshFn then refreshFn() end
+          return
+        end
+      end)
+      handler.postDelayed(V25.clipTask, 800)
+    end})
+    handler.postDelayed(V25.clipTask, 800)
+  end
 
   stopPlayer(function()
   local urlIdx = 1
@@ -2835,7 +2986,7 @@ local function playReliable(urls, cachePath, label, refreshFn, onComplete)
     local streamFailed = false
     local dsOk = pcall(function() duaMp.setDataSource(url) end)
     if not dsOk then
-      Toast.makeText(activity, "Audio source set nahi ho saka.", 0).show()
+      showErrorDialog("Audio Error - " .. tostring(label), "Audio source set nahi ho saka (setDataSource fail).\n\nLabel: " .. tostring(label) .. "\nURL: " .. tostring(url))
       return
     end
     duaMp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
@@ -2848,45 +2999,21 @@ local function playReliable(urls, cachePath, label, refreshFn, onComplete)
         tryStream()
         return true
       end
-      Toast.makeText(activity, "Online stream nahi hui, ab background mein download karke play karenge...", 1).show()
-      local dlOk, dlErr = pcall(function()
-        local dm = activity.getSystemService(Context.DOWNLOAD_SERVICE)
-        local req = DownloadManager.Request(Uri.parse(url))
-        req.setTitle(label)
-        -- FIX: VISIBILITY_HIDDEN public folder ke sath SecurityException
-        -- deta hai ("Invalid value for visibility: 2") - Surah download
-        -- mein yehi bug mila tha, yahan bhi wahi tha.
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationUri(Uri.fromFile(File(cachePath)))
-        dm.enqueue(req)
-      end)
-      if not dlOk then
-        showErrorDialog("Download Error", dlErr)
-        return true
-      end
-      Thread(Runnable{run=function()
-        local tries = 0
-        while not File(cachePath).exists() and tries < 60 do
-          pcall(function() Thread.sleep(1000) end)
-          tries = tries + 1
-        end
-        handler.post(Runnable{run=function()
-          if File(cachePath).exists() then
-            playReliable(urlList, cachePath, label, refreshFn, onComplete)
-          else
-            Toast.makeText(activity, "Download bhi fail ho gaya - internet connection check karein.", 0).show()
-          end
-        end})
-      end}).start()
+      V25.showStreamFailure(label, url, cachePath, tryStream)
       return true
     end})
     duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
-      applyPlaybackSpeed(p)
-      p.start()
+      local okp, errp = pcall(function()
+        applyPlaybackSpeed(p)
+        if startAt and startAt > 0 then p.seekTo(math.floor(startAt * 1000)) end
+        p.start()
+        startClipWatcher(p)
+      end)
+      if not okp then showErrorDialog("Play Error - " .. tostring(label), errp) end
       Toast.makeText(activity, "Playing: " .. label, 0).show()
       if refreshFn then refreshFn() end
     end})
-    duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
+    duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) V25.clipTask = nil end if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
     duaMp.prepareAsync()
   end
 
@@ -2909,12 +3036,17 @@ local function playReliable(urls, cachePath, label, refreshFn, onComplete)
         return true
       end})
       duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
-        applyPlaybackSpeed(p)
-        p.start()
+        local okp, errp = pcall(function()
+          applyPlaybackSpeed(p)
+          if startAt and startAt > 0 then p.seekTo(math.floor(startAt * 1000)) end
+          p.start()
+          startClipWatcher(p)
+        end)
+        if not okp then showErrorDialog("Play Error (offline) - " .. tostring(label), errp) end
         Toast.makeText(activity, "Playing (offline): " .. label, 0).show()
         if refreshFn then refreshFn() end
       end})
-      duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
+      duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) V25.clipTask = nil end if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
       duaMp.prepareAsync()
     end)
     if ok then return end
@@ -2932,6 +3064,23 @@ end
 local playerReady = false      -- FIX: true sirf jab mp poori tarah "prepared" ho chuka ho
 local playIntentPending = false -- agar user ne prepare hone se PEHLE Play dabaya
 local function togglePlayPause()
+  if PS.externalPlayback then
+    if PS.externalPreparing then
+      PS.externalPausePending=not PS.externalPausePending
+      if btnPlayPause then btnPlayPause.setText("Loading...") end
+      return
+    end
+    if not duaMp then showPlayer(currentIndex); return end
+    pcall(function()
+      if duaMp.isPlaying() then duaMp.pause(); isPaused=true; if btnPlayPause then btnPlayPause.setText("▶ "..tr("Play")) end
+      else
+        if duaMp.getDuration()>0 and duaMp.getCurrentPosition()>=duaMp.getDuration()-500 then duaMp.seekTo(0) end
+        duaMp.start(); isPaused=false; if btnPlayPause then btnPlayPause.setText("⏸ "..tr("Pause")) end
+        startSleepTimer()
+      end
+    end)
+    return
+  end
   if not mp then return end
   if not playerReady then
     -- FIX: "pehli dafa Play na hona" bug - bari (translation wali) files
@@ -2958,8 +3107,14 @@ local function togglePlayPause()
     end
   end)
 end
-local function seekForward() if mp and mp.isPlaying() then local n = mp.getCurrentPosition()+(seekSeconds*1000) if n>mp.getDuration() then n=mp.getDuration() end mp.seekTo(n) Toast.makeText(activity,"Forward "..seekSeconds.."s",0).show() end end
-local function seekRewind() if mp and mp.isPlaying() then local n = mp.getCurrentPosition()-(seekSeconds*1000) if n<0 then n=0 end mp.seekTo(n) Toast.makeText(activity,"Rewind "..seekSeconds.."s",0).show() end end
+local function seekForward()
+  local p=(PS.externalPlayback and duaMp) or mp
+  if p then pcall(function() local n=p.getCurrentPosition()+(seekSeconds*1000); if n>p.getDuration() then n=p.getDuration() end; p.seekTo(n); Toast.makeText(activity,"Forward "..seekSeconds.."s",0).show() end) end
+end
+local function seekRewind()
+  local p=(PS.externalPlayback and duaMp) or mp
+  if p then pcall(function() local n=p.getCurrentPosition()-(seekSeconds*1000); if n<0 then n=0 end; p.seekTo(n); Toast.makeText(activity,"Rewind "..seekSeconds.."s",0).show() end) end
+end
 
 local showHome, showSettings, showAbout, showFeedback, showSurahList, showPlayer, showTasbeeh, showBookmarksScreen, showNamesOfAllah, showReadingMode, showDailyDuas, showPara, showParaSurahs, playNextSurah, playPrevSurah, downloadSurah, confirmDelete, showAzan
 
@@ -2972,10 +3127,10 @@ local function bottomTabs(activeTab)
   local function tabColor(tab) return (activeTab == tab) and appColorStr or "#00000000" end
   local function tabTextColor(tab) return (activeTab == tab) and -1 or -12303292 end
   return {LinearLayout, orientation=0, layout_width=-1, backgroundColor="#1A000000",
-    {Button, text="Home", textSize="13sp", layout_weight=1, backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Home tab", onClick=function() showHome() end},
-    {Button, text="Quran", textSize="13sp", layout_weight=1, backgroundColor=tabColor("quran"), textColor=tabTextColor("quran"), contentDescription="Quran tab", onClick=function() showSurahList() end},
-    {Button, text="Duas", textSize="13sp", layout_weight=1, backgroundColor=tabColor("duas"), textColor=tabTextColor("duas"), contentDescription="Duas tab", onClick=function() showDailyDuas() end},
-    {Button, text="More", textSize="13sp", layout_weight=1, backgroundColor=tabColor("more"), textColor=tabTextColor("more"), contentDescription="More tab", onClick=function() showMore() end}
+    {Button, text="Home", textSize="13sp", layout_weight=1, backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Home tab", onClick=function() safeRun("showHome", showHome) end},
+    {Button, text="Quran", textSize="13sp", layout_weight=1, backgroundColor=tabColor("quran"), textColor=tabTextColor("quran"), contentDescription="Quran tab", onClick=function() safeRun("showSurahList", showSurahList) end},
+    {Button, text="Duas", textSize="13sp", layout_weight=1, backgroundColor=tabColor("duas"), textColor=tabTextColor("duas"), contentDescription="Duas tab", onClick=function() safeRun("showDailyDuas", showDailyDuas) end},
+    {Button, text="More", textSize="13sp", layout_weight=1, backgroundColor=tabColor("more"), textColor=tabTextColor("more"), contentDescription="More tab", onClick=function() safeRun("showMore", showMore) end}
   }
 end
 
@@ -2990,18 +3145,18 @@ local function moreSubTabs(activeTab)
   -- switch ho sake. Zyada items fit karne ke liye horizontally scroll hoti hai.
   return {HorizontalScrollView, layout_width=-1, backgroundColor="#1A000000",
     {LinearLayout, orientation=0, layout_width="wrap_content",
-      {Button, text="Para", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("para"), textColor=tabTextColor("para"), contentDescription="30 Para tab", onClick=function() showPara() end},
-      {Button, text="Tasbeeh", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("tasbeeh"), textColor=tabTextColor("tasbeeh"), contentDescription="Digital Tasbeeh tab", onClick=function() showTasbeeh() end},
-      {Button, text="Bookmarks", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("bookmarks"), textColor=tabTextColor("bookmarks"), contentDescription="Bookmarks tab", onClick=function() showBookmarksScreen() end},
-      {Button, text="Names", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("names"), textColor=tabTextColor("names"), contentDescription="99 Names tab", onClick=function() showNamesOfAllah() end},
-      {Button, text="Prophet Names", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("asmanabi"), textColor=tabTextColor("asmanabi"), contentDescription="Blessed Names tab", onClick=function() showAsmaNabi() end},
-      {Button, text="Full Quran", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("fullquran"), textColor=tabTextColor("fullquran"), contentDescription="Poori Quran Continuous tab", onClick=function() showFullQuranScreen() end},
-      {Button, text="Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("hadith"), textColor=tabTextColor("hadith"), contentDescription="Hadith tab", onClick=function() showHadithScreen() end},
-      {Button, text="Tafseer 2", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("israr"), textColor=tabTextColor("israr"), contentDescription="Tafseer Israr Ahmad tab", onClick=function() showIsrarTafseerScreen() end},
-      {Button, text="40 Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("nawawi"), textColor=tabTextColor("nawawi"), contentDescription="40 Hadith Nawawi tab", onClick=function() showNawawiScreen() end},
-      {Button, text="Adhan", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("azan"), textColor=tabTextColor("azan"), contentDescription="Adhan audio tab", onClick=function() showAzan() end},
-      {Button, text="Menu", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("menu"), textColor=tabTextColor("menu"), contentDescription="Menu tab", onClick=function() showSettings() end},
-      {Button, text="Home", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Back to Home tab", onClick=function() showHome() end}
+      {Button, text="Para", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("para"), textColor=tabTextColor("para"), contentDescription="30 Para tab", onClick=function() safeRun("showPara", showPara) end},
+      {Button, text="Tasbeeh", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("tasbeeh"), textColor=tabTextColor("tasbeeh"), contentDescription="Digital Tasbeeh tab", onClick=function() safeRun("showTasbeeh", showTasbeeh) end},
+      {Button, text="Bookmarks", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("bookmarks"), textColor=tabTextColor("bookmarks"), contentDescription="Bookmarks tab", onClick=function() safeRun("showBookmarksScreen", showBookmarksScreen) end},
+      {Button, text="Names", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("names"), textColor=tabTextColor("names"), contentDescription="99 Names tab", onClick=function() safeRun("showNamesOfAllah", showNamesOfAllah) end},
+      {Button, text="Prophet Names", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("asmanabi"), textColor=tabTextColor("asmanabi"), contentDescription="Blessed Names tab", onClick=function() safeRun("showAsmaNabi", showAsmaNabi) end},
+      {Button, text="Full Quran", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("fullquran"), textColor=tabTextColor("fullquran"), contentDescription="Poori Quran Continuous tab", onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end},
+      {Button, text="Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("hadith"), textColor=tabTextColor("hadith"), contentDescription="Hadith tab", onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
+      {Button, text="Tafseer 2", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("israr"), textColor=tabTextColor("israr"), contentDescription="Tafseer Israr Ahmad tab", onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
+      {Button, text="40 Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("nawawi"), textColor=tabTextColor("nawawi"), contentDescription="40 Hadith Nawawi tab", onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
+      {Button, text="Adhan", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("azan"), textColor=tabTextColor("azan"), contentDescription="Adhan audio tab", onClick=function() safeRun("showAzan", showAzan) end},
+      {Button, text="Menu", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("menu"), textColor=tabTextColor("menu"), contentDescription="Menu tab", onClick=function() safeRun("showSettings", showSettings) end},
+      {Button, text="Home", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Back to Home tab", onClick=function() safeRun("showHome", showHome) end}
     }
   }
 end
@@ -3033,8 +3188,7 @@ local function buildSearchIndex()
   -- NAYA (v2.1): 30 Para bhi search mein - tap karne par turant play hota hai
   for i, n in ipairs(paraNames) do
     table.insert(idx, {label="Para " .. i .. ": " .. n, action=function()
-      showParaScreen()
-      playPara(i)
+      showParaSurahs(i)
     end})
   end
   -- NAYA (v2.1): Tarjuma (translation) bhi search se select ho sakta hai
@@ -3061,7 +3215,11 @@ local function buildSearchIndex()
       end})
     else
       table.insert(idx, {label="Dua (Text): " .. d.title, searchText=(d.title.." "..tostring(d.en or "").." "..tostring(d.ur or "").." "..tostring(d.ar or "")), action=function()
-        AlertDialog.Builder(activity).setTitle(d.title).setMessage(d.ar .. "\n\n" .. d.ur).setPositiveButton("OK", nil).show()
+        local dlgBody = d.ar .. "\n\n" .. d.ur .. ((d.link and d.link ~= "") and ("\n\n" .. d.link) or "")
+        local dlg = AlertDialog.Builder(activity).setTitle(d.title).setMessage(dlgBody)
+        if d.link and d.link ~= "" then dlg.setNeutralButton("▶️ Online sunnein", {onClick=function() safeRun("Open source page", openLinkAndClose, d.link) end}) end
+        dlg.setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(dlgBody) end})
+        dlg.setNegativeButton("Cancel", nil).show()
       end})
     end
   end
@@ -3104,13 +3262,9 @@ function showHome()
   -- FIX (v2.1): agar aakhri prayer-time fetch AAJ ki tareekh ki nahi hai
   -- (matlab purana din, ya kabhi fetch hi nahi hui), to khud-ba-khud
   -- background mein dobara fetch ho jati hai - bina button dabaye
-  -- FIX (v2.5): pehli dafa 2.5 open hone par purani galat Hijri cache
-  -- clear karke force re-fetch (year-parse + Pakistan adjustment ke sath)
-  local hijriFixDone = prefs.getBoolean("hijriFix_v25", false)
-  if not hijriFixDone then
-    lastPrayerFetchDate = ""
-    prefs.edit().putBoolean("hijriFix_v25", true).putString("lastPrayerFetchDate", "").apply()
-  end
+  -- v2.7: Islamic date ab 100% offline (V25.getIslamicDate) hai - purana API
+  -- wala Hijri cache/hijriFix block hata diya gaya hai. Prayer times ka daily
+  -- auto-refresh neeche bilkul pehle jaisa hi chalta hai.
   if lastPrayerFetchDate ~= todayDateString() and savedCity ~= "" and savedCountry ~= "" then
     fetchPrayerTimes(savedCity, savedCountry, function(ok)
       if ok and screen == "home" then showHome() end
@@ -3119,7 +3273,7 @@ function showHome()
 
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor, focusable=true, focusableInTouchMode=true,
-    {TextView, text="Quran Majeed v2.6", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 6"},
+    {TextView, text="Quran Majeed v2.7", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 7"},
     {LinearLayout, orientation=0, layout_width=-1, padding="10dp", gravity="center_vertical",
       {EditText, id="etHomeSearch", hint="Search Surah, Reciter, Dua (Arabic/Urdu/English)...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888", contentDescription="Search Quran, duas and translations"},
       {Button, id="btnHomeSearch", text="Search", textSize="12sp", layout_marginLeft="4dp", backgroundColor=appColorStr, textColor=-1, contentDescription="Search"},
@@ -3137,16 +3291,11 @@ function showHome()
           {TextView, text=os.date("%d %B %Y (%A)"), textSize="12sp", textColor=textColor, layout_weight=1},
           {TextView, text="🔋 " .. (currentBatteryPercent() >= 0 and (currentBatteryPercent() .. "%") or "?"), textSize="12sp", textColor=textColor}
         },
-        {TextView, id="txtHijriDate", text=savedHijriDate .. "  (tap to adjust ±1 day)", textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="2dp", gravity="center", contentDescription="Islamic date. Tap to adjust local moon sighting offset", onClick=function()
-          local labels={"-2 days", "-1 day", "0 (API date)", "+1 day", "+2 days"}
-          AlertDialog.Builder(activity).setTitle("Hijri date correction for local moon sighting").setItems(labels, {onClick=function(d, which)
-            hijriDayOffset=which-2
-            prefs.edit().putInt("hijriDayOffset",hijriDayOffset).apply()
-            lastPrayerFetchDate=""
-            Toast.makeText(activity,"Refreshing Islamic date...",1).show()
-            fetchPrayerTimes(savedCity,savedCountry,function(ok) if ok and screen=="home" then showHome() end end)
-          end}).show()
-        end},
+        -- v2.7-fix2: اسلامی تاریخ - bilkul Punjabi date ki tarah LIVE, sirf
+        -- screen par nazar aati hai. Koi manual entry / "tap to adjust" nahi
+        -- (wo kaam nahi kar raha tha, is liye hata diya). Aadhi raat par
+        -- khud update hoti hai.
+        {TextView, id="txtIslamicDate", text=V25.islamicDateLine(), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="2dp", gravity="center", contentDescription="Islamic date - live, daily auto updated"},
         {TextView, text=(function() local pd, pm, py = getPunjabiDate() return "Punjabi: " .. pd .. " " .. pm .. ", " .. py .. " Samat" end)(), textSize="12sp", textColor=textColor, layout_marginBottom="10dp", gravity="center"},
         (spot.kind=="ayah") and {LinearLayout, orientation=1,
           {TextView, text=tr("Ayat of the Day"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
@@ -3304,7 +3453,7 @@ function showAzanPlayer(trackIndex)
   activity.setContentView(loadlayout{
     LinearLayout,id="mainLayout",orientation=1,padding="18dp",layout_width=-1,layout_height=-1,gravity="center",backgroundColor=bgColor,
     {LinearLayout,orientation=0,layout_width=-1,gravity="center_vertical",
-      {Button,text="Back",contentDescription="Back to Adhan audio list",onClick=function() showAzan() end},
+      {Button,text="Back",contentDescription="Back to Adhan audio list",onClick=function() safeRun("showAzan", showAzan) end},
       {TextView,text="Adhan Player",textSize="20sp",typeface=Typeface.DEFAULT_BOLD,textColor=appColorStr,layout_marginLeft="10dp"}
     },
     {TextView,id="azanPlayerState",text=downloaded and "Offline playback" or "Online streaming",textSize="13sp",textColor=appColorStr,layout_marginTop="14dp",gravity="center"},
@@ -3335,7 +3484,7 @@ function showAzanPlayer(trackIndex)
       Toast.makeText(activity,"Selected for city prayer schedule.",1).show()
       showAzanSchedule()
     end},
-    {Button,text="Prayer Schedule",layout_width=-1,layout_marginTop="6dp",onClick=function() showAzanSchedule() end}
+    {Button,text="Prayer Schedule",layout_width=-1,layout_marginTop="6dp",onClick=function() safeRun("showAzanSchedule", showAzanSchedule) end}
   })
   applyWallpaper(mainLayout,bgColor)
   btnAzanDownload.onClick=function()
@@ -3459,8 +3608,8 @@ function showAzanSchedule()
     ed.apply(); scheduleCityAzans()
     Toast.makeText(activity,"City-wise Azan schedule saved for "..savedCity..".",1).show()
   end})
-  play.setOnClickListener(View.OnClickListener{onClick=function() showAzan() end})
-  back.setOnClickListener(View.OnClickListener{onClick=function() showAzan() end})
+  play.setOnClickListener(View.OnClickListener{onClick=function() safeRun("showAzan", showAzan) end})
+  back.setOnClickListener(View.OnClickListener{onClick=function() safeRun("showAzan", showAzan) end})
 end
 
 
@@ -3476,13 +3625,13 @@ showAzan = function()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text="Back", contentDescription="Back to More", onClick=function() showMore() end},
+      {Button, text="Back", contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="Adhan Audio", textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {TextView, text="City: "..savedCity..", "..savedCountry..". Tap a recording to open the Quran-style player.", textSize="12sp", textColor=textColor, padding="10dp"},
-    {Button,text="Set city prayer schedule",layout_width=-1,layout_margin="8dp",backgroundColor="#1976D2",textColor=-1,contentDescription="Set automatic city-wise prayer Azan schedule",onClick=function() showAzanSchedule() end},
+    {Button,text="Set city prayer schedule",layout_width=-1,layout_margin="8dp",backgroundColor="#1976D2",textColor=-1,contentDescription="Set automatic city-wise prayer Azan schedule",onClick=function() safeRun("showAzanSchedule", showAzanSchedule) end},
     {ListView, id="azanList", layout_width=-1, layout_height=0, layout_weight=1},
-    {Button, text="Back to More", layout_width=-1, contentDescription="Back to More", onClick=function() showMore() end}
+    {Button, text="Back to More", layout_width=-1, contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end}
   })
   applyWallpaper(mainLayout, bgColor)
   azanList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
@@ -3544,7 +3693,7 @@ function showDuaPlayer(idx)
     },
     {Button, id="btnDuaDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1, contentDescription=isDownloaded and "Delete Offline Copy" or "Download"},
     {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text=tr("Back"), layout_weight=1, layout_marginRight="10dp", contentDescription="Back to duas list", onClick=function() showDailyDuas() end},
+      {Button, text=tr("Back"), layout_weight=1, layout_marginRight="10dp", contentDescription="Back to duas list", onClick=function() safeRun("showDailyDuas", showDailyDuas) end},
       {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
     }
   })
@@ -3584,19 +3733,19 @@ function showDuaPlayer(idx)
         showErrorDialog("Dua Download Error", err)
         return
       end
-      Toast.makeText(activity, "Download shuru...", 1).show()
-      Thread(Runnable{run=function()
-        local tries = 0
-        while not File(localPath).exists() and tries < 60 do pcall(function() Thread.sleep(1000) end) tries = tries + 1 end
-        handler.post(Runnable{run=function() if screen == "duaplayer" and duaPlayerIndex == idx then showDuaPlayer(idx) end end})
-      end}).start()
+      -- v2.7-fix2: yahan pehle ek 60-second Thread.sleep poll loop tha jo
+      -- download mukammal hone ka intezar karta rehta tha - wahi resource load
+      -- phone ko hang kar deta tha. Ab koi poll loop nahi: download chalta
+      -- rahega, aap khud Play dabayein (offline file milte hi apne aap use
+      -- ho jati hai kyunke playReliable pehle cache file check karta hai).
+      Toast.makeText(activity, "Download shuru - kuch dair baad Play dabayein (offline chalega).", 1).show()
     end
   end
 
   playReliable(d.audio, localPath, d.title, nil, function()
     if btnDuaPlayPause then btnDuaPlayPause.setText("▶ " .. tr("Play")) end
     if duaPlayerIndex < #list then showDuaPlayer(duaPlayerIndex+1) end
-  end)
+  end, d.startAt, d.endAt)
   updateTask = Runnable({run = function()
     if duaMp then pcall(function() if duaMp.isPlaying() then skBar.setMax(duaMp.getDuration()) skBar.setProgress(duaMp.getCurrentPosition()) end end) end
     handler.postDelayed(updateTask, 1000)
@@ -3649,7 +3798,8 @@ function showDailyDuas()
         {TextView, text=d.ar, textSize="18sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="right", layout_marginTop="4dp"},
         {TextView, text=d.ur, textSize="14sp", textColor=textColor, gravity="right", layout_marginTop="2dp"},
         {TextView, text=d.en or "", textSize="14sp", textColor=textColor, gravity="left", layout_marginTop="5dp", contentDescription="English translation or description"},
-        {TextView, text="💡 " .. d.tip, textSize="11sp", textColor="#777777", layout_marginTop="4dp"}
+        {TextView, text="💡 " .. d.tip, textSize="11sp", textColor="#777777", layout_marginTop="4dp"},
+        (d.link and d.link ~= "" and {Button, text="▶️ Online sunnein (source page)", textSize="12sp", layout_width=-1, layout_marginTop="6dp", backgroundColor="#00897B", textColor=-1, contentDescription="Online audio source page for " .. d.title, onClick=function() safeRun("Dua source page", openLinkAndClose, d.link) end} or {TextView, text="", textSize="1sp"})
       })
     end
   end
@@ -3661,7 +3811,7 @@ function showDailyDuas()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showHome() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showHome", showHome) end},
       {TextView, text=tr("Daily Masnoon Duas"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {LinearLayout, orientation=0, layout_width=-1, padding="8dp",
@@ -3679,6 +3829,97 @@ function showDailyDuas()
   applyWallpaper(mainLayout, bgColor)
 end
 
+--------------------------------------------------
+-- NAYA (v2.7-fix): 6 Kalme / Iman-e-Mufassal / Iman-e-Mujmal / Namaz ka Sabaq /
+-- Namaz-e-Janaza. FIX: pehle ye screen ScrollView ke andar Button rows par
+-- bani thi - kuch devices/accessibility setups par woh click nahi leti thi
+-- aur error de deti thi. Ab bilkul wahi ListView + onItemClick pattern use
+-- hua hai jo Poora Quran / Para list / Search results mein pehle se theek
+-- chal raha hai. Poori screen aur har click safeRun ke andar hai.
+--------------------------------------------------
+function V25.kalimaHasAudio(d) return (d ~= nil and d.audio ~= nil and tostring(d.audio) ~= "") end
+
+function V25.kalimaItems()
+  local out = {}
+  local ok, err = pcall(function()
+    for _, d in ipairs(dailyDuas()) do
+      if tostring(d.cat or "") == "6 Kalme / Iman / Namaz" then table.insert(out, d) end
+    end
+  end)
+  if not ok then showErrorDialog("6 Kalme list", err) end
+  return out
+end
+
+-- v2.7-fix2: har item ke apne naqsh-daar naam (parts) - sab alag alag play
+-- hote hain, ek hi lambi recording ke andar chhupe nahi rehte.
+function V25.kalimaPartTitle(d)
+  if not d then return "" end
+  local t = tostring(d.title)
+  if d.startAt and d.startAt > 0 then
+    return t .. "   [clip " .. math.floor(d.startAt/60) .. "m se]"
+  end
+  return t
+end
+
+function V25.openKalimaItem(d)
+  if not d then return end
+  if V25.kalimaHasAudio(d) then
+    buildAudioDuasList()
+    for ai, ad in ipairs(audioDuasCache) do
+      if ad == d then showDuaPlayer(ai) return end
+    end
+    playReliable(d.audio, getDuaAudioLocal(d), tostring(d.title), nil, nil, d.startAt, d.endAt)
+    return
+  end
+  local body = ""
+  if d.ar and d.ar ~= "" then body = body .. d.ar .. "\n\n" end
+  if d.ur and d.ur ~= "" then body = body .. d.ur .. "\n\n" end
+  if d.en and d.en ~= "" then body = body .. d.en end
+  if d.tip and d.tip ~= "" then body = body .. "\n\n" .. d.tip end
+  local bld = AlertDialog.Builder(activity).setTitle(tostring(d.title)).setMessage(body)
+  if d.link and d.link ~= "" then
+    bld.setNeutralButton("Online sunnein", {onClick=function() safeRun("Open source page", openLinkAndClose, d.link) end})
+  end
+  bld.setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(body) end})
+  bld.setNegativeButton("Cancel", nil)
+  bld.show()
+end
+
+function showKalimaImanScreen()
+  screen = "kalima"
+  safeRun("Stop previous player", stopPlayer)
+  local bgColor, textColor = getThemeColors()
+  local items = V25.kalimaItems()
+  local labels = {}
+  for _, d in ipairs(items) do
+    if V25.kalimaHasAudio(d) then
+      local tag = "   (online stream"
+      if d.startAt and d.startAt > 0 then tag = tag .. " - alag clip" end
+      table.insert(labels, "🔊 " .. tostring(d.title) .. tag .. ")")
+    else
+      table.insert(labels, "📝 " .. tostring(d.title) .. "   (text + online link)")
+    end
+  end
+  if #labels == 0 then table.insert(labels, "Koi item nahi mila - app dobara kholein") end
+
+  activity.setContentView(loadlayout{
+    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+      {Button, text=tr("Back"), contentDescription="Back to More menu", onClick=function() safeRun("Back to More", showMore) end},
+      {TextView, text="6 Kalme / Iman / Namaz", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+    },
+    {TextView, text="🔊 wale items Quran jaisa player kholte hain (online + download + offline). 📝 wale items ka verified direct MP3 nahi mila, is liye unka mukammal text + online source link diya gaya hai.", textSize="11sp", textColor="#777777", padding="8dp"},
+    {TextView, text="Neeche list mein se koi bhi item tap karein:", textSize="12sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="8dp"},
+    {ListView, id="kalimaList", layout_width=-1, layout_height=-1}
+  })
+  applyWallpaper(mainLayout, bgColor)
+  kalimaList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
+  kalimaList.onItemClick = function(l, v, p, i)
+    local d = items[i+1]
+    safeRun("6 Kalme item: " .. tostring(labels[i+1]), V25.openKalimaItem, d)
+  end
+end
+
 -- 30 PARA SCREEN
 function showPara()
   screen = "para"
@@ -3690,7 +3931,7 @@ function showPara()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#2E7D32", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), backgroundColor="#1B5E20", textColor=-1, onClick=function() showMore() end},
+      {Button, text=tr("Back"), backgroundColor="#1B5E20", textColor=-1, onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="30 Para (Juz-wise)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {TextView, text="Har Para tap karein - us Juz ki Surahon ki list khulegi (play/download).", textSize="11sp", padding="8dp", textColor=textColor},
@@ -3741,7 +3982,7 @@ function showParaSurahs(paraNum)
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#2E7D32", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), backgroundColor="#1B5E20", textColor=-1, onClick=function() showPara() end},
+      {Button, text=tr("Back"), backgroundColor="#1B5E20", textColor=-1, onClick=function() safeRun("showPara", showPara) end},
       {TextView, text="Para " .. paraNum, textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {ListView, id="psList", layout_width=-1, layout_height=-1}
@@ -3785,7 +4026,7 @@ function showNamesOfAllah()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
       {TextView, text=tr("99 Names of Allah"), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {LinearLayout, orientation=0, layout_width=-1, layout_margin="10dp",
@@ -3860,7 +4101,7 @@ function showAsmaNabi()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), contentDescription="Back to More", onClick=function() showMore() end},
+      {Button, text=tr("Back"), contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="Blessed Names of Prophet Muhammad", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {ScrollView, layout_width=-1, layout_height=-1,
@@ -3912,7 +4153,7 @@ function showProgressTracker()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="Progress Tracker", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {TextView, text=completedCount .. " / 114 Surah completed", textSize="13sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, padding="10dp"},
@@ -3952,7 +4193,7 @@ function showStorageManager()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="Storage Manager", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {LinearLayout, orientation=1, padding="15dp",
@@ -3992,7 +4233,7 @@ function showFullQuranScreen()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#3E2723", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="Poori Quran (Continuous)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {TextView, text="Yeh EK hi bari (kai ghante lambi) file hai - Surah-wise seek nahi hoti, sirf continuous sunein ya scrub karein. Reciter select karein:", textSize="12sp", textColor="#C62828", padding="10dp"},
@@ -4027,7 +4268,7 @@ function showFullQuranPlayer(voiceIdx)
       {Button, id="fqFwdBtn", text=seekSeconds.."s ⏩", textSize="14sp", layout_weight=1, layout_margin="2dp"}
     },
     {Button, id="fqDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download (bari file)", textSize="14sp", layout_width=-1, layout_marginTop="15dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
-    {Button, text=tr("Back"), layout_width=-1, layout_marginTop="20dp", onClick=function() showFullQuranScreen() end}
+    {Button, text=tr("Back"), layout_width=-1, layout_marginTop="20dp", onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end}
   })
   applyWallpaper(mainLayout, bgColor)
 
@@ -4108,7 +4349,7 @@ function showHadithScreen()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#4E342E", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="Sahih Bukhari (English)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {TextView, text="97 Kitab (Books) - koi bhi select karein", textSize="12sp", textColor="#777777", padding="8dp"},
@@ -4154,7 +4395,7 @@ function showHadithPlayer(bookIdx)
     },
     {Button, id="hdDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
     {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text="Book List", layout_weight=1, layout_marginRight="10dp", onClick=function() showHadithScreen() end},
+      {Button, text="Book List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
       {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
     }
   })
@@ -4242,7 +4483,7 @@ function showIsrarTafseerScreen()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#5D4037", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {TextView, text="Bayan-ul-Quran - Introduction + 114 Surah, Urdu mein", textSize="12sp", textColor="#777777", padding="8dp"},
@@ -4281,7 +4522,7 @@ function showIsrarTafseerPlayer(idx)
     },
     {Button, id="izDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
     {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() showIsrarTafseerScreen() end},
+      {Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
       {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
     }
   })
@@ -4369,7 +4610,7 @@ function showNawawiScreen()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor="#3E2723", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
       {TextView, text="40 Hadith (Imam An-Nawawi)", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
     },
     {TextView, text="Mukhtasar, mash-hoor 40 Ahadith ka majmua", textSize="12sp", textColor="#777777", padding="8dp"},
@@ -4407,7 +4648,7 @@ function showNawawiPlayer(n)
     },
     {Button, id="nwDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
     {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() showNawawiScreen() end},
+      {Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
       {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
     }
   })
@@ -4493,17 +4734,18 @@ function showMore()
     {ScrollView, layout_width=-1, layout_height=0, layout_weight=1,
     {LinearLayout, orientation=1, padding="20dp", layout_width=-1, layout_height=-2,
       {TextView, text="More", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr},
-      {Button, text="30 Para", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#2E7D32", textColor=-1, onClick=function() showPara() end},
-      {Button, text="Digital Tasbeeh", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00796B", textColor=-1, onClick=function() showTasbeeh() end},
-      {Button, text="Bookmarks", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#E91E63", textColor=-1, onClick=function() showBookmarksScreen() end},
-      {Button, text="99 Names of Allah", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#8E24AA", textColor=-1, onClick=function() showNamesOfAllah() end},
-      {Button, text="Blessed Names of Prophet", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, onClick=function() showAsmaNabi() end},
-      {Button, text="Poori Quran (Continuous)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() showFullQuranScreen() end},
-      {Button, text="Hadith (Sahih Bukhari)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#4E342E", textColor=-1, onClick=function() showHadithScreen() end},
-      {Button, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#5D4037", textColor=-1, onClick=function() showIsrarTafseerScreen() end},
-      {Button, text="40 Hadith (An-Nawawi)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() showNawawiScreen() end},
-      {Button, text="Adhan Audio", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, contentDescription="Open Adhan recordings to play or download", onClick=function() showAzan() end},
-      {Button, text="Menu", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", onClick=function() showSettings() end}
+      {Button, text="30 Para", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#2E7D32", textColor=-1, onClick=function() safeRun("showPara", showPara) end},
+      {Button, text="Digital Tasbeeh", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00796B", textColor=-1, onClick=function() safeRun("showTasbeeh", showTasbeeh) end},
+      {Button, text="Bookmarks", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#E91E63", textColor=-1, onClick=function() safeRun("showBookmarksScreen", showBookmarksScreen) end},
+      {Button, text="99 Names of Allah", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#8E24AA", textColor=-1, onClick=function() safeRun("showNamesOfAllah", showNamesOfAllah) end},
+      {Button, text="Blessed Names of Prophet", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, onClick=function() safeRun("showAsmaNabi", showAsmaNabi) end},
+      {Button, text="Poori Quran (Continuous)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end},
+      {Button, text="Hadith (Sahih Bukhari)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#4E342E", textColor=-1, onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
+      {Button, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#5D4037", textColor=-1, onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
+      {Button, text="40 Hadith (An-Nawawi)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
+      {Button, text="Adhan Audio", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, contentDescription="Open Adhan recordings to play or download", onClick=function() safeRun("showAzan", showAzan) end},
+      {Button, text="6 Kalme / Iman / Namaz Audio", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, contentDescription="Six Kalimas, Iman e Mufassal, Iman e Mujmal, Namaz ka Sabaq aur Namaz e Janaza audio", onClick=function() safeRun("showKalimaImanScreen", showKalimaImanScreen) end},
+      {Button, text="Menu", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", onClick=function() safeRun("showSettings", showSettings) end}
     }},
     moreSubTabs("")
   })
@@ -4525,7 +4767,7 @@ function showTasbeeh()
     {LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
 
       {LinearLayout, orientation=0, layout_width=-1, gravity="center_vertical", layout_marginBottom="10dp",
-        {Button, text=tr("Back"), onClick=function() showMore() end},
+        {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
         {TextView, text=tr("Digital Tasbeeh"), textSize="22sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="15dp", textColor=textColor}
       },
 
@@ -4635,7 +4877,7 @@ function showSurahList()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showHome() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showHome", showHome) end},
       {TextView, text="Quran Pak (use the search bar on Home to find a Surah)", textSize="14sp", layout_marginLeft="10dp", textColor=-1}
     },
     {ListView, id="list", layout_width=-1, layout_height=0, layout_weight=1},
@@ -4682,7 +4924,7 @@ function showBookmarksScreen()
   activity.setContentView(loadlayout{
     LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
     {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() showMore() end},
+      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
       {EditText, id="etSearchBm", hint="Search Bookmarks...", layout_marginLeft="10dp", layout_weight=1, singleLine=true, textColor=-1, hintTextColor="#DDDDDD"},
       {Button, text="🗑️ Clear", layout_marginLeft="5dp", onClick=function() bookmarks = {} saveBookmarks() showBookmarksScreen() end}
     },
@@ -4757,12 +4999,12 @@ function showSettings()
       {TextView, text="App Preferences:", textSize="16sp", textColor=appColorStr, typeface=Typeface.DEFAULT_BOLD},
       {CheckBox, id="chkAutoNext", text="Auto Next Surah Mode", textSize="16sp", layout_marginTop="10dp", checked=autoNextMode, textColor=textColor},
 
-      {Button, text="💬 " .. tr("Feedback & Support"), textSize="16sp", layout_width=-1, layout_marginTop="30dp", backgroundColor="#607D8B", textColor=-1, onClick=function() showFeedback() end},
-      {Button, text="Social Media Support", textSize="16sp", layout_width=-1, layout_marginTop="10dp", backgroundColor="#00695C", textColor=-1, onClick=function() showSocialMedia() end},
-      {Button, text="ℹ️ " .. tr("About App"), textSize="16sp", layout_width=-1, layout_marginTop="10dp", backgroundColor=appColorStr, textColor=-1, onClick=function() showAbout() end},
+      {Button, text="💬 " .. tr("Feedback & Support"), textSize="16sp", layout_width=-1, layout_marginTop="30dp", backgroundColor="#607D8B", textColor=-1, onClick=function() safeRun("showFeedback", showFeedback) end},
+      {Button, text="Social Media Support", textSize="16sp", layout_width=-1, layout_marginTop="10dp", backgroundColor="#00695C", textColor=-1, onClick=function() safeRun("showSocialMedia", showSocialMedia) end},
+      {Button, text="ℹ️ " .. tr("About App"), textSize="16sp", layout_width=-1, layout_marginTop="10dp", backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showAbout", showAbout) end},
 
       {LinearLayout, orientation=0, gravity="center", layout_marginTop="20dp", layout_width=-1,
-        {Button, text=tr("Back"), layout_weight=1, layout_marginRight="10dp", onClick=function() showMore() end},
+        {Button, text=tr("Back"), layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showMore", showMore) end},
         {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
       }
     }
@@ -4801,7 +5043,7 @@ function showSocialMedia()
       {Button, text="Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#FF0000", textColor=-1, onClick=function() openLinkAndClose("https://youtube.com/@instructor-of-btw?si=nXc_isZVvMV8OQoc") end},
       {TextView, text="YouTube Channel: Technology Information", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
       {Button, text="Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="30dp", backgroundColor="#FF0000", textColor=-1, onClick=function() openLinkAndClose("https://www.youtube.com/@Technologyinformation-y4g") end},
-      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() showSettings() end}
+      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
     }
   })
   applyWallpaper(mainLayout, bgColor)
@@ -4831,7 +5073,7 @@ function showFeedback()
       {Button, text="💬 Join WhatsApp Group 4", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/JGz8fgOFXth9cTWh3IRF7s?s=cl&p=a&mlu=4") end},
       {Button, text="📢 Follow WhatsApp Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#128C7E", textColor=-1, onClick=function() openLinkAndClose("https://whatsapp.com/channel/0029Vb7I39ILikgHRF0PBV3k") end},
       {Button, text="📺 Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="30dp", backgroundColor="#FF0000", textColor=-1, onClick=function() openLinkAndClose("https://youtube.com/@friendtagresourcesteam?si=mT_M3jqVLcpwlRjN") end},
-      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() showSettings() end}
+      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
     }
   })
   applyWallpaper(mainLayout, bgColor)
@@ -4844,45 +5086,42 @@ function showAbout()
 
   local infoText = [[
 Assalam-o-Alaikum!
-Version: 2.6
+Version: 2.7
 
---- WHAT'S NEW IN V2.6 ---
+--- WHAT'S NEW IN V2.7 ---
 
-1) Azan player:
-- Quran-player-style controls: Play/Pause, rewind, forward, seek bar, next/previous, download/delete offline.
-- 15 verified recordings are available in the list (10 Internet Archive recordings and 5 direct tracks).
-- Downloads save under Downloads/Azan_Audio; offline files play through the same player.
+1) Islamic (Hijri) date - ab 100% OFFLINE (API hata di gayi):
+- Purani Islamic date Aladhan API ke response se aati thi; network/API masle par woh Home screen par load hi nahi hoti thi aur screen par kuch theek se nazar nahi aata tha. Wo API tareeqa poori tarah hata diya gaya hai.
+- Ab bilkul Punjabi date ki tarah Islamic date device par hi local tabular (Kuwaiti) algorithm se compute hoti hai - koi internet, koi API, koi download nahi.
+- Display: din, Urdu mahina, saal ھ - sath Roman mahina + AH (TalkBack ke liye). Default correction 0 din (tabular result South Asian calendars se match karta hai, e.g. 25 September 2026 = 12 Rabi-ul-Thani 1448). Home par tap kar ke ±2 din manual correction laga sakte hain.
 
-2) City-wise prayer Azan schedule:
-- Uses the saved City/Country and the prayer timings already shown on Home.
-- Fajr, Dhuhr, Asr, Maghrib and Isha can each be switched on/off and assigned an Azan recording.
-- Save schedules the next prayer alarms and posts an Azan playback notification when they fire.
-- The exact-alarm settings screen and notification permission are available from the schedule page.
-- Android host-project requirements: declare SCHEDULE_EXACT_ALARM and RECEIVE_BOOT_COMPLETED and provide a manifest boot receiver for exact/background/reboot persistence. In-script dynamic receivers cannot guarantee delivery after force-stop or reboot.
+2) NAYA audio section - 6 Kalme / Iman / Namaz:
+- Chhe Kalme, Iman-e-Mufassal, Iman-e-Mujmal, Namaz ka Sabaq aur Namaz-e-Janaza ka Tareeqa add kiye gaye hain.
+- Audio wale items (Chhe Kalme, Namaz ka Sabaq, Namaz-e-Janaza) online stream hote hain aur Quran ki tarah download + offline replay support karte hain; player bilkul Quran wala hi (online/offline, seek, speed, prev/next) hai.
+- Iman-e-Mufassal aur Iman-e-Mujmal ka koi verified direct MP3 nahi mila, is liye unhein mukammal Arabic/Urdu/English text ke sath rakha gaya hai aur online sunne ke liye source page ka button diya gaya hai.
+- Ye sab Duas tab, universal search, aur naye "6 Kalme" menu button/tab se khulte hain.
 
-3) Hijri date correction:
-- Prayer times now request the device's local Gregorian date explicitly.
-- The displayed Hijri date comes from the same AlAdhan response; a saved -2 to +2 day control allows local moon-sighting correction.
-- No country-wide offset is forced. For 24 September 2026 the API returned 13 Rabi al-Thani 1448 for Abbottabad; use the adjustment control if the local moon-sighting calendar differs.
+3) Version 2.7:
+- Poori app ka version ab 2.7 hai (title, About aur internal notes sab jagah).
 
-4) Advanced search:
-- Surah/reciter/translation/dua filters, fuzzy matching, English meanings, and Arabic/Urdu search within the listed duas.
-- Microphone button starts Android's speech-recognition intent; it requires an installed speech-recognition provider.
+5) v2.7-fix2 - HANG FIX + alag alag audio tracks + live Islamic date:
+- HANG/ISN'T RESPONDING ka asli sabab hata diya: pehle stream fail hone par player CHUPKE se poore file ka DownloadManager download shuru karta tha aur 60 second tak Thread.sleep poll loop chalata rehta tha. Ab AUTO-DOWNLOAD POORI TARAH BAND hai - fail hone par sirf Retry online / Download / Cancel dialog aata hai, aur download sirf aap ke button se hota hai.
+- Wahi background-download fallback Word-by-Word mode se bhi hata diya.
+- Ab audio ALAG ALAG tracks mein hai: 6 Kalme (chhe alag entries), Namaz ka Sabaq (8 alag verified step files), Namaz-e-Janaza (poora audio + takbeer-wise 4 step), Iman-e-Mufassal aur Iman-e-Mujmal (mukammal text + online link).
+- Clip support (startAt/endAt) add hua, is liye ek hi recording ka ek hissa apne track ki tarah lagta hai; clip entries ek hi offline copy share karte hain (26 MB sirf ek dafa).
+- اسلامی تاریخ ab bilkul LIVE hai, Punjabi date ki tarah screen par seedha nazar aati hai; manual "tap to adjust" hata diya aur aadhi raat par khud update hoti hai.
 
-5) Duas:
-- 130 unique, category-labelled entries after merging six duplicate text/audio rows.
-- 119 entries have audio recordings; 11 remain text-first. The original category assignments are kept; duplicate text/audio entries now share one row.
-- English meaning/description is included for all 130 entries. The 40 Rabbana Quranic supplications include English meanings and Quran references; short Arabic/Urdu duas have English meanings. For audio-only recordings without transcripts, the English text is a topic description, not a verbatim translation.
+4) v2.7-fix - 6 Kalme screen ka click/error masla + universal error dialog:
+- 6 Kalme / Iman / Namaz screen ab ListView + onItemClick par hai (wahi pattern jo Poora Quran / Para list aur Search mein pehle se theek chalta hai). Purani alag "6 Kalme" bottom tab hata di gayi (wo screen ki width se bahar nikal jati thi, is liye click nahi hota tha) - entry ab More menu ke bare button, Duas tab aur Search se hai.
+- Ab har error par ek dialog khulta hai jisme 3 buttons hain: Copy, Share aur Cancel - sath mein poora report (app version, screen, Android version, device, city, tareekh, error + traceback) jo copy ya WhatsApp/Email par share ho sakta hai.
+- Ye error dialog ab in sab par laga hai: 6 Kalme ke har item ka click, app start/Home, bottom tabs aur More menu ke saare buttons, audio/stream errors, aur Duas/Search ke text-item dialogs (wo Copy+Cancel wale hain). Kisi bhi screen par error aaye to app band nahi hogi, dialog khulega.
 
---- FEATURES CARRIED FORWARD FROM V2.5 ---
+--- FEATURES CARRIED FORWARD ---
+- v2.5: eight whole-surah language collections (English Ibrahim Walk, English Mishary, Hindi, Bengali, French, Sindhi, Pashto, Farsi), each mapped for 114 surahs; Waheed Zafar and Shakir Urdu Qari maps; two Farsi ayah voices; preserved player, speed/repeat, offline, Tafseer, Hadith, duas, Tasbeeh and Quran features.
+- v2.6: Quran-style Adhan player, 15 verified recordings, per-prayer city schedule, 130 categorized duas (119 audio, 11 text-only), English meanings/descriptions, 40 Rabbana references, filtered/fuzzy search, voice-search launch, and Hijri adjustment control.
+- v2.7 keeps the v2.6 feature set and corrects Waheed audio playback/cache handling and Hijri cache refresh/local offset defaults.
 
-1) Eight whole-surah audio translation collections, each mapped for all 114 surahs: English (Ibrahim Walk), English (Mishary), Hindi, Bengali, French, Sindhi, Pashto and Farsi.
-2) Urdu Whole-Surah Qari audio: Waheed Zafar Qasmi and Shakir Qasmi, 114 surahs each.
-3) Farsi ayah-by-ayah translations: Fooladvand/Hedayatfar and Makarem/Kabiri.
-4) Original Urdu two-voice ayah audio, Hindi/Punjabi/English/Sindhi translation paths, 30-Para playback, downloads and offline cache.
-5) Existing Quran reading/player, speed and repeat controls, Tafseer, Hadith, Tasbeeh, names, bookmarks, daily duas, prayer-time city entry, Hijri display and accessibility descriptions retained.
-
-Audio source maps remain inline in this one Lua file; no JSON/module sidecar is needed. New live sources are only used where availability was checked; the extra language list is unchanged from v2.5 because the existing mapped sources already cover the requested translation set.
+Android exact-alarm caveat: the host app must declare SCHEDULE_EXACT_ALARM and RECEIVE_BOOT_COMPLETED and supply a manifest boot receiver for guaranteed alarms after process death/reboot. Runtime dynamic receivers alone cannot promise that lifecycle guarantee.
 
 --- CREDITS ---
 Lead Developer: Numan Khan.
@@ -4894,7 +5133,7 @@ May Allah accept our continuous efforts!
     {LinearLayout, orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
       {TextView, text=tr("About App"), textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", layout_marginTop="10dp", textColor=appColorStr},
       {TextView, text=infoText, textSize="14sp", gravity="left", layout_marginBottom="40dp", textColor=textColor},
-      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() showSettings() end}
+      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
     }
   })
   applyWallpaper(mainLayout, bgColor)
@@ -4907,28 +5146,80 @@ function playPrevSurah() if currentIndex > 1 then currentIndex = currentIndex - 
 -- ka poora text kabhi nazar/copy nahi hota tha. Ye chhota helper ek Dialog
 -- box dikhata hai jo khud band NAHI hota (jab tak user khud OK/Copy na
 -- dabaye) - "Copy" button se error seedha clipboard mein copy ho jata hai.
+-- NAYA (v2.7-fix): UNIVERSAL ERROR DIALOG. Har error ka poora report (app
+-- version, screen, Android version, device, tareekh, error + traceback) ek
+-- SELECT karne layak text mein dikhta hai aur us ke sath teen buttons hote
+-- hain: Copy, Share aur Cancel - is liye aap koi bhi error aasani se copy ya
+-- share kar ke bhej sakte hain.
+function V25.buildErrorReport(title, errText)
+  local function g(f) local ok, v = pcall(f) if ok and v ~= nil then return tostring(v) end return "?" end
+  local lines = {}
+  table.insert(lines, "Quran Majeed v2.7 - ERROR REPORT")
+  table.insert(lines, "Time     : " .. g(function() return os.date("%Y-%m-%d %H:%M:%S") end))
+  table.insert(lines, "Screen   : " .. tostring(screen))
+  table.insert(lines, "Where    : " .. tostring(title or "Unknown"))
+  table.insert(lines, "Android  : " .. g(function() return Build.VERSION.RELEASE end) .. " (SDK " .. g(function() return Build.VERSION.SDK_INT end) .. ")")
+  table.insert(lines, "Device   : " .. g(function() return Build.MANUFACTURER end) .. " " .. g(function() return Build.MODEL end))
+  table.insert(lines, "Location : " .. tostring(savedCity) .. ", " .. tostring(savedCountry))
+  table.insert(lines, "------------------------------------------")
+  table.insert(lines, tostring(errText))
+  return table.concat(lines, "\n")
+end
+
+function V25.copyTextToClipboard(txt)
+  local ok = pcall(function()
+    activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Quran Majeed", tostring(txt)))
+  end)
+  if ok then
+    pcall(function() Toast.makeText(activity, "Copy ho gaya! Ab paste kar ke bhejein.", 0).show() end)
+  else
+    pcall(function() Toast.makeText(activity, "Copy nahi ho saka - text ko long-press kar ke select karein.", 1).show() end)
+  end
+end
+
 function showErrorDialog(title, errText)
-  pcall(function()
+  local ok = pcall(function()
+    local msg = V25.buildErrorReport(title, errText)
+    local tv = TextView(activity)
+    tv.setText(msg)
+    pcall(function() tv.setTextIsSelectable(true) end)
+    pcall(function() tv.setPadding(24, 18, 24, 18) end)
+    pcall(function() tv.setTextSize(11) end)
     AlertDialog.Builder(activity)
-      .setTitle(title or "Error")
-      .setMessage(tostring(errText))
-      .setPositiveButton("Copy", {onClick=function()
-        pcall(function()
-          activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Error", tostring(errText)))
-          Toast.makeText(activity, "Copy ho gaya!", 0).show()
-        end)
-      end})
+      .setTitle("⚠ " .. tostring(title or "Error") .. " - Copy / Share karein")
+      .setView(tv)
+      .setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(msg) end})
       .setNeutralButton("Share", {onClick=function()
         pcall(function()
           local shareIntent = Intent(Intent.ACTION_SEND)
           shareIntent.setType("text/plain")
-          shareIntent.putExtra(Intent.EXTRA_TEXT, tostring(errText))
-          activity.startActivity(Intent.createChooser(shareIntent, "Share Error"))
+          shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Quran Majeed v2.7 error report")
+          shareIntent.putExtra(Intent.EXTRA_TEXT, msg)
+          activity.startActivity(Intent.createChooser(shareIntent, "Error bhejein (WhatsApp / Email)"))
         end)
       end})
-      .setNegativeButton("OK", nil)
+      .setNegativeButton("Cancel", nil)
       .show()
   end)
+  if not ok then
+    pcall(function() Toast.makeText(activity, "Error: " .. tostring(errText), 1).show() end)
+  end
+end
+
+-- Safe runner: kisi bhi screen ya click ko is ke andar chalayein - agar error
+-- aaye to app band/crash hone ke bajaye upar wala Copy/Share/Cancel dialog
+-- khulega (poori tafseel + traceback ke sath).
+function safeRun(label, fn, ...)
+  if type(fn) ~= "function" then return false end
+  local unpackFn = table.unpack or unpack
+  local args = {...}
+  local ok, err = xpcall(function() return fn(unpackFn(args)) end, function(e)
+    local tb = tostring(e)
+    pcall(function() if debug and debug.traceback then tb = debug.traceback(tostring(e), 2) end end)
+    return tb
+  end)
+  if not ok then showErrorDialog(label or "Error", err) end
+  return ok, err
 end
 
 function downloadSurah(url, fileName, title)
@@ -5276,17 +5567,10 @@ function wbwLoadAyah(surahIdx, ayahNum, onReady)
           -- mein bhi ab wahi established tareeqa reuse ho raha hai:
           -- background download, phir local file se retry.
           if playUrl ~= localPath then
-            Toast.makeText(activity, "Online stream nahi hui, ab background mein download kar rahe hain...", 1).show()
-            Thread(Runnable{run=function()
-              local success = directDownload(buildAyahUrl(surahIdx, ayahNum), localPath)
-              handler.post(Runnable{run=function()
-                if success and screen == "wbwmode" then
-                  wbwLoadAyah(surahIdx, ayahNum, onReady)
-                else
-                  onReady(false, "Ayat ki audio load nahi hui (online aur download dono fail - internet check karein).")
-                end
-              end})
-            end}).start()
+            -- v2.7-fix2: yahan se bhi background download (Thread) hata diya
+            -- gaya hai - wahi loop phone ko hang karta tha.
+            Toast.makeText(activity, "Online stream nahi hui - internet check kar ke dobara try karein.", 1).show()
+            onReady(false, "Ayat ki audio online load nahi hui (auto-download ab band hai - hang fix).")
           else
             onReady(false, "Ayat ki audio load nahi hui (downloaded file kharab hai).")
           end
@@ -5821,6 +6105,7 @@ end
 -- PLAYER
 function showPlayer(index)
   screen = "player"
+  PS.externalPlayback=false PS.externalPreparing=false PS.externalPausePending=false
   currentIndex = index
   local surahName = surahNames[index]
   saveLastPlayed(currentIndex, currentReciter)
@@ -5838,6 +6123,7 @@ function showPlayer(index)
   -- aur alag tarjuma download nahi karni padti.
   local fileName = v25FileName or (isUrdu and ("urdu_surah_"..sID..".mp3") or isHindi and ("hindi_surah_"..sID..".mp3") or isPunjabi and ("punjabi_surah_"..sID..".mp3") or isEnglish and ("english_surah_"..sID..".mp3") or isSindhi and ("sindhi_surah_"..sID..".mp3") or ("reciter_"..reciterKey.."_surah_"..sID..".mp3"))
   local localFilePath = downloadDir .. fileName
+  if v25OnlineUrl and File(localFilePath).exists() and File(localFilePath).length()<1000 then pcall(function() File(localFilePath).delete() end) end
   local onlineUrl = v25OnlineUrl or (isUrdu and buildUrduSurahUrl(index) or isHindi and buildHindiSurahUrl(index) or isPunjabi and buildPunjabiSurahUrl(index) or isEnglish and buildEnglishSurahUrl(index) or isSindhi and buildSindhiSurahUrl(index) or buildQuranUrl(currentReciter, index))
   local selectedAudioLabel = (V25.modes[translationMode] and V25.modes[translationMode].label) or (isUrdu and "Urdu Tarjuma" or isHindi and "Hindi Tarjuma" or isPunjabi and "Punjabi Tarjuma" or isEnglish and "English Tarjuma" or isSindhi and "Sindhi Tarjuma" or reciters[currentReciter].name)
   local playUrl = File(localFilePath).exists() and localFilePath or onlineUrl
@@ -5868,15 +6154,15 @@ function showPlayer(index)
       {Spinner, id="playerRepeatSpinner", layout_width=0, layout_weight=1}
     },
     {LinearLayout, orientation=0, gravity="center", layout_width=-1,
-      {Button, text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() playPrevSurah() end},
-      {Button, text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() seekRewind() end},
-      {Button, id="btnPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", onClick=function() togglePlayPause() end},
-      {Button, text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() seekForward() end},
-      {Button, text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() playNextSurah() end}
+      {Button, text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("playPrevSurah", playPrevSurah) end},
+      {Button, text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("seekRewind", seekRewind) end},
+      {Button, id="btnPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", onClick=function() safeRun("togglePlayPause", togglePlayPause) end},
+      {Button, text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("seekForward", seekForward) end},
+      {Button, text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("playNextSurah", playNextSurah) end}
     },
     {Button, id="btnDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download Surah", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
     {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text="Back to List", layout_weight=1, layout_marginRight="10dp", onClick=function() showSurahList() end},
+      {Button, text="Back to List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showSurahList", showSurahList) end},
       {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
     }
   })
@@ -5911,6 +6197,61 @@ function showPlayer(index)
 
   PS.surahRepeatRem = PS.surahRepeat
 
+  if v25OnlineUrl then
+    PS.externalPlayback=true
+    PS.externalPreparing=true PS.externalPausePending=false
+    PS.externalUrl=onlineUrl PS.externalPath=localFilePath PS.externalLabel=selectedAudioLabel
+    PS.surahRepeatRem=PS.surahRepeat
+    local function refreshExternalPlayer()
+      if screen~="player" or not duaMp then return end
+      pcall(function()
+        PS.externalPreparing=false
+        applyPlaybackSpeed(duaMp)
+        if PS.externalPausePending then
+          PS.externalPausePending=false
+          pcall(function() if duaMp.isPlaying() then duaMp.pause() end end)
+        elseif not duaMp.isPlaying() then
+          pcall(function() duaMp.start() end)
+        end
+        local dur=duaMp.getDuration()
+        if dur>0 then skBar.setMax(dur); skBar.setProgress(duaMp.getCurrentPosition()) end
+        if btnPlayPause then btnPlayPause.setText(duaMp.isPlaying() and ("⏸ "..tr("Pause")) or ("▶ "..tr("Play"))) end
+        showPlaybackNotification(surahName,"Translation: "..selectedAudioLabel)
+      end)
+      updateTask=Runnable({run=function()
+        if screen=="player" and PS.externalPlayback and duaMp then
+          pcall(function() if duaMp.isPlaying() then skBar.setProgress(duaMp.getCurrentPosition()) end end)
+          handler.postDelayed(updateTask,1000)
+        end
+      end})
+      handler.post(updateTask)
+    end
+    local playAgain
+    playAgain=function()
+      PS.externalPreparing=true
+      playReliable(playUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",refreshExternalPlayer,function()
+        completedSurahs[index]=true saveCompletedSurahs()
+        if PS.surahRepeat==0 then
+          playAgain()
+        elseif PS.surahRepeatRem>1 then
+          PS.surahRepeatRem=PS.surahRepeatRem-1
+          playAgain()
+        else
+          PS.surahRepeatRem=PS.surahRepeat
+          if autoNextMode and currentIndex<#surahNames then playNextSurah()
+          else
+            stopPlayer(function()
+              PS.externalPlayback=true
+              if btnPlayPause then btnPlayPause.setText("▶ "..tr("Play")) end
+            end)
+          end
+        end
+      end)
+    end
+    playAgain()
+    skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(b,pos,fromUser) if fromUser and duaMp then pcall(function() duaMp.seekTo(pos) end) end end})
+  else
+    PS.externalPlayback=false PS.externalUrl=nil PS.externalPath=nil PS.externalLabel=nil
   stopPlayer(function()
   playerReady = false
   playIntentPending = false
@@ -5918,8 +6259,23 @@ function showPlayer(index)
   -- FIX (v2.2): screen band hone ke baad bhi playback (streaming/
   -- decoding) na atke, is ke liye CPU ko "so" jaane se rokte hain
   pcall(function() mp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
-  mp.setDataSource(playUrl) mp.prepareAsync()
-  mp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p, w, e) Toast.makeText(activity, "Audio error.", 0).show() if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end return true end})
+  local dsOk,dsErr=pcall(function() mp.setDataSource(playUrl); mp.prepareAsync() end)
+  if not dsOk then
+    pcall(function() if mp then mp.release() end end); mp=nil
+    if v25OnlineUrl then
+      PS.externalPlayback=true
+      playReliable(playUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",nil,nil)
+      return
+    end
+    Toast.makeText(activity,"Audio source could not be opened: "..tostring(dsErr),1).show()
+    return
+  end
+  mp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p, w, e) if v25OnlineUrl then
+    pcall(function() if mp then mp.release() end end); mp=nil
+    PS.externalPlayback=true
+    playReliable(onlineUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",nil,nil)
+  else Toast.makeText(activity, "Audio error.", 0).show() end
+  if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end return true end})
   mp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
     applyPlaybackSpeed(p)
     skBar.setMax(p.getDuration())
@@ -5974,6 +6330,7 @@ function showPlayer(index)
   end})
   skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and mp then mp.seekTo(p) end end})
   end)
+  end
 end
 
 -- FIX (v2.2): pehle yahan mp/duaMp/WBW.player ko PAUSE kar diya jata tha
@@ -6117,4 +6474,7 @@ pcall(function()
   end
 end)
 
-showHome()
+-- v2.7-fix: app ka start bhi safe hai - agar Home bante waqt koi error ho to
+-- app band nahi hogi, Copy/Share/Cancel wala dialog khulega.
+V25.startDateTick()
+safeRun("App start - Home screen", showHome)
