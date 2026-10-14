@@ -20,148 +20,101 @@ import "android.text.TextWatcher"
 import "android.speech.RecognizerIntent"
 import "java.util.Calendar"
 import "java.util.TimeZone"
-
---------------------------------------------------
--- QURAN MAJEED v2.7 - V25 initialization-order fix, Waheed audio, OFFLINE
--- Islamic (Hijri) date, aur 6 Kalme / Iman / Namaz audio section
--- Lead: Numan Khan
---------------------------------------------------
--- NOTE (v2.2): screen-off/background playback fix (MediaPlayer.setWakeMode,
--- used neeche har jagah MediaPlayer banate waqt) ke sahi kaam karne ke liye
--- project manifest mein "android.permission.WAKE_LOCK" permission add hona
--- zaroori hai (yeh ek "normal" permission hai, is liye runtime par koi
--- dialog nahi mangta - bas manifest mein declare hona chahiye). Apne
--- AndroLua Pro/Jieshuo project settings mein yeh permission check/add kar
--- lein, warna yeh fix pcall ke andar chup-chaap fail ho jayega (crash
--- nahi hoga, bas wake-lock apply nahi hogi).
-
---------------------------------------------------
--- GLOBAL VARIABLES & APP STATE
---------------------------------------------------
 local mp = nil
 local screen = "home"
 local currentIndex = 1
 local currentReciter = 1
 local autoNextMode = true
 local isPaused = false
--- NAYA (v2.5): speed/repeat state EK table mein (AndroLua 200-local limit)
--- NOTE: prefs load NEICHE prefs define hone ke BAAD hota hai - yahan sirf
--- table + helpers, taake activity nil hone par early crash na ho.
 local PS = {speed=1.0, ayahRepeat=1, surahRepeat=1, surahRepeatRem=0, externalPlayback=false, externalPreparing=false, externalPausePending=false, externalUrl=nil, externalPath=nil, externalLabel=nil, notifActionErrorShown=false}
--- v2.7: V25 is deliberately global and initialized before first use,
--- because early Hijri config and later audio maps both need this table.
 V25 = V25 or { items = {}, files = {}, modes = {}, qariItems = {}, qariFiles = {} }
 function savePlaybackSpeed(v)
-  PS.speed = v
-  pcall(function()
-    if activity then
-      activity.getSharedPreferences("QuranAppPrefs", 0).edit().putFloat("playbackSpeed", v).apply()
-    end
-  end)
+PS.speed = v
+pcall(function()
+if activity then
+activity.getSharedPreferences("QuranAppPrefs", 0).edit().putFloat("playbackSpeed", v).apply()
+end
+end)
 end
 function applyPlaybackSpeed(player)
-  if not player then return end
-  pcall(function()
-    if Build.VERSION.SDK_INT >= 23 then
-      player.setPlaybackParams(player.getPlaybackParams().setSpeed(PS.speed))
-    end
-  end)
+if not player then return end
+pcall(function()
+if Build.VERSION.SDK_INT >= 23 then
+player.setPlaybackParams(player.getPlaybackParams().setSpeed(PS.speed))
+end
+end)
 end
 local sleepTimerMinutes = 0
 local seekSeconds = 10
 local targetSleepTime = 0
-
 local handler = Handler(Looper.getMainLooper())
 local updateTask = nil
-
--- FIX: pehle files getExternalFilesDir (app-private folder) mein ja rahi thi,
--- isliye phone ke normal Downloads folder/file manager mein nazar nahi aati thi.
--- Ab public Downloads directory use ho rahi hai taake downloads Downloads app/
--- file manager mein bhi show hon.
 local publicDownloadsRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath()
-
 local downloadDir = publicDownloadsRoot .. "/Quran_Files/"
 if not File(downloadDir).exists() then File(downloadDir).mkdirs() end
-
 local duaAudioDir = publicDownloadsRoot .. "/Dua_Audio/"
 if not File(duaAudioDir).exists() then File(duaAudioDir).mkdirs() end
-
+local bookAudioDir = publicDownloadsRoot .. "/Islam_Books/"
+if not File(bookAudioDir).exists() then File(bookAudioDir).mkdirs() end
 local paraAudioDir = publicDownloadsRoot .. "/Para_Audio/"
 if not File(paraAudioDir).exists() then File(paraAudioDir).mkdirs() end
-
 local azanAudioDir = publicDownloadsRoot .. "/Azan_Audio/"
 if not File(azanAudioDir).exists() then File(azanAudioDir).mkdirs() end
-
 local duaMp = nil
-
--- Fixed app appearance (Language/Theme/Color/Wallpaper pickers removed on request)
 local appColorStr = "#1B5E20"
-local function getThemeColors() return "#FFFFFF", "#000000" end
-local function applyWallpaper(view, bgColor) if view then view.setBackgroundColor(Color.parseColor(bgColor)) end end
+local M = {}
+local BDIT = "Islamic Duain - Masnoon Duain (Audio)"
+M.getThemeColors = function() return "#FFFFFF", "#000000" end
+M.applyWallpaper = function(view, bgColor) if view then view.setBackgroundColor(Color.parseColor(bgColor)) end end
 local function tr(text) return text end
-
---------------------------------------------------
--- SHARED PREFERENCES & DATA
---------------------------------------------------
--- FIX (v2.5): AndroLua Pro mein global "activity" hota hai; kuch Jieshuo
--- Tools / hybrid setups mein "this" milta hai. Dono cover karte hain.
 pcall(function()
-  if activity == nil and this ~= nil then activity = this end
+if activity == nil and this ~= nil then activity = this end
 end)
 local prefs = nil
 pcall(function()
-  prefs = activity.getSharedPreferences("QuranAppPrefs", 0)
+prefs = activity.getSharedPreferences("QuranAppPrefs", 0)
 end)
 if not prefs then
-  error("Activity context nahi mila.\n\nAndroLua Pro mein project bana kar Run karein.\nJieshuo → Tools folder se seedha main.lua load mat karein — wahan Activity inject nahi hoti.\n\nSahi tareeqa: AndroLua Pro → New Project → is file ko main.lua banao → Run.")
+error("Activity context nahi mila.\n\nAndroLua Pro mein project bana kar Run karein.\nJieshuo → Tools folder se seedha main.lua load mat karein — wahan Activity inject nahi hoti.\n\nSahi tareeqa: AndroLua Pro → New Project → is file ko main.lua banao → Run.")
 end
--- Speed prefs load
 pcall(function()
-  local s = prefs.getFloat("playbackSpeed", 1.0)
-  if s and s > 0 then PS.speed = s end
+local s = prefs.getFloat("playbackSpeed", 1.0)
+if s and s > 0 then PS.speed = s end
 end)
-
--- PROGRESS TRACKER data (jo Surah pura sun li, aur Ayat-ba-Ayat/Ruku mein
--- aakhri position - taake qari sahab track kar sakein bachon ne kahan tak
--- kiya, aur resume kiya ja sake)
 local completedSurahsStr = prefs.getString("completedSurahs", "")
 local completedSurahs = {}
 if completedSurahsStr ~= "" then for s in string.gmatch(completedSurahsStr, "([^,]+)") do completedSurahs[tonumber(s)] = true end end
-local function saveCompletedSurahs()
-  local arr = {}
-  for k,v in pairs(completedSurahs) do if v then table.insert(arr, k) end end
-  prefs.edit().putString("completedSurahs", table.concat(arr, ",")).apply()
+M.saveCompletedSurahs = function()
+local arr = {}
+for k,v in pairs(completedSurahs) do if v then table.insert(arr, k) end end
+prefs.edit().putString("completedSurahs", table.concat(arr, ",")).apply()
 end
-
-local function loadPairMap(key)
-  local s = prefs.getString(key, "")
-  local map = {}
-  if s ~= "" then
-    for pair in string.gmatch(s, "([^,]+)") do
-      local a, b = pair:match("^(%d+):(%d+)$")
-      if a then map[tonumber(a)] = tonumber(b) end
-    end
-  end
-  return map
+M.loadPairMap = function(key)
+local s = prefs.getString(key, "")
+local map = {}
+if s ~= "" then
+for pair in string.gmatch(s, "([^,]+)") do
+local a, b = pair:match("^(%d+):(%d+)$")
+if a then map[tonumber(a)] = tonumber(b) end
 end
-local function savePairMap(key, map)
-  local parts = {}
-  for k, v in pairs(map) do table.insert(parts, k .. ":" .. v) end
-  prefs.edit().putString(key, table.concat(parts, ",")).apply()
 end
-
-local lastAyahProgress = loadPairMap("lastAyahProgress")
-local function saveLastAyahProgress(surahIdx, ayahNum)
-  lastAyahProgress[surahIdx] = ayahNum
-  savePairMap("lastAyahProgress", lastAyahProgress)
+return map
 end
-
-local lastRukuProgress = loadPairMap("lastRukuProgress")
-local function saveLastRukuProgress(surahIdx, rukuIdx)
-  lastRukuProgress[surahIdx] = rukuIdx
-  savePairMap("lastRukuProgress", lastRukuProgress)
+M.savePairMap = function(key, map)
+local parts = {}
+for k, v in pairs(map) do table.insert(parts, k .. ":" .. v) end
+prefs.edit().putString(key, table.concat(parts, ",")).apply()
 end
-
+local lastAyahProgress = M.loadPairMap("lastAyahProgress")
+M.saveLastAyahProgress = function(surahIdx, ayahNum)
+lastAyahProgress[surahIdx] = ayahNum
+M.savePairMap("lastAyahProgress", lastAyahProgress)
+end
+local lastRukuProgress = M.loadPairMap("lastRukuProgress")
+M.saveLastRukuProgress = function(surahIdx, rukuIdx)
+lastRukuProgress[surahIdx] = rukuIdx
+M.savePairMap("lastRukuProgress", lastRukuProgress)
+end
 local tasbeehCount = prefs.getInt("activeCount", 0)
 local tasbeehTarget = prefs.getInt("activeTarget", 33)
 local currentWazeefaIndex = prefs.getInt("activeWazeefa", 0)
@@ -170,19 +123,17 @@ local tasbeehVibrateEnabled = prefs.getBoolean("tasbeehVibrate", true)
 local lifetimeZikrTotal = prefs.getInt("lifetimeZikrTotal", 0)
 local lastPlayedSurah = prefs.getInt("lastSurah", 1)
 local readingFontSize = prefs.getInt("readingFontSize", 22)
--- NAYA (v2.2/v2.5): Ayat + Surah repeat - PS table mein (200-local limit)
 PS.ayahRepeat = prefs.getInt("ayahRepeatCount", 1)
 PS.surahRepeat = prefs.getInt("surahRepeatCount", 1)
 PS.surahRepeatRem = 0
 function saveAyahRepeatCount(v)
-  PS.ayahRepeat = v
-  prefs.edit().putInt("ayahRepeatCount", v).apply()
+PS.ayahRepeat = v
+prefs.edit().putInt("ayahRepeatCount", v).apply()
 end
 function saveSurahRepeatCount(v)
-  PS.surahRepeat = v
-  prefs.edit().putInt("surahRepeatCount", v).apply()
+PS.surahRepeat = v
+prefs.edit().putInt("surahRepeatCount", v).apply()
 end
-
 local savedCity = prefs.getString("userCity", "Abbottabad")
 local savedCountry = prefs.getString("userCountry", "Pakistan")
 local prayerFajr = prefs.getString("pFajr", "04:10")
@@ -190,6291 +141,5785 @@ local prayerDhuhr = prefs.getString("pDhuhr", "12:15")
 local prayerAsr = prefs.getString("pAsr", "16:45")
 local prayerMaghrib = prefs.getString("pMaghrib", "19:10")
 local prayerIsha = prefs.getString("pIsha", "20:30")
--- NAYA (v2.3): Tulu-e-Aftab (Sunrise) - Fajr ka waqt kab khatam hota hai,
--- yeh Aladhan API se hi milta hai (isi response mein "Sunrise" field
--- hoti hai, bas ab tak use nahi ho raha tha)
 local prayerSunrise = prefs.getString("pSunrise", "06:15")
--- NAYA (v2.7): Islamic (Hijri) date ab bilkul OFFLINE hai. Pehle yeh Aladhan
--- API ke response se aati thi, jo kai dafa load hi nahi hoti thi aur Home
--- screen par "Islamic tareekh" theek se nazar nahi aati thi - woh tareeqa
--- hata diya gaya hai. Ab Punjabi date ki tarah local tabular (Kuwaiti)
--- algorithm se device par hi compute hoti hai (neeche V25.getIslamicDate).
--- Default correction 0 din hai kyunke tabular result South Asian calendars se
--- match karta hai (e.g. 25 September 2026 = 12 Rabi-ul-Thani 1448); user
--- chahe to Home par tap kar ke ±2 din ka manual correction laga sakta hai.
-function V25.getHijriOffset()
-  if prefs.getBoolean("hijriOffsetManual",false) then return prefs.getInt("hijriDayOffset",0) end
-  return 0
-end
-if prefs.getInt("hijriOffsetSchema",0)<272 then
-  prefs.edit().putBoolean("hijriOffsetManual",false).putInt("hijriDayOffset",0).putInt("hijriOffsetSchema",272).remove("hijriDate").apply()
-end
-V25.hijriDayOffset=prefs.getInt("hijriDayOffset",0)
+V25.HIJRI_OFFSET_DAYS = 0
+function V25.getHijriOffset() return V25.HIJRI_OFFSET_DAYS end
+pcall(function() prefs.edit().remove("hijriDayOffset").remove("hijriOffsetManual").remove("hijriDate").apply() end)
+V25.hijriDayOffset = 0
 local savedPrayerTimezone = prefs.getString("prayerTimeZone", "Asia/Karachi")
-
---------------------------------------------------
--- Small helper: sanitize a reciter name into a safe filename fragment
---------------------------------------------------
 local function slug(s)
-  local out = tostring(s):gsub("%s+", "_"):gsub("[^%w_]", "")
-  if out == "" then out = "reciter" end
-  return out
+local out = tostring(s):gsub("%s+", "_"):gsub("[^%w_]", "")
+if out == "" then out = "reciter" end
+return out
 end
-
--- FIX (v2.3): prayer times "HH:MM" (24-hour, jaise 16:30) format mein
--- show ho rahi thin - ab Home screen par 12-hour format (4:30 PM) mein
--- dikhti hain. NOTE: internal storage (prayerFajr etc, aur Tahajjud ka
--- calculation) 24-hour hi rehta hai - yeh function SIRF DISPLAY ke liye
--- convert karta hai, taake koi aur calculation na tootay.
 function ft(ms)
-  ms=tonumber(ms) or 0
-  local sec=math.max(0,math.floor(ms/1000))
-  return string.format("%02d:%02d",math.floor(sec/60),sec%60)
+ms=tonumber(ms) or 0
+local sec=math.max(0,math.floor(ms/1000))
+return string.format("%02d:%02d",math.floor(sec/60),sec%60)
 end
-
 local function to12Hour(t)
-  local h, m = t:match("(%d+):(%d+)")
-  if not h then return t end
-  h = tonumber(h)
-  local suffix = (h < 12) and "AM" or "PM"
-  local h12 = h % 12
-  if h12 == 0 then h12 = 12 end
-  return h12 .. ":" .. m .. " " .. suffix
+local h, m = t:match("(%d+):(%d+)")
+if not h then return t end
+h = tonumber(h)
+local suffix = (h < 12) and "AM" or "PM"
+local h12 = h % 12
+if h12 == 0 then h12 = 12 end
+return h12 .. ":" .. m .. " " .. suffix
 end
-
--- NAYA (v2.4): Punjabi (Nanakshahi/Bikrami-style) calendar - "asal" logic
--- se, koi API/network nahi chahiye. Har mahine ki Gregorian shuru-tareekh
--- fixed hai (SGPC/Golden Temple Amritsar ki official Nanakshahi calendar
--- data se verify ki gayi hai) - Chet 14 March se shuru hota hai, aakhri
--- do mahine (Magh, Phagun) agle saal Jan/Feb mein aate hain.
-local function getPunjabiDate()
-  local punjabiMonths = {"Chet","Vaisakh","Jeth","Harh","Sawan","Bhadon","Asu","Katik","Maghar","Poh","Magh","Phagun"}
-  local starts = {{3,14},{4,14},{5,15},{6,15},{7,16},{8,16},{9,15},{10,15},{11,14},{12,14},{1,13},{2,12}}
-  local now = os.date("*t")
-  local y, m, d = now.year, now.month, now.day
-  local winStartYear = y
-  if (m < 3) or (m == 3 and d < 14) then winStartYear = y - 1 end
-  local boundaries = {}
-  for i = 1, 12 do
-    local mm, dd = starts[i][1], starts[i][2]
-    local yy = (mm < 3) and (winStartYear + 1) or winStartYear
-    boundaries[i] = os.time({year=yy, month=mm, day=dd, hour=0})
-  end
-  local nextWindowStart = os.time({year=winStartYear+1, month=3, day=14, hour=0})
-  local today = os.time({year=y, month=m, day=d, hour=0})
-  local monthIdx = 12
-  for i = 1, 12 do
-    local upperBound = (i < 12) and boundaries[i+1] or nextWindowStart
-    if today >= boundaries[i] and today < upperBound then monthIdx = i break end
-  end
-  local dayOfMonth = math.floor((today - boundaries[monthIdx]) / 86400) + 1
-  local nsYear = winStartYear - 1469 + 1 -- Nanakshahi epoch: 1469 CE (Samat 1)
-  return dayOfMonth, punjabiMonths[monthIdx], nsYear
+M.getPunjabiDate = function()
+local punjabiMonths = {"Chet","Vaisakh","Jeth","Harh","Sawan","Bhadon","Asu","Katik","Maghar","Poh","Magh","Phagun"}
+local starts = {{3,14},{4,14},{5,15},{6,15},{7,16},{8,16},{9,15},{10,15},{11,14},{12,14},{1,13},{2,12}}
+local now = os.date("*t")
+local y, m, d = now.year, now.month, now.day
+local winStartYear = y
+if (m < 3) or (m == 3 and d < 14) then winStartYear = y - 1 end
+local boundaries = {}
+for i = 1, 12 do
+local mm, dd = starts[i][1], starts[i][2]
+local yy = (mm < 3) and (winStartYear + 1) or winStartYear
+boundaries[i] = os.time({year=yy, month=mm, day=dd, hour=0})
 end
-
---------------------------------------------------
--- NAYA (v2.7): اسلامی تاریخ (Islamic / Hijri date) - 100% OFFLINE
---------------------------------------------------
--- Pehle ye Islamic date Aladhan API ke response se aati thi, is liye jab bhi
--- network/API ka masla hota tha to Home screen par "Islamic tareekh" load hi
--- nahi hoti thi / kuch dikhta hi nahi tha. Ab bilkul getPunjabiDate() ki
--- tarah - sirf os.date + ek tabular (Kuwaiti) Hijri algorithm - koi internet,
--- koi API, koi download nahi. Urdu mahine ke naam + Roman mahina dono.
+local nextWindowStart = os.time({year=winStartYear+1, month=3, day=14, hour=0})
+local today = os.time({year=y, month=m, day=d, hour=0})
+local monthIdx = 12
+for i = 1, 12 do
+local upperBound = (i < 12) and boundaries[i+1] or nextWindowStart
+if today >= boundaries[i] and today < upperBound then monthIdx = i break end
+end
+local dayOfMonth = math.floor((today - boundaries[monthIdx]) / 86400) + 1
+local nsYear = winStartYear - 1469 + 1
+return dayOfMonth, punjabiMonths[monthIdx], nsYear
+end
 V25.hijriMonthsUrdu = {"محرم","صفر","ربیع الاول","ربیع الثانی","جمادی الاول","جمادی الثانی","رجب","شعبان","رمضان","شوال","ذوالقعدہ","ذوالحجہ"}
 V25.hijriMonthsEn = {"Muharram","Safar","Rabi-ul-Awwal","Rabi-ul-Thani","Jumada-ul-Awwal","Jumada-ul-Thani","Rajab","Shaban","Ramadan","Shawwal","Dhul-Qadah","Dhul-Hijjah"}
--- Gregorian -> Hijri (tabular / Kuwaiti algorithm, no tables, no network)
+PS = PS or {}
+PS.duaWanted = false
+PS.duaGen = 0
+PS.duaState = "idle"
+PS.duaLastToggle = 0
+duaListOverride = nil
+V25.uiTextColor = nil
+function V25.safeTextColor(v)
+if type(v) == "number" then return v end
+if type(v) == "string" then
+local ok, c = pcall(function() return Color.parseColor(v) end)
+if ok and c then return c end
+end
+return nil
+end
+function V25.norm(txt)
+local t = tostring(txt or "")
+t = t:lower()
+t = t:gsub("\217\139","") t = t:gsub("\217\140","") t = t:gsub("\217\141","")
+t = t:gsub("\217\142","") t = t:gsub("\217\143","") t = t:gsub("\217\144","")
+t = t:gsub("\217\145","") t = t:gsub("\217\146","") t = t:gsub("\217\128","")
+t = t:gsub("\217\147","") t = t:gsub("\216\140","")
+t = t:gsub("[%s%p%c]","")
+return t
+end
+V25.BOOKS = { {n="Qisas-ul-Ambiya - Anbiya ki Kahaniyan (Stories of the Prophets)", l="Urdu", i="Qisas-ul-Ambiya_Stories_of_the_Prophets_Urdu_Audio_MP3_CD_ISO_Image", s="bk_qisas_ul_ambiy", nf=20, q="Sayyidena_Adam - TAKHLIQ-E-QAINAT|Sayyidena_Adam - SHAITAN-KI-DUSHMANI|Sayyidena_Idris - FASAD-KI-IBTEDA|Sayyidena_Nooh - SHIRK-KA-AGAZ|Sayyidena_Saleh - IBRAT-NAK-ANJAM|Sayyidena_Ibrahim - BUT-SHIKAN|Sayyidena_Ibrahim_Ismail_Ishaque - AMAN-WALA-GHAR|Sayyidena_Ibrahim_Loot - BATTARIN-LOG|Sayyidena_Yusuf - HASAD-KI-AAG|Sayyidena_Yusuf - BADSHA-KA-KHAWAB|Sayyidena_Ayyub_Yunus_Zulkifl - SABAR-KA-BADLA|Sayyidena_Musa_Shoaib - KAM-TOLNE-WALEY|Sayyidena_Musa - MUQADDAS-VADI|Sayyidena_Musa - JADUGAR-SE-MUKABLA|Sayyidena_Musa_Harun - SONE-KA-BACHRA|Sayyidena_Musa_Khizar - TEEN-SWAL|Sayyidena_Usha_Ilyas_Ysaa - SANDUQUE-KI-WAPSI|Sayyidena_Dawod_Sulaiman - BE_MISAL-BADSHAHAT|Sayyidena_Uzer_Yahyah_Zakariya - BE_MISAL-BADSHAHAT|Sayyidena_Isah_Jesus - QATL-KI-SAZISH", qp="%02d - Qissa_"},
+{n="Seerat-un-Nabiﷺ – Seerah in Urdu", l="Urdu", i="Seerat-un-nabi-seerah-urdu-mp3-audio", s="bk_seerat_un_nabi", d="(01) Arab before Muhammad (s)|(02) Makkah before Muhammad (s)|(03) Shirk before Muhammad (s)|(04) Jews and Christians before Muhammad (s)|(05) Character of people before Muhammad (s)|(06) Story of Elephant|(07) Birth of Muhammad (s) and his family|(08) Childhood of Muhammad (s)|(09) 1st marriage of Muhammad (s)|(10) Muhammad (s)_before_prophethood|(11) Wahi on Prophet Muhammad (s)|(12)_Open_Islamic_invitation|(13) Muslim Hijrah|(14) Muhammad (s) ko qatl karne ke mansoobe|(15) Boycott of Prophet Muhammad (s) and Muslim|(16) Muhammad (s) ka taif ki taraf safar|(17) Muhammad (s) ki dawat per logon ka qubool -e-Islam|(18) Meraaj ka safar|(19) Muhammad (s) se bayt|(20) Muhammad (s) ki Hijrat|(21) Muhammad (s) ki madina me aamad|(22) Masjid e Nabwi ki tameer|(23) Jung e Badr|(24) Jung e Uhad|(25) Musalmanoun se dhoke|(26) Jung e Ahzaab|(27) Suleh Hudaibiyah - Treaty of Hudaibiyah|(28) Jung e Khaybar|(29) Letters of Prophet Muhammad (s) to kings|(30) Fateh Makkah|(31) Jung e Hunain|(32) 9 aur 10 Hijri ke aham waqiyaat|(33) Muhammad (s) ki zindagi ke akhri lamhaat|(34) Ahle bayt ka taaruf ", ss="_-_Seerat-un-Nabi_in_Urdu.mp3", o="23=(23) Jung e Badr_-_Seerat-un-Nabi_in_Urdu.mp3.mp3"},{n=BDIT, l="Urdu", i="islamic-dua-in-audio", s="bk_islamic_dua_in", f={"dua-14-shaban.mp3", "dua-after-drinking-water.mp3", "dua-after-eating-dawat.mp3", "dua-after-eating.mp3", "dua-after-exiting-from-the-toilet.mp3", "dua-after-opening-clouds.mp3", "dua-after-receive-debts.mp3", "dua-after-waking-up-from-sleep.mp3", "dua-after-wearing-clothes.mp3", "dua-at-the-time-of-handshake.mp3", "dua-at-the-time-of-iftar-in-dawat.mp3", "dua-at-the-time-of-jamahi.mp3", "dua-at-the-time-of-lunar-eclipse.mp3", "dua-at-the-time-of-rain.mp3", "dua-at-the-time-of-receive-gift.mp3", "dua-at-the-time-of-solar-eclipse.mp3", "dua-at-the-time-of-storm.mp3", "dua-at-the-time-of-sunrise.mp3", "dua-at-the-time-of-sunset.mp3", "dua-at-time-of-rain.mp3", "dua-before-drinking-milk.mp3", "dua-before-drinking-water.mp3", "dua-before-eating.mp3", "dua-before-entering-the-toilet.mp3", "dua-before-sleeping.mp3", "dua-before-starting-new-work.mp3", "dua-for-asking-forgiveness.mp3", "dua-for-entering-house.mp3", "dua-for-entering-masjid.mp3", "dua-for-entering-the-marketplace.mp3", "dua-for-exiting-masjid.mp3", "dua-for-expressing-thanks.mp3", "dua-for-first-ashra-of-ramadan.mp3", "dua-for-payment-of-debt.mp3"}},
+{n="Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)", l="Urdu", i="NamazSeriesByShaykhMuftiMuhammadSaeedKhan", s="bk_namazseriesbys", d="01_Introduction_and_Importance_1|02_Introduction_and_Importance_2|03_Introduction_and_Importance_3|04_Auqat1|05_Auqat2|06_Auqat3|07_Auqat4|08_Auqat5|09_Azan_Iqamat-1|10_Azan_Iqamat-2|11-a_Roohani_Taharat_HujjaTullah_ka_Biyan_12.08|11-b_Roohani_Taharat_HujjaTullah_ka_Biyan_13.08|11-c_Roohani_Taharat_HujjaTullah_ka_Biyan_14.08|11-d_Roohani_Taharat_HujjaTullah_ka_Biyan_19.08.05|11-f_Roohani_Taharat_HujjaTullah_ka_Biyan_21.08|11_Azan_Iqamat-3|12-Wuzu-1|13_Taharat-1_Masail-e-Istanja|14_Taharat-2_Severage_system_gutters_bathrooms|15_Taharat-3_Severage_system_gutters_bathrooms|16_Taharat-4_Water_well_tank_About_clothes_and_carpets|17_Taharat-5_Water_Difference_between_Namaz_of_male_and_female|18_Taharat-6_Water_paki_and_napaki_paki_of_animals_skin_human_and_animals_left_over_food|19_Taharat-7_Animals_leftovers_and_about_bathing|20-Wuzu-2|21-Wuzu-3|22-Bathing-Sunnatain|23-Taharat-11_Wuzu-Sunnatain|24-Taharat-12_Wuzu-Mustahabbat|25-Taharat-13_Wuzu-Complete_method|26-Taharat-14_Wuzu-Naqais|27-Taharat-15_Wuzu-Naqais|28-Juraboun_pur_Massah_1|29-Juraboun_pur_Massah_2|30|31|32|33|34|35|36|37|38|39|40|41|42|43-sajda1|44-sajda2|45-sajda3|47-qaada-akhira-2|48-Qaada-Akhira-3|49|50-Tadeel-e-Arkaan|51-Jumma_1_14.05.2005|52-Jumma_2_15.05.2005|53-Fateha_Khalfulimam_1_20.05.2005|54-Fateha_Khalfulimam_2_21.05.05|55-Fateha_Khalfulimam_3_22.05.2005|56-Fateha_Khalfulimam_4_27.05.2005|57-Fateha_Khalfulimam_5_28.05.2005|58-Fateha_Khalfulimam_6_03.06.2005|59-Fateha_Khalfulimam_7_04.06.2005|60-Fateha_Khalfulimam_8_05.06.2005|61_Fateha_Khalfulimam_9_11.06.2005|62_NASIKH-W-MANSOOSKH_AHADEETH_Kay_ASOOL_10_12.06.2005|63_Fateha_Khalfulimam_11_17.06.2005|64_Fateha_Khalfulimam_12_24.06.2005|65_Fateha_Khalfulimam_13_25.06.2005|66_Fateha_Khalfulimam_14_26.06.2005|67_Fateha_Khalfulimam_15_08.07.2005|68_Fateha_Khalfulimam_16_03.07.2005|69_Fateha_Khalfulimam_17_09.07.2005|70_Fateha_Khalfulimam_18_10.07.05|71_Fateha_Khalfulimam_19_15.7.05|72_Fateha_Khalfulimam_20_17.7.05|73|74|46-qaada-akhira-1", pp="Namaz", ss=".mp3", o="79=namaz46-qaada-akhira-1.mp3"},
+{n="Tafseer-e-Quran - Shaikh Hafiz Jalaluddin Qasmi (Kurnool)", l="Urdu", i="HQTafseereQuranByShaikhHafizJalaluddinQasmi", s="bk_tafseer_qasmi", d="10 -11|12|13|14|15|16 A|16 B|17|18|19 A|19 B|1A|1B|20|21|22|23|24|25|26|27|28|29-30|2A|2B|3A|3B|4|5|6|7 A|7 B|7 C|7 D|8 A|8 B|9 A|9 B|9 C", pp="PARAH NO. ", ss=".mp3"},
+{n="Seerat un Nabi - Bayan Series (Moulana Muhammad Ilyas)", l="Urdu", i="SeeratUnNabiAudioBayanSeries", s="bk_seerat_bayan", p="Seerat Un Nabi Bayan_%02d.mp3", nf=30},
+{n="Seerat-un-Nabi - Moulana Makki Al-Hijazi (Mukammal 40 Parts)", l="Urdu", i="01SeeratUnNabiMo.MakkiAlHijazi_201407", s="bk_makki_seerat40", p="%02d-Seerat-Un-Nabi -Mo.Makki Al-Hijazi.mp3", nf=40, cp="%02d-seerat-un-nabi-Mo.MakkiAl-hijazi.mp3", oc="2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40", o="24=24-seerat-un-nabi-mo.makkial-hijazi.mp3"},
+{n="Qasas-ul-Anbiya - Moulana Makki Al-Hijazi (24 Parts)", l="Urdu", i="Sh.MakkiAlHijaziQasasUlAnbiya01of24", s="bk_makki_qasas24", p="Sh. Makki Al-Hijazi - Qasas ul Anbiya - %02dof24.mp3", nf=24, cp="Sh.MakkiAl-hijazi-QasasUlAnbiya-%02dof24.mp3", oc="2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24"},
+{n="Tafheem-ul-Quran - Syed Abul A'la Maududi (Mukammal Tafseer)", l="Urdu", i="Tafheem-ul-Quran-by-Syed-Abul-Ala-Moududi-Audio-MP3-CD", s="bk_tafheem_maududi", x={"000 - Introduction - (دیباچہ - Deebacha - مقدمہ - Muqadma).mp3"}, r="hindi"},
+{n="The Holy Quran - English Translation (Mukammal, Audio)", l="English", i="HolyQuranEnglishTranslation", s="bk_quran_english", p="%03d.mp3", nf=114, t=1},
+{n="A Guide for the New Muslim (English - 12 CDs)", l="English", i="AGuideForTheNewMuslim", s="bk_guide_newmuslim", p="CD %d.mp3", nf=12},
+{n="Sahih Muslim - Mukammal Arabic Audio", l="Arabic", i="saheh-muslim-mp3", s="bk_sahih_muslim",d="001sa7e7moslm_ketaabaleeman.mp3|002sa7e7moslm_ketaaba66harah.mp3|003sa7e7moslm_ketaabal7aydh.mp3|004sa7e7moslm_ketaabalsalah.mp3|005sa7e7moslm_kmwade3alsalah.mp3|006sa7e7moslm_ksalatalmosafer.mp3|007sa7e7moslm_kjomo3ah.mp3|008sa7e7moslm_kal3edayn.mp3|009sa7e7moslm_kestesqaa.mp3|010sa7e7moslm_kkosoof.mp3|011sa7e7moslm_kjanaaezz.mp3|012sa7e7moslm_kzakah.mp3|013sa7e7moslm_ksyaam.mp3|014sa7e7moslm_ke3tekaaf.mp3|015sa7e7moslm_khajj.mp3|016sa7e7moslm_kjneka77.mp3|017sa7e7moslm_kradaa3.mp3|018sa7e7moslm_ktalaaq.mp3|019sa7e7moslm_kle3aan.mp3|020sa7e7moslm_kal3etq.mp3|021sa7e7moslm_kboyoo3.mp3|022sa7e7moslm_kmosaqaah.mp3|023sa7e7moslm_kfaraeed.mp3|024sa7e7moslm_khebaat.mp3|025sa7e7moslm_kwa9yeah.mp3|026sa7e7moslm_kannothor.mp3|027sa7e7moslm_kaymaan.mp3|028sa7e7moslm_kqasaamah.mp3|029sa7e7moslm_k7odood.mp3|030sa7e7moslm_kaqdyah.mp3|031sa7e7moslm_kloqa6ah.mp3|032sa7e7moslm_kjehaad.mp3|033sa7e7moslm_kamaarah.mp3|034sa7e7moslm_kassayed.mp3|035sa7e7moslm_kada7ee.mp3|036sa7e7moslm_kashrebah.mp3|037sa7e7moslm_kallebas.mp3|038sa7e7moslm_kalaadaab.mp3|039sa7e7moslm_kasslaam.mp3|040sa7e7moslm_kalalfadh_menalaadaab.mp3|041sa7e7moslm_kasheaar.mp3|042sa7e7moslm_karroeeya.mp3|043sa7e7moslm_kfadaael.mp3|044sa7e7moslm_kfadaaelassa7aabah.mp3|045sa7e7moslm_kalberr.mp3|046sa7e7moslm_kalqadar.mp3|047sa7e7moslm_kal3elm.mp3|048sa7e7moslm_kalthekerwalddo3aa.mp3|049sa7e7moslm_kattawbah.mp3|050sa7e7moslm_kmonafeqeen.mp3|051sa7e7moslm_kaljannah.mp3|052sa7e7moslm_kalfetan.mp3|053sa7e7moslm_kazzohd.mp3|054sa7e7moslm_ktafseer.mp3"},
+{n="The Holy Quran - Punjabi Tarjuma (Mukammal, Audio)", l="Punjabi", i="punjabiquranmp3", s="bk_quran_punjabi", p="%03d.mp3", nf=114, t=1},
+{n="Khulafay-e-Rashideen - Moulana Makki Al-Hijazi", l="Urdu", i="Sh.MakkiAlHijaziKhulafayARashaydeen01of20", s="bk_makki_khulafa20", p="Sh. Makki Al-Hijazi - Khulafay-a-Rashaydeen - %02dof20.mp3", nf=20, cp="Sh.MakkiAl-hijazi-Khulafay-a-rashaydeen-%02dof20.mp3", oc="2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20"},
+{n="[Quran Chinese] 古兰经中文译音 (Chinese Translation Audio)", l="Chinese", i="Chinese_Audio_Quran_Translation_uP_bY_mUSLEm", s="bk_quran_chinese", nf=114, t=1},
+{n="Ar Raheeq Al Makhtoom - Safiur Rahman Mubarakpuri", l="Urdu", i="ar-raheeq-al-makhtoom-Safiur-Rahman-Mubarakpuri-urdu-audio-book", s="bk_ar_raheeq", nf=68, q="Arab Aqwaam aur Mahl e Waqu|Arab Hukumatein aur Sardaariyan|Bakhiya Arab ki Sardaariyan|Deen e Ibraheemi mein Qhuraish ki Bidaat|Arboun ke Akhlaq|Khandan e Nabuwat|Wiladat ba Sadat|Ayyam e Shabab|Namoos e Hira|Islam ka Harawwal Dasta|Dawat ke Ibtedahi Marahil|Mushrikeen ke Aeterazat|Zulm o Sitam|Daar e Arqam|Shiddat aur Qubool e Islam|Saudebaziyan aur Qatl ki Sazish|Mahsoori|Gham ka Saal|Beroon e Makkah Dawat e Islam||Shaq ul Qamar aur Meraj|Bait e Aqaba|Hijrat ke Harawal Daste|Ghar se Gaar Tak|Madeene ka Safar|Madeene ke Halat|Naye Muashere ki Tashkeel|Jang ki Ijazat|Saraya aur Ghazwaat||Ghazwa e Badr (Part-2)|Ghazwa e Badr (Part-3)|Ghazwa e Badr (Part-4)|Ghazwa e Badr (Part-5)|Badar ke Baad ki Jangi Sargarmiyan (Part-1)|Badar ke Baad ki Jangi Sargarmiyan (Part-2)||Ghazwa-e-Uhad (Part-2)|Ghazwa-e-Uhad (Part-3)|Ghazwa-e-Uhad (Part-4)|Ghazwa-e-Uhad (Part-5)|Uhad ke Baad ki Fouji Muhimmat (Part-1)|Uhad ke Baad ki Fouji Muhimmat (Part-2)|Ghazwa-e-Ahzaab (Part-1)|Ghazwa-e-Ahzaab (Part-2)|Ghazwa-e-Banu khuraiza|Ghazwa-e-Bani Mustalaq|Waqiy-e-Ifak|Suleh-e-Hudebiya (Part-1)|Suleh-e-Hudebiya (Part-2)|Nayi Tabdeeli (Part-1)|Nayi Tabdeeli (Part-2)|Ghazwa-e-Khaibar (Part-1)|Ghazwa-e-Khaibar (Part-2)|Mazeed Saraya|Jang-e-Mautta|Ghazwa-e-Fateh Makkah|Aaj Koyi Sarzinish Nahi|Makkah Main Qayam aur Wafood|Ghazwa-e-Hunain|Ghazwa-e-Tabook (Part-1)|Ghazwa-e-Tabook (Part-2)|Ghazwaat Par ek Nazar|Allah ke Deen Main|Hajjat-ul-Wida|Rafeeq -ul-Aala ki Janib|Khana-e-Nabuwat|Akhlaaq-o-Aousaaf (Final episode)", qp="Episode %02d _ Ar Raheeq Al Makhtoom - ", o="20=Episode 20 _Ar Raheeq Al Makhtoom - Qabail aur Afrad ko Islam ki Dawat.mp3|30=Episode 30 - Ar Raheeq Al Makhtoom - Ghazwa E Badr (Part - 1).mp3|37=Episode 37 _  Ar Raheeq Al Makhtoom - Ghazwa-e-Uhad (Part-1).mp3"},
+{n="Tafsir Ibne Kaseer (Urdu)", l="Urdu", i="Tafsir-ibne-kaseer-kathir-urdu-----audio-mp3-hq", s="bk_ibne_kaseer", x={"000 - Introduction & Biography.mp3"}, r="hindi"},
+{n="Bayan-ul-Quran - Dr. Israr Ahmed", l="Urdu", i="BayanUlQuranInUrduByDr.IsrarAhmedAudioMP3-HQ", s="bk_bayan_israr", x={"000 - Introduction - (دیباچہ - Deebacha).mp3"}, r="hindi", x2={"Dua  دُعَاء‎, - Salat Al-Witr.mp3", "Ending Speech - اختتامی تقریر .mp3"}},
+{n="Quran Urdu Tarjuma - Fateh Muhammad Jalandhari", l="Urdu", i="Al-Quran-with-Urdu-Translation-Audio-MP3", s="bk_quran_urdu_fmj", r="hindi"},
+{n="Quran - Sirf Urdu Tarjuma", l="Urdu", i="Quran-e-Kareem-With-Urdu-ONLY-Translation-Fateh-Muhammad-Jalandhari-------Audio-MP3-CD", s="bk_quran_tarjuma_only", r="hindi"},
+{n="Quran Urdu - Mishary Rashid Alafasy", l="Urdu", i="complete-quran-with-urdu-translation-mishary-rashid-alafasy", s="bk_quran_urdu_mishary", nf=114, u=" Surah Fatiha| Surah Al-Baqarah| Surah Al-Imran| Surah An-Nisa| Surah Maidah| Surah Al Anam| Surah Araf| Surah Anfal| Surah Al Tauba| Surah Yunus| Surah Hud| Suarh Yusuf| Surah Ar-Rad | Surah Ibrahim| Surah Hijr | Surah Nahl| Surah Isra | Surah Kahf | Surah Maryam | Surah Taha | Surah Al Anbiya | Surah Hajj | Surah Mumenoon| Surah Noor | Surah Al-Furqan | Surah Ash-Shuara | Surah Naml | Surah Qasas | Surah Ankaboot | Surah Room | Surah Luqman | Surah Sajda | Surah Ahzab | Surah Saba | Surah Fatir | Surah Yasin| Surah As-Saaffat | Surah Sad | Surah Az-Zumar | Sarah Ghafir | Surah Fussilat | Surah Ash-Shura | Surah Zukhruf | Surah Dukhan | Surah Al-Jathiya | Surah Ahqaf | Surah Muhammad | Surah Fath | Surah Hujraat | Surah Qaf | Surah Adh-Dhariyat | Surah At-Tur| Surah An-Najm| Surah Al-Qamar| Surah Rahman - wi| Surah Al-Waqiah| Surah Al-Hadid| Surah Al-Mujadilah| Surah Al-Hashr| Surah Al Mumtahana| Surah As-Saff| Surah Al-Jumuah| Surah Al-Munafiqun| Surah At Taghabun - wi| Surah At Talaq| Surah Tahreem| Surah Mulk| Surah Al-Qalam| Surah Al-Haqqah| Surah Al Maarij| Surah Nuh| Surah Al-Jinn| Surah Muzzammil| Surah Mudassir| Surah Qiyamah| Surah Insan| Surah Mursalat| Surah An-Naba| Surah An-Naziat -| Surah Abasa| Surah At-Takwir| Surah Al Infitar| Surah Al-Mutaffifin| Suarh Al Inshiqaq| Surah Burooj| Surah At-Tariq| Surah Al Ala| Surah Al Ghashiya| Surah Al-Fajr| Surah Al Balad| Surah Ash-Shams| Surah Al-Lail| Surah Ad-Duha| Surah Al Ash Sharh | Surah At-Tin| Surah Al-Alaq| Surah Al-Qadr| Surat Al Bayyinah| Surah Al-Zilzala| Surah Al-Adiyat| Surah Al-Qariah| Surah At Takasur| Surah Al-Asr| Surah Al-Humazah| Surah Al-Fil| Surah Al-Quraish| Surah Al Maun| Surah Kausar - wi| Surah Al-Kafirun| Surah An-Nasr| Surah Al-Lahab| Surah Al-Ikhlas| Surah Al-Falaq| Surah An-Nas"},
+{n="Quran Urdu Para-wise - Maher Al Muaiqly", l="Urdu", i="quran-juz-audio-mp3", s="bk_quran_juz_maher", p="Para %02d.mp3", nf=30},
+{n="Quran Urdu Para-wise - Meeraj-ud-Din Khan", l="Urdu", i="Quran-e-Kareem-With-Urdu-Translation-Fateh-Muhammad-Jalandhari", s="bk_quran_parah_meeraj", p="Al-Quran_Urdu_Parah-%02d.mp3", nf=30},
+{n="Sahih Al-Bukhari - Urdu Tarjuma", l="Urdu", i="Sahih_Al-Bukhari_MP3", s="bk_bukhari94", p="Sahih_Al-Bukhari_%02d.mp3", nf=94},
+{n="Sharh Kitab-ut-Tawheed", l="Urdu", i="Sharh_Kitab_Tawheed_3", s="bk_tawheed82", p="%02d.mp3", nf=82},
+{n="Riyad-us-Saliheen", l="Urdu", i="riyadussaliheen_202101", s="bk_riyad372", p="Chapter_%03d_Riyad-us-Saliheen_Audio.mp3", nf=372},
+{n="Bachon ki Islami Kahaniyan", l="Urdu", i="8YaNabiByAzizMianQawwal", s="bk_bachon_kahani", d="(8) Ya nabi by Aziz mian qawwal|3D Cartoon Video  2 Bakriyon Ki Kahani  Urdu Cartoon Kahani  Kids Corner|ACHHA JI MAIN HAARI CHALO MAAN JAO NA|Aik Karamat - Khwaja Ghareeb Nawaz Ki Karamat - Animated Story|Aurat ke Makro Fareb ki Kahani __ Crocodile Tears __ Faraib Moral Stories|Badshah K 3 Sawal aur Wazeer ki Zindagi ka Soda _ Urdu Story _ Urdu Kahani|Bani Israel  Ki Qaum Bandar Ban Gaye urdu stories _ islamic stories|Cartoon For Kids _ Aqalmand Chidiya _ The Wise Bird _ 3D Animation Video|Cartoon For Kids _ Oont Aur Chohay Ki Ajeeb Khani - Kisi Ko Chota Nahi Samjhain _ Madani Channel|Hazrat Nooh (A.S) Ki Kashti|Hazrat Suleman AS and Hoopoe Bird __ Hud Hud __ Crow __ Solomon in Islam|Heera Aur Chor ( Diamond & Thief ) urdu stories _ islamic stories|How Satan Ride on Noah's ark __ Shytan __ Iblees __ Noah ark __ Kashti|Islamic Stories _ Islamic Stories for Kids in Urdu _ Ghazwa e Uhad ka Waqia|Kabotar k per Lal kyon hotay hain _ pigeon _ red legs _ secret_ knowledge islami malomat Urdu_Hindi|King's Daughter Wedding - Badshah ki Beti ki Shadi ka Sabaq Amoz Aur Dilchasp Waqia By Golden Tips|Madina Sharif ki Ek billi ka Hazoor(S.E.W.W) say ro ro kay Faryaad Karne ka Waqia _ Quran Aur Hadees|Moral Stories for Kids _ Ghuroor Ka Anjaam _ Gadha aur Ghora _ Arrogance And Pride _ Urdu Cartoon|Moral Story for Kids _ Mandak aur Chuhe Ki Ladai _ Aik Ghar Jannat Kay Darmiyan _ Animated Story|Murkh Lomad Panchatantra Stories _ Hindi Animated Stories by Jingle Toons|New Urdu Stories _ Magic Tree & Greedy Man _ Urdu Story For Kids|New Urdu Stories _ Moral Stories _ Hindi Story For Kids|New Urdu Stories _ Moral Stories _|New Urdu Stories _ Moral Stories __001|New Urdu Stories _ Woodcutter & Magic Box _ Urdu Story For Kids|Qissa Aik Chor ka __ Allah ka Banda __ Emotional Story of a burglar __|Sabaq amoz waqia _ Namaz Chorna ka anjam_ urdu stories|Sanp aur mor ko jannat say kyon nikala gya _ snake _ peacock islami malomat Urd_Hindi|Shair Ki Khaal Main Ghadha _ Donkey in the Lion's Skin _ Kids Urdu Story _ Cartoon for Kids(1)|Shair Ki Khaal Main Ghadha _ Donkey in the Lion's Skin _ Kids Urdu Story _ Cartoon for Kids|Sone ka Anda 3D Animated Hindi Stories for Kids _|Sone ka Anda 3D Animated Hindi Stories for Kids __001|Story of a King and His Eagle __ Jahil Budhiya __ Moral Stories __|Story of a King and His Eagle __ Jahil Budhiya __ Moral Stories ___001|Story of king's daughters - Badshah ka apni Beti ko Saza Dene ka Sabaq Amoz Waqia By Golden Tips|Thak Thak Kon Hay Urdu Story _ Bachon ki Kahaniyan & Stories in Urdu _|The Honest Wood Cutter - Aesops Fables Short Story _ Hindi Moral Stories For KIds|The Tale of the Bamboo Cutter in Urdu  Urdu Fairy Tales|Travelling Companion in Urdu _ Urdu Story _ Urdu Fairy Tales|Vulture Bird _ Facts About Vulture _ Interesting Facts About Birds _ Birds Facts _ finch bird|_ Fisherman and his Wife in Urdu _ Urdu Story _ Urdu Fairy Tales|_ Magic Cow in Urdu _ Urdu Story _ Urdu Fairy Tales|_ Miser in the Bush Story in Urdu _ Urdu Fairy Tales|_ New Urdu Stories _ Moral Stories _ Urdu Story For Kids|_ The Tale of the Bamboo Cutter in Urdu _ Urdu Fairy Tales|_ Who will Bell the Cat in Urdu _ Urdu Story _ Urdu Fairy Tales|_ Who will Bell the Cat in Urdu _ Urdu Story _ Urdu Fairy Tales_001|kawa dara howa kyon rehta hai _ islami malomat Urdu_Hindi", ss=".mp3"},
+{n="Hadith Collection Bundle", l="Urdu", i="tafseer-ahadees", s="bk_hadith_bundle", d="01 Bukhari Sharif Audio 1|02 Bukhari Sharif Audio 2|03 Bukhari Sharif Audio 3|04 Bukhari Sharif Audio 4|05 Muslim Sharif Audio-1|06 Muslim Sharif Audio-2|07 Mishqath Sharif Audio-1|08 Mishqath Sharif Audio-2|09 Mishqath Sharif Audio-3|10 Mishqath Sharif Audio-4|11 ArbaeenENawawiAll|12 HanfiAhadeesAll", ss=".mp3"},
+{n="Jab Zindagi Shuru Ho Gi - Abu Yahya", l="Urdu", i="jab_zindagi_shuru_ho_gi_novel_by_abu_yahya_audio_book", s="bk_jab_zindagi", d="Part No. 01 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Pa(MP3_160K).mp3|Part No. 02 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Ar(MP3_160K).mp3|Part No. 03 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Ma(MP3_160K).mp3|Part No. 04 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Na(MP3_160K).mp3|Part No. 05 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ 2-(MP3_160K).mp3|Part No. 06 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Aa(MP3_160K).mp3|Part No. 07 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Ha(MP3_160K).mp3|Part No. 08 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Ha(MP3_160K).mp3|Part No. 09 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Qa(MP3_160K).mp3|Part No. 10 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Hi(MP3_160K).mp3|Part No. 11 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Aa(MP3_160K).mp3|Part No. 12 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Ba(MP3_160K).mp3|Part No. 13 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Ab(MP3_160K).mp3|Part No. 14 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Ja(MP3_160K).mp3|Part No. 15 of 15 _ _Jab ZINDAGI Shuru ho gi_ [ Ja(MP3_160K).mp3|Part no 00 of 15 _ Trailer of _ _Jab ZINDAGI Shuru ho gi by Abu Yahya.mp3"},
+{n="Naatein - Junaid Jamshed", l="Urdu", i="Jalwa-e-Janan_JunaidJamshed", s="bk_naats_jj", d="01. Jalwa-E-Janan|02. Muhammad Ka Roza|03. Tune Poochi Hai Imamat|04. Jaga Ji Lagane Ki Duniya|05. Multazim Par Dua • Ilahi Teri Choukhat Par |06. Qad Af Lahal (Surah Muminoon)|07. Yeh Subh-E-Madina|08. Rasha Makawa (Pushto)|09. Madad Meray Allah|10. Jalwa-E-Janan (Extended Version)", ss=".mp3"},
+{n="Quran Hindi - Sudais & Yunus Khan", l="Hindi", i="hindi-meal", s="bk_quran_hindi_meal", nf=114, u="-Al-Fatiha|-Al-Baqarah2|-Al-imran|-An-Nisa|-Al-Maidah|-Enam|-Al-Araf|-Al-Anfal|.At-Taubah|-Yunus|-Hud|-Yusuf|-Ar-Rad|-ibrahim|-Al-Hijr|-An-Nahl|-Al-Isra|-Al-Kahf|.Maryam|.Ta-Ha|-Al-Anbiya|-Al-Hajj|-Al-Mu-minun|-An-Nur|-Al-Furqan|-Ash-Shu-ara|-An-Naml|-Al-Qasas|-Al-Ankabut|-Ar-Rum|-Luqman|-As-Sajdah|-Al-Ahzab|-Saba.|-Fatir|-Ya-Sin|-As-Saffat|-Sad|-Az-Zumar|-Mumin-Ghafir|-Fussilat|-Ash-Shura|-Az-Zukhruf|-Ad-Dukhan|-Al-Jathiyah|-Al-Ahqaf|-Muhammad|-Al-Fath|-Al-Hujurat|-Qaf|-Adh-Dhariyat|-At-Tur|-An-Najm|-Al-Qamar|-Ar-Rahman|-Al-Waqi-ah|-Al-Hadid|-Al-Mujadilah|-Al-Hashr|-Al-Mumtahanah|-As-Saff|-Al-Jumu-ah|-Al-Munafiqun|-At-Taghabun|-At-Talaq|-At-Tahrim|-Al-Mulk|-Al-Qalam|-Al-Haqqah|-Al-Maarij|-Nuh|-Al-Jinn|-Al-Muzzammil|-Al-Muddaththir|-Al-Qiyamah|-Al-Insan|-Al-Mursalat|-Al-Naba|-Al-Naaze|-Abasa|-Al-Takweer|-Al-Infitaar|-Al-Mutaffifeen|-Al-Inshiqaaq|-Al-Burooj|-Al-Taareq|-Al-A-alaa|-Al-Ghaasheyah|-Al-Fajr|-Al-Balad|-Al-Shams|-Al-Layl|-Al-Duhaa|-Al-insirah|-Al-Teen|-Al-Alaq|-Al-Qadr|-Al-Bayyinah|-Al-Zilzalaha|-Al-Aadeyat|-Al-Qaare-ah|-Al-Takasur|-Al-Asr|-Al-Humazah|-Al-Feel|-Al-Quraishinsirah|-Al-Maa-oon|-Al-Kausar|-Al-Kaaferoon|-Al-Nasr|-Al-Masad|-Al-Ikhlaas|-Al-Falaq|-Al-Naas"},
+{n="Sudais & Shuraim - Arabic Tilawat", l="Arabic", i="Holy-Quran-Urdu-Translation/Sudais-and-Shuraim", s="bk_sudais_arabic", nf=114, t=1},
+{n="Quran Urdu - Qari Waheed Zafar Qasmi (Tilawat + Tarjuma)", l="Urdu", i="Holy-Quran-Urdu-Translation/Qari-Wahid-Zafar-Qasmi", s="bk_waheed_zafar", nf=114, t=1},
+{n="Qasas-ul-Anbiya - Moulana Makki Al-Hijazi (Recording 2, 24 Parts)", l="Urdu", i="QasasUlAmbiya-as", s="bk_qasas24_r2", p="Sh. Makki Al-Hijazi - Qasas ul Anbiya - %02dof24.mp3", nf=24},
+{n="Hisnul Muslim - Azkaar o Duain (133 Parts)", l="Urdu", i="Hisnul_Muslim_with_Urdu_Translation_Audio-Book", s="bk_hisnul_muslim", d="1.NeendSeJagneKeAzkaar|10.GherSeNikelteWaqtKeAzkaar|100.OonchiJaghounPerChedteWaqtTakbeerAurUtarteWaqtTasbeehKehna|101.MusaafirKiDuaJabWohSubhaKare|102.SafarWaGhairahMeinJabKisiManzilPerUtre|103.SafarSeWaapsiKiDua|104.KhushKarneWaliYaNaPasandeedahCheezPeshAnePerKyaKahe|105.RasoolAllahPerDoroodBhejniKiFazeelath|106.SalaamKoAamKarna|107.MuraghKiBaanghSneAurGadheKaHingnaSuneToKyaKahe|108.RaathKoKottaounKaBhoknaSunkarKyaDuaKarniChaahie|109.UsShakhsKeLiyeDuaJiseTumneGaliDiHo|11.GherMeDaakhilHoteWaqtZikr|110.JabKoiMuslimKisiMuslimKiTareefKareToKyaKahe|111.RukneYamaaniAurHajreAswadKeDarmiyaanKiyaDuaMange|112.SafaAurMarwahPerTherneKiDuA|113.ArafahYane9ZilHijjahKoDua|114.MshareHaraamKePaasZikr|115.JamraounKoKankerMaarteWaqtHerKankerKeSaathTakbeerKehte|116.HajreAswadWaleKonePerTakbeer|117.DushmenKeLiyeBaddua|118.KoiAgerKisiSeyDareToKyaKahe|119.TajjubKeWaqtAurKhushKunKaamKeWaqtKyaKahe|12.MasjidKiTarafJaaneKiDua|120.JisShakhsKePaasKhushKarneWaliKhaberAaeToWohKyaKare|121.JoShakhsApneJismMeDerdMehsoosKareWohKyaKaheAurKyaKare|122.JoKisiCheezKoApniNazerLagjaneSeDareWohKyaKahe|123.DameemahJameAkhlaaqWaAdaabKaBayaan|124.MuhrimShakhsHajjYaUmreMeTalbiyahyaneLabbaikKaiseyKahe|125.GhabraahetKeWaqtKyaKahe|126.JabKaafirKoCheenkAaeToUseKyaKahe|127.JabKaafirSalaamKareToUseyKyaJawabDe|128.RozedarKoiShakhsGaliGalojKareToKyaKahe|129.ZabhYaNeharKarteWaqtKyaKahe|13.MasjidMeDaakhilHoneKiDua|130.SarkashShaitanounKeKhufyaTadbeerounKeTodKeLiyeKyaKahe|131.IstighfaarAurTaubahKaBayaan|132.TahleelTakbeerAurTasbeehKiFazeelate|133.RasoolAllahTasbeehKisTarhaPadhaKarteThey|14.MasjidSeNikalneKiDua|15.AzaanKeAzkaar|16.DuaIstiftaahYeneTakbeerKeBaadSureFatihaSePehlePedheJaneWaleAzkaarAurDuae|17.RokooKiDuae|18.RokooSeUthneKiDuae|19.sajdeKiDuae|2.LibaasPehenneKiDua|20.DoSajdaounKeDarmiyaanKiChendDuae|21.SajdaeTilaawatKiDuae|22.Tashahhud|23.PehleTashahhudKeBaadRasoolAllahPerDorood|24.AkhriTashahhudKeBaadSalaamSePehleKiDuae|25.NamaazSeSalaamKeBaadKeAzkaar|26.FajrKiNamaazKeBaad|27.NamaazeIstikharaKaTarikhaAurUsmePedhiJaaneWaliDua|28.SubhWaShaamKeAzkaar|29.SubhWaShaamKeAzkaar|3.NayaLibaasPehenneyKiDua|30.SoneSePehleKeAzkaarAurDuae|31.RaatPehloBadelteWaqtKyaKahe|32.NeendMeBechainiAurGhbraahatKiDuaAurWehshatWaghairahKiDua|33.AcchaYaBuraKhwaabDekheToKyaKare|34.BuraKhwaabDekhkerKiyeJaneWaleAmaal|35.QonooteWitrKiDuae|36.WitrSaySalaamKeBaadDua|37.GhamAurFikrKiDua|38.BeqaraariKiDua|39.DushmanAurHukoomathWaleSeMilneKiDua|4.NayaaLibaasPehenneyWaleKoKyaDuaDiJaae|40.JiseEmaanMeShekHoneLageUskiDua|41.KharzKiAdaaigiKeLiyeDua|42.NamaazMeYaQuranKiTilaawathKeWaqtWaswasaAaeToKyaDuaKare|43.usShakhsKiDuaJisPerKoiKaamMushkilHojae|44.KoiAgerGonaahKerBatheToKyaKaheAurKyaKare|45.WohDuaeJoShaitaanAurUskeWaswasounKoDoorKartiHai|46.JabKoiMarziKeKhilaafWaqiahHojaeYaKoiKaamTaaqathWaIkhtiyaarKeBaherHoToKyaKah|47.BacchounKoKinKalimaathKeSaathAllahKiPanaahMeDiyaJaae|48.BemaarPursiKeWaqtMareezKeLiyeDua|49.BemaarPursiKiFazeelath|5.LibaasUtaareToKyaKahe|50.UsMareezKiDuaJoApniZindagiSeNaUmmeedHochokaHo|51.QareebulMauthShakhsKoTalqeen|52.JiseKoiMuseebathPohncheUskiDua|53.MayyithKiAnkheBandhKerteWaqtKyaDuaPedhe|54.MayyithPerJanaazahAdaKarteWaqtKiDuae|55.BacchePerJanazeKiDua|56.TaziyathKiDua|57.MayyitKoQabrMeDaakhilKarteWaqtDua|58.MayyitKoDafnKarneKeBaadKiDua|59.QabrKiZiyaarathKiDua|6.QadaaeHajatKeLiyeBaitulKhalaMeDakhilHoteWaqtKyaKhe|60.HawaaChelteWaqtDua|61.BadalGarjeToKyaPedhe|62.BaarishKiChendDuae|63.BaarishUterteWaqtKiDua|64.BaarishUterneKeBaadKiDua|65.MatlaSaafKarneKeLiyeDua|66.JabPehliTaareekhKaChaandDekheToYehDuaPedhe|67.RozaKholneKeWaqtKiDuae|68.KhaneAurPeeneSePehleKiDuae|69.KhaneSeFaarighHoneKeBaadKiDuae|7.QadaaeHajatYaneBaitulKhalaSeNikleToKyaDuaPedhe|70.KhaanaKhilaneWaleKiLiyeMehmaanKiDua|71.JoShakhsKuchPilayeYaPilaneKaIradahKareUskeLiyeDua|72.JabKisiGherWaloKehanRozaIftaarKareToYehDuaPedhe|73.DuaJabKhanaHazirHoAurRozedaarRozaNaKhole|74.nayaPheDekhneKeWaqtKyaDuaPedhiJae|75.CheenkKiDua|76.ShaadiKarneWaleKeLiyeDua|77.ShaadiKarneWaleKiApneLiyeDuaAurSawariKhareedneKiDua|78.JimaaYaneBiwiSeSohbathKareToKyaKahe|79.GhussayKiHaalathMeKyaDuaPedhe|8.WadooSePehleZikr|80.JabKoiMuseebathzadahKoDekheToKyaKahe|81.MajlisMePedhneKiDua|82.MajlisKeGunaahDoorKarneKiDua|83.WohKalimaathJinKeSaathTamaamMajaalisKhatmKarniChahiye|84.JoShakhsKaheAllahTujheBakhsheUskeLiyeKyaDuaKare|85.JoAchhaSolookKareUskeLiyeKyaDuaDeniChahiye|86.WohZikrJiskeSaathAdmiDajjalKeFitneSeMahfoozRahega|87.JoShakhsKaheMujheTumseAllahKeLiyeMohabbatHaiUskeLiyeDua|88.JoShakhsTumhareLiyeApnaMaalPeshKareUseKyaDuaDeniChahie|89.KhrarzAdaKarteHoeKharzAdaKarneWaleKeLiyeDua|9.WadooKeBaadKeAzkaar|90.ShirkSeKhaufKiDua|91.JoKisiKoTuhfaDeYaSadqaKareAurUskoDuaDiJaeToKyaKahe|92.BadhFaaliKiKaraahathKiDua|93.ChopaeYaKisiSawariPerSawaarHoneKiDua|94.SaferKiDua|95.BastiYaShaherMeDakhilHoneKiDua|96.BazaarMeDaakhilHoneKiDua|97.JanwarYaSawaariGireToKyaKahe|98.MusaafirKiMuqeemKeLiyeDua|99.MuqeemKiMusaafirKeLiyeDua", ss=".mp3"},
+{n="Munajat - Dawat-e-Islami (17 Munajat)", l="Urdu", i="MunajatOfDawatEIslami", s="bk_munajat17", d="11824|12111|13859|13870|14658|14735|15001|15313|19171|19666|20836|22405|22679|24172|24685|25454|25874", ss=".mp3"},
+{n="Naatein - Mufti Akhtar Raza Khan (Taajush Shariah, 67)", l="Urdu", i="TaajushShariahNaats", s="bk_naats_akhtar67", d="Ajab Rang par hay Bahar-e-Madinah|Allah Allah Allah Hoo 1989|Allah Allah Allah Hoo 1998|Allah Allah Allah Hu|Apnay Rindon Ki Ziyafat|Arsh-e-Haq Hay Masnad-e-Rifat Rasoolullah ki|Chaand Se Unn Ke Chehray Par|Chand Se Unn Ke Chehray Par|Complete Qasida Burdah|Daagh-e-Furqat-e-Taybah|Dar-e-Janaan pe fidai ko|Dil dard se bismil ki tarha|Furqat-e-Taybah Ki Wehshat|Jahan Baani Ataa Kar Dein - Very First Recitation|Kash Gumbad-e-Khazra|Khayr al-Bariyyah with Shaykh Fazlur Rahman Al Madani|Kuch Aisa kar de Meray Kirdigar Aankhon Mein|Lam Yati Nazeeruka|Lam Yati Naziruka|Madinah Aanay Wala Hay|Madinay Chalain|Main Madeenay Ko Chaloon|Manqabat Ghous-e-Paak|Mar Ke Jeenay Ka Paaon Maza 1989|Mast-e-Maey Alast hay|Mawla Ya Salli Wa Sallim 1994|Meray Allah Ke Nigaar Salam 1994|Mere Allah ke Nigar Salam|Mufti-e-Azam ka Taqwa chorr kar|Mufti-e-Azam ka Zarra kia bana Akhtar Raza|Mufti-e-Azam-e-Deen-e-Khair-ul-Wara|Mufti-e-Azam-e-Deen-e-Khayr-ul-Wara|Munawwar Meri Aankhon Ko|Munawwar Meri Ankhon ko|Mustafa Jaan-e-Rehmat 13-02-2004|Mustafa Jaan-e-Rehmat 20-02-2004|Mustafa Jaan-e-Rehmat|Mustafa-e-Zaat-e-Yakta 03-04-2003|Mustafa-e-Zaat-e-Yakta 1989|Mustafa-e-Zaat-e-Yakta Aap Hain|Nazar par kisi ki Nazar 1989|Nazar pe kisi ki Nazar|Nihan jis dil mein|Payam le ke jo aaee saba Madinay se|Phir Ke Gali Gali Tabah|PunjabiKalamWithAtifRazaMalawi|Qasidah Burdah 1989|Qasidah Burdah Sharif|Qasidah Burdah|Salat o Salam 30-08-1991|Sambhal Ja Aey Dil-e-Muztar 1989|Sambhal Jaa Aey Dil-e-Muztar|Sar Soo-e-Rauza Jhuka with Sharha|Sar Soo-e-Rauza Jhuka|Shameem-e-Zulf-e-Nabi|Shamim-e-Zulf-e-Nabi|Talaatum hay ye kesa|Teri Chokhat Pe Jo Sar|Tu Sham-e-Risaalat Hay 1992 Colombo|Tum Pe Karrorron Durood|Woh Abr-e-Bahar Aya|Woh Barrhta Saya-e-Rehmat Chala|Woh Raza ke Nezay ki maar hay|Ya Mujeebu Ya Mujaabu|Ya RasoolAllah Ya Khayr al-Anaam|Zameen-o-Zaman Tumharay Liye|Zindagi ye nahin hay kisi ke liye", ss=".mp3"},
+{n="Naatein - Owais Raza Qadri (257 Naats, Mukammal)", l="Urdu", i="NaatsOfRasool-Ul-ALLAHMuhammadOwaisRazaQadriCollectionOfMixNaats", s="bk_naats_owais257", ow=true, ow2=",253,254,255,256,257,", d="001AAGAYESARKAR-OwaisQadri.mp3|002AaeyAaqaMadniAaqa|003Aahista_chal|004Aahista_chal_long|005Aahista_chal2|006Aaishafae_umam|007Aaj_aaye_nabiyon_ke_sardar|008Aakuchsunadeishq|009AamadAamadHePart1|010AamadAamadHePart2|011Aamnakalaalaagaya|012Aaqap.b.u.hAayeMadniAaqa|013Aarizey_shamsoqamar|014Aasmaan_gar_terey_talwoonka|015Abmerynigahonmain|016Aisa_tujhay_khaliq|017Ajab_karam|018Ajab_rang_a|019Ajab_rang_b|020Ajab_rang_c|021Ajab_rang_per_hai|022Alifallah|023AllahAllahShah-e-konain|024AllahAllah|025AllahHooAllahHoo|026AllahHooDumBaDumAllahHoo|027AllahNabiDaNaamLiye|028AllahTaalasNames|029Allah_hoo_allah|030Allah_nabi_da_naam_liye|031AllahoRabboMuhammadin|032An_nabi_sallo_ale|033Anwar|034ApnaGhumYaShah-e-ambiya|035ArshMereHazoor|036Arzo_saman_banay_hain|037Ay_sabz_gumbad_walay|038Baatjokijiye|039Bage_jannat_main|040Bagh-e-chamanMeinNirali|041Baharein|042Balagalula_bekamalehi|043Balaghal-ulaBikamalihi|044BehtheUthteNabiKiGuftaguKerteRahe|045Bethtay_uthtay_nabi_ki|046BharLoJholian|047Bhini_suhani_subho_main|048Bigdibanaomakkimadani|049Bulla_lo|050Chalo_madinay_chaltay_hain|051Chamak_tujhse_patay_hain|052Chour_fikar_dunya_ki|053DarPeBulaaoMakkiMadni|054Dar_pe_bulaao_makki_madani|055DilMainHooYaadTeri|056DilMeinHoYaadTeri|057DilMeraDuniyaPeShedaHoGiya|058DilWichAllahAllah|059Dil_dard_se_bismil|060Dil_main_ho_yaad_tery|061Dil_mera_dunya_pe_sheda_hogaya|062DuniyaJagmaganeAe|063Duwa|064Elahi_madad_kar|065Gam_nahi_chordey|066Gham_sabhi_rahto|067Ghum_ho_gae_beeshumaar|068GunaahonKiAadatChuraMairayMola|069GunaahonKiAadat2|070GunaahonKiNahinJatiHaiAadatYaRasoolallah|071GunnahonKiAadat|072HaajionAaoShehenshah|073Habibe_khuda_ka_nazara|074Ham_per_nazar|075Hamd|076Haqiqatmainwo|077HarWaqtTasvur|078Har_dam_ho_mera_wird|079Har_waqt_tasavur_main|080Hariltijasepehlay|081Hazir_hey_darey-daulat|082HerWaqatTasavoorMain|083Hokaramsarkar|084Huzoor_aisa_koi_intizaam|085IshqKeRangMe|086JabHusn|087Janatmainnahikhencho|088Jub_gumbade_khazrape|089Jub_gumbade_khazrape_long|090KaabayKayBadrudduja|091Kaabe_ke_badr_ud_oja|092Kaabe_ke_badr_ud_oja_new|093KaashDekhneKoMilJata|094Kab_gunahon_say|095Kabhi_rozay_se_mimber_tak|096Kaliazulfawala|097Karoon_dam_badam_main|098KhilaMereDilKiKaliGooseAzam|099Khusaamdeed_khusaamdeed|100Kiamuzdajaanbuksh|101Kionrazaaajgali|102Kuch_aisa_kardey_meray|103LaMaujoodaIllahLah|104Lagateyheynaara|105LikhRahaHoonNaat-e-sarwar|106MadaniMadineWale|107Madina_yaad_aya_hay|108Madinay_diyan_pak_galyan|109Mahboob_da_maila_hay|110Mahenooragayamarhaba|111MainJoYounMadeneJata|112MainMadeeneChalla|113MainSoJaon|114Main_jo_uon_madinay_jata|115Mainmadeenaychala|116Manghte_khali_hath|117MangneKaMazaHeDerbarPer|118Mangne_ka_maza_hay|119Mankabat1|120Mankabat2|121Mankabat3|122Mankabat4|123Mankabat5|124Marhaba_marhaba_ki|125Marhababolomarhaba|126Meem_e_madina|127Meeran_walion_kay_imam|128Mehfil_e_naat_main_akar_bheta_karo|129MeinSoJaaon|130Menoo_majboorian|131MeraAaqap.b.u.haayeJhoomo|132Meray_sarkar_mery_baat|133Merayaqaaaijhoomo|134MereAaqaAe|135MereNoorKa|136Mere_aaqa_nigahe_karam_ho|137MeriDherkenMainYaNabipbuh|138Meri_kismat_ko_jagado|139Mery_dharkan_main|140MuhammadOwaisRazaQadri|141MuhammadOwaisRazaQadri2|142MujhayNaikInsaanBanaMereMola|143Mujhay_darpe_phir_bulana|144Mujhko_darpesh_hay|145Mujrime_haibat_zada|146Munkabat7|147Muradain_mil_rahi_hain|148MustafaJaan-e-rehmat|149Muzdawaaiasion|150Na_arshe_aman|151Na_ho_araam_jis_beemaarko|152Naat_aj_aye_nabi_laj_pal_haqaonline|153Naat_dar_pe_bulao_www.haqaonline.com|154Naat_kabhi_mujh_par_bhi_ho_rehmat_haqaonline.com_|155Naat_madine_diyan_pak_galiyan_www.haqaonline.com|156Naat_main_mangta_hoon_www.haqaonline|157Naat_menoon_aap_sahara_de_haqaonline.com_|158Naat_meri_baat_ban_gayee_hae_haqaonline.com_|159Naat_sarian_thoo_uchi_teri_shan_haqaonline.com_|160Naat_sarkar_ko_ro_ro_kar_haqaonline.com_|161Naat_ya_rasool_allah_rahmat_ki_nazar_ha|162NabiKaJhanda|163Naimatain_bant_ta|164NoorKa|165Nooragaya|166Noori_mehfil_pe_chadar|167Noorseapnayserver|168OwaisQadriLive|169Paat_woh_kuch|170PalakKeNazaro|171PhirGumbad-e-khazraKiFizaon|172Phir_madinay_ka_mujhko_bulawa_mila|173Phirkey_gali_gali_taba|174Phirnakarwatli|175Qaafley_waley_ne|176Qadirasarwararahnuma|177Qaseeda-e-noor|178Qaseedah-e-mairaj|179Qasida_burda_shareef|180Qasida_mairaj|181Qurbanmainunkibakshishpe|182Rab_mehfala_sajayan_ne|183Rahay_jatay_hain_ye_armaan|184Rokletihayapkinisbat|185Rouk_laiti_hai_apki_nisbat|186Roza_ae_aqdas_ki_talabgar|187Rukh_din_hey_yamehrey_saman|188SabSeAalaHoAalaHamaraNabipbuh|189Sachi_baat|190Sada-e-merhaba|191Salam|192Salam1|193Salealanabiyena|194Sallay_aala|195SareGunaahGaran|196SarkarKiAamadMarhaba|197Sarkarkaydarperjaaon|198Sartaba_karam_hey|199Seraygulshankondekhay|200Serverkahoonkay|201Serware_ambia_mazhare_kibriya|202ShalaWasdaRawayTeraSonaHaram|203Shukrey_khuda|204Sochta_hoon_main_wo_ghari|205SoonaJungleRaatAndheri|206Subha_taiba_main_hovi|207TaireeWehashtoonSay|208TajdareHaramAeShensha|209Tera_milad_main_kion_na_manawan|210TeriYaadPayee|211Teri_jaalyon_ke_neechey|212Teri_wahshaton_se_aey_dil|213Tery_yaad_pae|214ToShamERisalatHai|215Tooba_may_jo|216TuShamm-e-risalatHai|217Tu_shame_risalat_hay|218Tuhmara_naam_musibat|219TumharaNaamMuseebatMain|220Tumharey_zarrey|221TumhinAareshPeJaneWale|222Unkimehaknaydilkay|223Wah_kya_joodo_karam_hey|224Wahkiabaatismahinayki|225WhoJoNaaTheToKuchBhiBhiNaTha|226Wo_soay_lalazar_phirtay_hain|227Woh_kamal_husn_huzoor|228Woh_kamal_husn_huzoor_hay|229Woh_sue_lalazaar|230Wohirubhayjisne|231YaIllahiRang|232YaNabiSalamAlaika|233YaRabMereDilMein|234YaSayyedi|235Ya_allah_ho_ya_allah|236Ya_rab|237Ya_rab_hay_yehi_dilki_sada|238YaadMainTeri|239Yahabibi_noore_mujassam|240Yamustafakhudara|241Yarasoolalah|242Yarasoolalah_akar_dekhlo|243Yarasoolalah_ka_naara_lagatey_jaaingay|244YeKehtiThiHarGharMeinJaKarHaleema|245Ye_kehti_thi_ghar_ghar|246YehKisShehnshaheWalaKi|247Yeh_aarzo_nahi|248Yeikramhay|249Yekisshehanshahki|250Zahay_izat|251Zah-e-muqaddar|252ZairayKoyeJinaLong|253AeyBayabanEArabTeriBaharonKoSalam|254AqaaKonNazroonPeCharheyDekhKe|255KalamEBahoo|256MujhKoDarpeshHaiPhirMubarakSafar|257MujhKoDarpeshHaiPhirMubarak"},
+{n="Quran Urdu - Irfan-ul-Quran (Kanzul Irfan, Tahir ul-Qadri Tarjuma)", l="Urdu", i="Irfan-ul-quranAudio", s="bk_irfan_ul_quran", nf=114, u=".Al-fatihah|.Al-baqarah|.Aal-e-imran|.An-nisa|.Al-maidah|.Al-anam|.Al-araf|.Al-anfal|.At-taubah|.Yunus|.Hud|.Yusuf|.Ar-rad|.Ibrahim|.Al-hijr|.An-nahl|.Al-isra|.Al-kahf|.Maryam|.Ta-ha|.Al-anbiya|.Al-hajj|.Al-muminun|.An-nur|.Al-furqan|.Ash-shuara|.An-naml|.Al-qasas|.Al-ankabut|.Ar-rum|.Luqman|.As-sajdah|.Al-ahzab|.Saba|.Fatir|.Ya-sin|.As-saffat|.Sad|.Az-zumar|.Ghafir|.Fussilat|.Ash-shura|.Az-zukhruf|.Ad-dukhan|.Al-jathiya|.Al-ahqaf|.Muhammad|.Al-fath|.Al-hujurat|.Qaf|.Az-zariyat|.At-tur|.An-najm|.Al-qamar|.Ar-rahman|.Al-waqiah|.Al-hadid|.Al-mujadilah|.Al-hashr|.Al-mumtahinah|.As-saff|.Al-jumuah|.Al-munafiqun|.At-taghabun|.At-talaq|.At-tahrim|.Al-mulk|.Al-qalam|.Al-haqqah|.Al-maarij|.Nuh|.Al-jinn|.Al-muzzammil|.Al-muddaththir|.Al-qiyamah|.Al-insan|.Al-mursalat|.An-naba|.An-naziat|.abasa|.At-takwir|.Al-infitar|.Al-mutaffifin|.Al-inshiqaq|.Al-buruj|.At-tariq|.Al-ala|.Al-ghashiyah|.Al-fajr|.Al-balad|.Ash-shams|.Al-lail|.Ad-duha|.Ash-sharh|.At-tin|.Al-alaq|.Al-qadr|.Al-baiyinah|.Az-zalzalah|.Al-adiyat|.Al-qariah|.At-takathur|.Al-asr|.Al-humazah|.Al-fil|.Quraish|.Al-maun|.Al-kauthar|.Al-kafirun|.An-nasr|.Al-masad|.Al-ikhlas|.Al-falaq|.An-nas"},
+{n="[Quran Chinese] Sirf Tarjuma (Bagair Arabic Tilawat)", l="Chinese", i="KORAN--recitation-recited--by-translation-to-chinese-without-arabic", s="bk_quran_chinese_tj", nf=114, t=1},
+}
+function V25.urlDec(t)
+return (string.gsub(tostring(t or ""), "%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+end
+function V25.cleanName(f)
+local t = V25.urlDec(f)
+t = string.gsub(t, "%.mp3$", "")
+t = string.gsub(t, "[_%-]", " ")
+t = string.gsub(t, "%s+", " ")
+t = string.gsub(t, "^%s+", "")
+t = string.gsub(t, "%s+$", "")
+return t
+end
+function V25.gregToJD(y, m, d)
+if m < 3 then y = y - 1 m = m + 12 end
+local a = math.floor(y / 100)
+local b = 2 - a + math.floor(a / 4)
+return math.floor(365.25 * (y + 4716)) + math.floor(30.6001 * (m + 1)) + d + b - 1524
+end
+function V25.jdToHijri(jd)
+local l = jd - 1948440 + 10632
+local n = math.floor((l - 1) / 10631)
+l = l - 10631 * n + 354
+local j = math.floor((10985 - l) / 5316) * math.floor((50 * l) / 17719) + math.floor(l / 5670) * math.floor((43 * l) / 15238)
+l = l - math.floor((30 - j) / 15) * math.floor((17719 * j) / 50) - math.floor(j / 16) * math.floor((15238 * j) / 43) + 29
+local mo = math.floor((24 * l) / 709)
+local dd = l - math.floor((709 * mo) / 24)
+local yy = 30 * n + j - 30
+return yy, mo, dd
+end
 function V25.gregToHijri(y, m, d)
-  if m < 3 then y = y - 1 m = m + 12 end
-  local a = math.floor(y / 100)
-  local b = 2 - a + math.floor(a / 4)
-  local jd = math.floor(365.25 * (y + 4716)) + math.floor(30.6001 * (m + 1)) + d + b - 1524
-  local l = jd - 1948440 + 10632
-  local n = math.floor((l - 1) / 10631)
-  l = l - 10631 * n + 354
-  local j = math.floor((10985 - l) / 5316) * math.floor((50 * l) / 17719) + math.floor(l / 5670) * math.floor((43 * l) / 15238)
-  l = l - math.floor((30 - j) / 15) * math.floor((17719 * j) / 50) - math.floor(j / 16) * math.floor((15238 * j) / 43) + 29
-  local mo = math.floor((24 * l) / 709)
-  local dd = l - math.floor((709 * mo) / 24)
-  local yy = 30 * n + j - 30
-  return yy, mo, dd
+return V25.jdToHijri(V25.gregToJD(y, m, d))
 end
--- Aaj ki Islamic date: din, Urdu mahina, saal (hijri), Roman mahina
 function V25.getIslamicDate()
-  local off = V25.getHijriOffset()
-  local t = os.time() + (off * 86400)
-  local now = os.date("*t", t)
-  local hy, hm, hd = V25.gregToHijri(now.year, now.month, now.day)
-  return hd, V25.hijriMonthsUrdu[hm], hy, V25.hijriMonthsEn[hm]
+local okH, aH, bH, cH, dH = pcall(function()
+local y = tonumber(os.date("%Y")) or 2026
+local m = tonumber(os.date("%m")) or 1
+local d = tonumber(os.date("%d")) or 1
+local off = tonumber(V25.getHijriOffset()) or 0
+local hy, hm, hd = V25.jdToHijri(V25.gregToJD(y, m, d) + off)
+local mU = V25.hijriMonthsUrdu[hm] or ("Month " .. tostring(hm))
+local mE = V25.hijriMonthsEn[hm] or ("Month " .. tostring(hm))
+return hd, mU, hy, mE
+end)
+if okH and aH then return aH, bH, cH, dH end
+return nil, nil, nil, nil
 end
--- Home screen ke liye poori line (Urdu + Roman, TalkBack-friendly)
-function V25.islamicDateLine()
-  local hd, hmU, hy, hmE = V25.getIslamicDate()
-  return "اسلامی تاریخ: " .. tostring(hd) .. " " .. tostring(hmU) .. " " .. tostring(hy) .. " ھ  |  " .. tostring(hd) .. " " .. tostring(hmE) .. " " .. tostring(hy) .. " AH"
+function V25.islamicDateSimple()
+local ok, hd, hm, hy, mUr, mEn = pcall(function()
+local y = tonumber(os.date("%Y")) or 2026
+local m = tonumber(os.date("%m")) or 1
+local d = tonumber(os.date("%d")) or 1
+local yy, mm = y, m
+if mm < 3 then yy = yy - 1 mm = mm + 12 end
+local a = math.floor(yy / 100)
+local b = 2 - a + math.floor(a / 4)
+local jd = math.floor(365.25 * (yy + 4716)) + math.floor(30.6001 * (mm + 1)) + d + b - 1524
+jd = jd + (tonumber(V25.HIJRI_OFFSET_DAYS) or 0)
+local l = jd - 1948440 + 10632
+local n = math.floor((l - 1) / 10631)
+l = l - 10631 * n + 354
+local j = math.floor((10985 - l) / 5316) * math.floor((50 * l) / 17719) + math.floor(l / 5670) * math.floor((43 * l) / 15238)
+l = l - math.floor((30 - j) / 15) * math.floor((17719 * j) / 50) - math.floor(j / 16) * math.floor((15238 * j) / 43) + 29
+local hm2 = math.floor((24 * l) / 709)
+local hd2 = l - math.floor((709 * hm2) / 24)
+local hy2 = 30 * n + j - 30
+local fnEn = {"Muharram","Safar","Rabi-ul-Awwal","Rabi-ul-Thani","Jumada-ul-Awwal","Jumada-ul-Thani","Rajab","Shaban","Ramadan","Shawwal","Dhul-Qadah","Dhul-Hijjah"}
+local e1 = (V25.hijriMonthsEn and V25.hijriMonthsEn[hm2]) or fnEn[hm2] or ("Month " .. tostring(hm2))
+local u1 = (V25.hijriMonthsUrdu and V25.hijriMonthsUrdu[hm2]) or ("\217\133\219\129\219\140\217\134\219\129 " .. tostring(hm2))
+return hd2, hm2, hy2, u1, e1
+end)
+if ok and hd then return hd, hm, hy, mUr, mEn end
+return nil
 end
-
--- v2.7-fix2: Islamic date poore din LIVE rehti hai aur AADHI RAAT par khud
--- ba khud update ho jati hai - koi manual tap/entry wala kaam nahi.
+function V25.islamicLineRoman()
+local hd, hm, hy, mUr, mEn = V25.islamicDateSimple()
+if not hd then return "Islamic Calendar: " .. tostring(os.date("%d-%m-%Y")) end
+return "Islamic Calendar: " .. tostring(hd) .. " " .. tostring(mEn) .. " " .. tostring(hy) .. " AH"
+end
+function V25.islamicLineUrdu()
+local hd, hm, hy, mUr, mEn = V25.islamicDateSimple()
+if not hd then return "\216\167\216\179\217\132\216\167\217\133\219\140 \216\170\216\167\216\177\219\140\216\174: " .. tostring(os.date("%d-%m-%Y")) end
+return "\216\167\216\179\217\132\216\167\217\133\219\140 \216\170\216\167\216\177\219\140\216\174: " .. tostring(hd) .. " " .. tostring(mUr) .. " " .. tostring(hy) .. " \218\190"
+end
+function V25.islamicDateLine() return V25.islamicLineRoman() end
+function V25.islamicDateLineUrdu() return V25.islamicLineUrdu() end
+function V25.refreshIslamicDateViews()
+pcall(function()
+if screen ~= "home" then return end
+local v1 = _G["txtIslamicDate"]
+if v1 then v1.setText(V25.islamicDateLine()) end
+local v2 = _G["txtIslamicDateUrdu"]
+if v2 then v2.setText(V25.islamicDateLineUrdu()) end
+end)
+end
 function V25.startDateTick()
-  if V25.dateTick then pcall(function() handler.removeCallbacks(V25.dateTick) end) end
-  V25.dateTick = Runnable({run = function()
-    pcall(function()
-      local h = tonumber(os.date("%H")) or 0
-      local m = tonumber(os.date("%M")) or 0
-      if screen == "home" and h == 0 and m <= 1 then safeRun("Midnight date refresh", showHome) end
-    end)
-    handler.postDelayed(V25.dateTick, 30000)
-  end})
-  handler.postDelayed(V25.dateTick, 30000)
+local ok, err = pcall(function()
+if V25.dateTick then handler.removeCallbacks(V25.dateTick) end
+V25.dateTick = Runnable({run = function()
+pcall(function() V25.refreshIslamicDateViews() end)
+pcall(function() handler.postDelayed(V25.dateTick, 60000) end)
+end})
+handler.postDelayed(V25.dateTick, 60000)
+pcall(function() V25.refreshIslamicDateViews() end)
+end)
+if not ok then showErrorDialog("Islamic calendar tick error", err) end
 end
-
 local function calcTahajjud(maghrib, fajr)
-  local mh, mm = maghrib:match("(%d+):(%d+)")
-  local fh, fm = fajr:match("(%d+):(%d+)")
-  if not mh or not fh then return "--:--" end
-  local m_mins = tonumber(mh)*60 + tonumber(mm)
-  local f_mins = tonumber(fh)*60 + tonumber(fm) + 1440
-  local diff = f_mins - m_mins
-  local lastThirdStart = m_mins + math.floor(diff * 2 / 3)
-  local h = math.floor(lastThirdStart / 60) % 24
-  local min = lastThirdStart % 60
-  return string.format("%02d:%02d to %02d:%02d", h, min, tonumber(fh)%24, tonumber(fm))
+local mh, mm = maghrib:match("(%d+):(%d+)")
+local fh, fm = fajr:match("(%d+):(%d+)")
+if not mh or not fh then return "--:--" end
+local m_mins = tonumber(mh)*60 + tonumber(mm)
+local f_mins = tonumber(fh)*60 + tonumber(fm) + 1440
+local diff = f_mins - m_mins
+local lastThirdStart = m_mins + math.floor(diff * 2 / 3)
+local h = math.floor(lastThirdStart / 60) % 24
+local min = lastThirdStart % 60
+return string.format("%02d:%02d to %02d:%02d", h, min, tonumber(fh)%24, tonumber(fm))
 end
-
--- FIX (v2.1): Prayer times pehle sirf ek dafa (manual "Update Location"
--- click par) fetch hoti thin aur phir HAMESHA ke liye prefs mein cache ho
--- jati thin - is liye din chhote/bare hone se bhi timings kabhi update
--- nahi hoti thin (roz wahi purani values dikhti thin). Ab app ye track
--- karta hai ke aakhri dafa kis TAREEKH ko fetch hui thi - agar aaj ki
--- tareekh se mismatch ho, khud-ba-khud (bina button dabaye) background
--- mein dobara fetch ho jati hai.
 local lastPrayerFetchDate = prefs.getString("lastPrayerFetchDate", "")
-local function todayDateString()
-  return os.date("%Y-%m-%d")
+M.todayDateString = function()
+return os.date("%Y-%m-%d")
 end
-local function currentBatteryPercent()
-  local pct = -1
-  pcall(function()
-    local bm = activity.getSystemService(Context.BATTERY_SERVICE)
-    pct = bm.getIntProperty(4) -- BatteryManager.BATTERY_PROPERTY_CAPACITY
-  end)
-  return pct
+M.currentBatteryPercent = function()
+local pct = -1
+pcall(function()
+local bm = activity.getSystemService(Context.BATTERY_SERVICE)
+pct = bm.getIntProperty(4)
+end)
+return pct
 end
-
--- Aladhan API se prayer times fetch karta hai - "Update Location" button
--- (manual) aur auto-refresh (roz khud-ba-khud) dono isay reuse karte hain.
--- FIX (v2.1): http:// ko https:// kar diya (kuch networks/devices plain
--- HTTP block/degrade karte hain, jis se fetch kabhi kabhi fail hoti thi).
-local function fetchPrayerTimes(c, cntry, onDone)
-  Thread(Runnable{
-    run=function()
-      -- FIX (v2.1): chhote/kam-maroof shehar (jaise "Chiniot") ke liye
-      -- "timingsByCity" endpoint kabhi geocode nahi kar pata ("city not
-      -- found"). Ab pehle wahi try hota hai, fail ho to "timingsByAddress"
-      -- (zyada flexible free-text matching) doosri koshish ke tor par
-      -- try hota hai.
-      local function tryEndpoint(urlStr)
-        local ok, res = pcall(function()
-          local conn = URL(urlStr).openConnection()
-          conn.setConnectTimeout(10000) conn.setReadTimeout(15000)
-          local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
-          local out = "" local line = reader.readLine()
-          while line do out = out..line line = reader.readLine() end
-          reader.close() return out
-        end)
-        if ok and res and res:find('"Fajr"') then return res end
-        return nil
-      end
-      -- FIX (v2.5): Pakistan/India/Bangladesh local moon-sighting usually
-      -- 1-2 days behind Saudi Umm al-Qura. Aladhan default Hijri ~ Umm al-Qura
-      -- (e.g. 12 Rabi-ul-Thani jab Pakistan mein 10 ho). Country Pakistan/
-      -- India/Bangladesh par adjustment=-2 taake real local tareekh aaye.
-      -- v2.6: Quran Majeed date is the primary date source. No country-wide
-      -- hard-coded correction: lunar sighting differs by locality. The user
-      -- can apply a persistent -2..+2 day correction in the Home date panel.
-      local adj = 0
-      local adjQ = ""
-      local todayApiDate = os.date("%d-%m-%Y")
-      local byCity = "https://api.aladhan.com/v1/timingsByCity/"..todayApiDate.."?city="..URLEncoder.encode(c).."&country="..URLEncoder.encode(cntry).."&method=1"..adjQ
-      local byAddress = "https://api.aladhan.com/v1/timingsByAddress/"..todayApiDate.."?address="..URLEncoder.encode(c..", "..cntry).."&method=1"..adjQ
-      local result = tryEndpoint(byCity)
-      if not result then result = tryEndpoint(byAddress) end
-      local success = (result ~= nil)
-      activity.runOnUiThread(Runnable{
-        run=function()
-          local ok = false
-          if success and result then
-            local f = result:match('"Fajr":"(.-)"')
-            local d = result:match('"Dhuhr":"(.-)"')
-            local a = result:match('"Asr":"(.-)"')
-            local m = result:match('"Maghrib":"(.-)"')
-            local i = result:match('"Isha":"(.-)"')
-            local sr = result:match('"Sunrise":"(.-)"')
-            -- v2.7: Islamic date ka poora API block yahan se hata diya gaya hai.
-            -- Ab Hijri date V25.getIslamicDate() se 100% offline compute hoti
-            -- hai (tabular/Kuwaiti algorithm, koi API call nahi).
-            -- v2.7: yahan pehle Aladhan ke "hijri" block (hjDay/hjMonth/hjYear)
-            -- parse hota tha - woh sab hata diya gaya hai kyunke date ab offline
-            -- bunti hai aur usi liye kabhi "load nahi hui" wala masla bacha.
-            local tzName = result:match('"timezone":"(.-)"') or savedPrayerTimezone
-            if f then
-              savedCity = c savedCountry = cntry
-              savedPrayerTimezone = tzName or savedPrayerTimezone
-              prayerFajr = f prayerDhuhr = d prayerAsr = a prayerMaghrib = m prayerIsha = i
-              if sr then prayerSunrise = sr end
-              lastPrayerFetchDate = todayDateString()
-              prefs.edit().putString("userCity", c).putString("userCountry", cntry).putString("pFajr", f).putString("pDhuhr", d).putString("pAsr", a).putString("pMaghrib", m).putString("pIsha", i).putString("pSunrise", prayerSunrise).putString("prayerTimeZone", savedPrayerTimezone).putString("lastPrayerFetchDate", lastPrayerFetchDate).apply()
-              pcall(function() scheduleCityAzans() end)
-              ok = true
-            end
-          end
-          if onDone then onDone(ok) end
-        end
-      })
-    end
-  }).start()
+M.fetchPrayerTimes = function(c, cntry, onDone)
+Thread(Runnable{
+run=function()
+local function tryEndpoint(urlStr)
+local ok, res = pcall(function()
+local conn = URL(urlStr).openConnection()
+conn.setConnectTimeout(10000) conn.setReadTimeout(15000)
+local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
+local out = "" local line = reader.readLine()
+while line do out = out..line line = reader.readLine() end
+reader.close() return out
+end)
+if ok and res and res:find('"Fajr"') then return res end
+return nil
 end
-
-local function openLinkAndClose(urlStr)
-  pcall(function() activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(urlStr))) activity.finish() end)
+local adj = 0
+local adjQ = ""
+local todayApiDate = os.date("%d-%m-%Y")
+local byCity = "https://api.aladhan.com/v1/timingsByCity/"..todayApiDate.."?city="..URLEncoder.encode(c).."&country="..URLEncoder.encode(cntry).."&method=1"..adjQ
+local byAddress = "https://api.aladhan.com/v1/timingsByAddress/"..todayApiDate.."?address="..URLEncoder.encode(c..", "..cntry).."&method=1"..adjQ
+local result = tryEndpoint(byCity)
+if not result then result = tryEndpoint(byAddress) end
+local success = (result ~= nil)
+activity.runOnUiThread(Runnable{
+run=function()
+local ok = false
+if success and result then
+local f = result:match('"Fajr":"(.-)"')
+local d = result:match('"Dhuhr":"(.-)"')
+local a = result:match('"Asr":"(.-)"')
+local m = result:match('"Maghrib":"(.-)"')
+local i = result:match('"Isha":"(.-)"')
+local sr = result:match('"Sunrise":"(.-)"')
+local tzName = result:match('"timezone":"(.-)"') or savedPrayerTimezone
+if f then
+savedCity = c savedCountry = cntry
+savedPrayerTimezone = tzName or savedPrayerTimezone
+prayerFajr = f prayerDhuhr = d prayerAsr = a prayerMaghrib = m prayerIsha = i
+if sr then prayerSunrise = sr end
+lastPrayerFetchDate = M.todayDateString()
+prefs.edit().putString("userCity", c).putString("userCountry", cntry).putString("pFajr", f).putString("pDhuhr", d).putString("pAsr", a).putString("pMaghrib", m).putString("pIsha", i).putString("pSunrise", prayerSunrise).putString("prayerTimeZone", savedPrayerTimezone).putString("lastPrayerFetchDate", lastPrayerFetchDate).apply()
+pcall(function() scheduleCityAzans() end)
+ok = true
 end
-
---------------------------------------------------
--- QURAN, WAZAIF & 99 NAMES DATA
---------------------------------------------------
-
--- Reciters: DI reciter hardcoded (verified) at index 1, baaki live-fetch se aata hai
-local reciters = {
-  {name="Qari Asad Attari (Dawat-e-Islami)", url="https://data2.dawateislami.net/download/tilawat-e-quran/ur/mp3/2018/", isDI=true},
-  {name="Mishary Rashid Alafasy", url="https://server8.mp3quran.net/afs/"},
-  {name="Abdul Basit", url="https://server6.mp3quran.net/basit/"},
-  {name="Saad Al-Ghamdi", url="https://server7.mp3quran.net/s_gmd/"},
-  {name="Maher Al Meaqli", url="https://server12.mp3quran.net/maher/"},
-  {name="Mahmoud Khalil Al-Hussary", url="https://server13.mp3quran.net/husr/"},
-  {name="Mohammed Siddiq Al-Minshawi", url="https://server10.mp3quran.net/minsh/"},
-}
-
-local function buildQuranUrl(reciterIdx, surahIdx)
-  local r = reciters[reciterIdx]
-  if r.isDI then
-    local diId = 59423 + surahIdx
-    return r.url .. diId .. ".mp3"
-  else
-    return r.url .. string.format("%03d", surahIdx) .. ".mp3"
-  end
 end
-
--- Find a reciter's current index by NAME (index-based tracking caused the
--- "wrong reciter voice / mismatched downloads" bug when the live list reordered)
-local function findReciterIndexByName(name)
-  if not name or name == "" then return 1 end
-  for i, r in ipairs(reciters) do
-    if r.name == name then return i end
-  end
-  return 1
+if onDone then onDone(ok) end
 end
-
--- LIVE RECITERS FETCHER (mp3quran.net official API - 50+ full-Quran reciters)
-local function fetchRecitersFromAPI()
-  local ok, jsonStr = pcall(function()
-    local conn = URL("https://www.mp3quran.net/api/v3/reciters?language=eng").openConnection()
-    conn.setConnectTimeout(8000) conn.setReadTimeout(15000)
-    local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
-    local res = "" local line = reader.readLine()
-    while line do res = res..line line = reader.readLine() end
-    reader.close() return res
-  end)
-  if not ok or not jsonStr then return nil end
-  local newList = {}
-  pcall(function()
-    local JSONObject = luajava.bindClass("org.json.JSONObject")
-    local root = JSONObject(jsonStr)
-    local arr = root.getJSONArray("reciters")
-    for i=0, arr.length()-1 do
-      local r = arr.getJSONObject(i)
-      local name = tostring(r.getString("name"))
-      local moshafArr = r.getJSONArray("moshaf")
-      local chosenServer = nil
-      for j=0, moshafArr.length()-1 do
-        local m = moshafArr.getJSONObject(j)
-        if m.getInt("surah_total")==114 then chosenServer = tostring(m.getString("server")) break end
-      end
-      if chosenServer then
-        table.insert(newList, {name=name, url=chosenServer})
-        if #newList >= 51 then break end -- FIX (v2.3): raised from 49 - Sudais/Sadaqat are now pinned separately (see below) and de-duplicated out of this live list if present here, so the cap was raised to make sure that de-duplication never shrinks the total reciter count
-      end
-    end
-  end)
-  if #newList == 0 then return nil end
-  return newList
+})
 end
-
-local function saveRecitersCache(list)
-  local parts = {}
-  for _, r in ipairs(list) do
-    if not r.isDI then table.insert(parts, r.name.."|"..r.url) end
-  end
-  prefs.edit().putString("recitersCache", table.concat(parts, ";;")).apply()
+}).start()
 end
-local function loadRecitersCache()
-  local s = prefs.getString("recitersCache", "")
-  if s == "" then return nil end
-  local list = {}
-  for entry in string.gmatch(s, "([^;]+);;?") do
-    local n, u = entry:match("^(.-)|(.+)$")
-    if n and u then table.insert(list, {name=n, url=u}) end
-  end
-  if #list == 0 then return nil end
-  return list
+M.openLinkAndClose = function(urlStr)
+pcall(function() activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(urlStr))) activity.finish() end)
 end
-
-local diReciterEntry = reciters[1] -- backup DI entry reference
--- FIX (v2.3): pehle sirf Syed Sadaqat Ali "pinned" thay - Abdul Rahman
--- Al-Sudais sirf FALLBACK hardcoded table mein tha, jo pehli hi
--- cachedList/live-fetch ke baad POORI TARAH REPLACE ho jati hai - is
--- liye agar wo mp3quran.net ki live list mein na aata (order/naming
--- ki wajah se) to reciter count expected se KAM reh jata. Ab dono
--- (Sudais + Sadaqat Ali) yahan "pinned" hain - dono hamesha, live
--- fetch ke baad bhi, list mein guaranteed rahenge.
-local extraPinnedReciters = {
-  -- FIX (v2.4): Shuraim ko sab se zyada demand hai - ab pehle (top)
-  -- pinned reciter hai, taake list mein dhoondna na pade
-  {name="Saud Al-Shuraim", url="https://server7.mp3quran.net/shur/"},
-  {name="Abdul Rahman Al-Sudais", url="https://server11.mp3quran.net/sds/"},
-  {name="Syed Sadaqat Ali", url="https://archive.org/download/syed-sadaqat-ali/"},
-}
--- Agar live/cached list mein bhi (alag naming ke sath) inhi 2 reciters
--- ka koi entry aa jaye, to usay yahan se nikal dete hain - taake koi
--- reciter DO baar (duplicate) list mein na dikhe.
-local function withoutPinnedDuplicates(list)
-  local filtered = {}
-  for _, r in ipairs(list) do
-    local nameLower = tostring(r.name):lower()
-    local isDup = false
-    for _, p in ipairs(extraPinnedReciters) do
-      if nameLower:find(p.name:lower():match("[%w]+%s*[%w%-]*$") or p.name:lower(), 1, true) then isDup = true break end
-    end
-    if not isDup then table.insert(filtered, r) end
-  end
-  return filtered
+local reciters = { {name="Qari Asad Attari (Dawat-e-Islami)", url="https://data2.dawateislami.net/download/tilawat-e-quran/ur/mp3/2018/", isDI=true}, {name="Mishary Rashid Alafasy", url="https://server8.mp3quran.net/afs/"}, {name="Abdul Basit", url="https://server6.mp3quran.net/basit/"}, {name="Saad Al-Ghamdi", url="https://server7.mp3quran.net/s_gmd/"}, {name="Maher Al Meaqli", url="https://server12.mp3quran.net/maher/"}, {name="Mahmoud Khalil Al-Hussary", url="https://server13.mp3quran.net/husr/"}, {name="Mohammed Siddiq Al-Minshawi", url="https://server10.mp3quran.net/minsh/"}, }
+M.buildQuranUrl = function(reciterIdx, surahIdx)
+local r = reciters[reciterIdx]
+if r.isDI then
+local diId = 59423 + surahIdx
+return r.url .. diId .. ".mp3"
+else
+return r.url .. string.format("%03d", surahIdx) .. ".mp3"
 end
-local cachedList = loadRecitersCache()
+end
+M.findReciterIndexByName = function(name)
+if not name or name == "" then return 1 end
+for i, r in ipairs(reciters) do
+if r.name == name then return i end
+end
+return 1
+end
+M.fetchRecitersFromAPI = function()
+local ok, jsonStr = pcall(function()
+local conn = URL("https://www.mp3quran.net/api/v3/reciters?language=eng").openConnection()
+conn.setConnectTimeout(8000) conn.setReadTimeout(15000)
+local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
+local res = "" local line = reader.readLine()
+while line do res = res..line line = reader.readLine() end
+reader.close() return res
+end)
+if not ok or not jsonStr then return nil end
+local newList = {}
+pcall(function()
+local JSONObject = luajava.bindClass("org.json.JSONObject")
+local root = JSONObject(jsonStr)
+local arr = root.getJSONArray("reciters")
+for i=0, arr.length()-1 do
+local r = arr.getJSONObject(i)
+local name = tostring(r.getString("name"))
+local moshafArr = r.getJSONArray("moshaf")
+local chosenServer = nil
+for j=0, moshafArr.length()-1 do
+local m = moshafArr.getJSONObject(j)
+if m.getInt("surah_total")==114 then chosenServer = tostring(m.getString("server")) break end
+end
+if chosenServer then
+table.insert(newList, {name=name, url=chosenServer})
+if #newList >= 51 then break end
+end
+end
+end)
+if #newList == 0 then return nil end
+return newList
+end
+M.saveRecitersCache = function(list)
+local parts = {}
+for _, r in ipairs(list) do
+if not r.isDI then table.insert(parts, r.name.."|"..r.url) end
+end
+prefs.edit().putString("recitersCache", table.concat(parts, ";;")).apply()
+end
+M.loadRecitersCache = function()
+local s = prefs.getString("recitersCache", "")
+if s == "" then return nil end
+local list = {}
+for entry in string.gmatch(s, "([^;]+);;?") do
+local n, u = entry:match("^(.-)|(.+)$")
+if n and u then table.insert(list, {name=n, url=u}) end
+end
+if #list == 0 then return nil end
+return list
+end
+local diReciterEntry = reciters[1]
+local extraPinnedReciters = { {name="Saud Al-Shuraim", url="https://server7.mp3quran.net/shur/"}, {name="Abdul Rahman Al-Sudais", url="https://server11.mp3quran.net/sds/"}, {name="Syed Sadaqat Ali", url="https://archive.org/download/syed-sadaqat-ali/"}, }
+M.withoutPinnedDuplicates = function(list)
+local filtered = {}
+for _, r in ipairs(list) do
+local nameLower = tostring(r.name):lower()
+local isDup = false
+for _, p in ipairs(extraPinnedReciters) do
+if nameLower:find(p.name:lower():match("[%w]+%s*[%w%-]*$") or p.name:lower(), 1, true) then isDup = true break end
+end
+if not isDup then table.insert(filtered, r) end
+end
+return filtered
+end
+local cachedList = M.loadRecitersCache()
 if cachedList then
-  local merged = {diReciterEntry}
-  for _, p in ipairs(extraPinnedReciters) do table.insert(merged, p) end
-  for _, r in ipairs(withoutPinnedDuplicates(cachedList)) do table.insert(merged, r) end
-  reciters = merged
+local merged = {diReciterEntry}
+for _, p in ipairs(extraPinnedReciters) do table.insert(merged, p) end
+for _, r in ipairs(M.withoutPinnedDuplicates(cachedList)) do table.insert(merged, r) end
+reciters = merged
 end
-
--- Resolve saved reciter selection by NAME (survives reordering across sessions)
 local savedReciterName = prefs.getString("lastReciterName", "")
-currentReciter = findReciterIndexByName(savedReciterName)
+currentReciter = M.findReciterIndexByName(savedReciterName)
 local lastPlayedReciter = currentReciter
-
 Thread(Runnable{run=function()
-  local liveList = fetchRecitersFromAPI()
-  if liveList then
-    -- capture what's currently selected BEFORE the list changes, so playback
-    -- doesn't silently jump to a different reciter mid-session
-    local previouslySelectedName = reciters[currentReciter] and reciters[currentReciter].name or ""
-    local merged = {diReciterEntry}
-    for _, p in ipairs(extraPinnedReciters) do table.insert(merged, p) end
-    for _, r in ipairs(withoutPinnedDuplicates(liveList)) do table.insert(merged, r) end
-    handler.post(Runnable{run=function()
-      reciters = merged
-      saveRecitersCache(liveList)
-      currentReciter = findReciterIndexByName(previouslySelectedName)
-    end})
-  end
+local liveList = M.fetchRecitersFromAPI()
+if liveList then
+local previouslySelectedName = reciters[currentReciter] and reciters[currentReciter].name or ""
+local merged = {diReciterEntry}
+for _, p in ipairs(extraPinnedReciters) do table.insert(merged, p) end
+for _, r in ipairs(M.withoutPinnedDuplicates(liveList)) do table.insert(merged, r) end
+handler.post(Runnable{run=function()
+reciters = merged
+M.saveRecitersCache(liveList)
+currentReciter = M.findReciterIndexByName(previouslySelectedName)
+end})
+end
 end}).start()
-
 local surahNames = {"Al-Fatihah","Al-Baqarah","Al-Imran","An-Nisa","Al-Ma'idah","Al-An'am","Al-A'raf","Al-Anfal","At-Tawbah","Yunus","Hud","Yusuf","Ar-Ra'd","Ibrahim","Al-Hijr","An-Nahl","Al-Isra","Al-Kahf","Maryam","Ta-Ha","Al-Anbiya","Al-Hajj","Al-Mu'minun","An-Nur","Al-Furqan","Ash-Shu'ara","An-Naml","Al-Qasas","Al-Ankabut","Ar-Rum","Luqman","As-Sajdah","Al-Ahzab","Saba","Fatir","Ya-Sin","As-Saffat","Sad","Az-Zumar","Ghafir","Fussilat","Ash-Shura","Az-Zukhruf","Ad-Dukhan","Al-Jathiyah","Al-Ahqaf","Muhammad","Al-Fath","Al-Hujurat","Qaf","Adh-Dhariyat","At-Tur","An-Najm","Al-Qamar","Ar-Rahman","Al-Waqi'ah","Al-Hadid","Al-Mujadilah","Al-Hashr","Al-Mumtahanah","As-Saff","Al-Jumu'ah","Al-Munafiqun","At-Taghabun","At-Talaq","At-Tahrim","Al-Mulk","Al-Qalam","Al-Haqqah","Al-Ma'arij","Nuh","Al-Jinn","Al-Muzzammil","Al-Muddaththir","Al-Qiyamah","Al-Insan","Al-Mursalat","An-Naba","An-Nazi'at","Abasa","At-Takwir","Al-Infitar","Al-Mutaffifin","Al-Inshiqaq","Al-Buruj","At-Tariq","Al-A'la","Al-Ghashiyah","Al-Fajr","Al-Balad","Ash-Shams","Al-Layl","Ad-Duha","Ash-Sharh","At-Tin","Al-Alaq","Al-Qadr","Al-Bayyinah","Az-Zalzalah","Al-Adiyat","Al-Qari'ah","At-Takathur","Al-Asr","Al-Humazah","Al-Fil","Quraysh","Al-Ma'un","Al-Kawthar","Al-Kafirun","An-Nasr","Al-Masad","Al-Ikhlas","Al-Falaq","An-Nas"}
-
--- Juz/Para -> Starting Surah mapping (standard division)
--- FIX (v2.5): Para 14 standard boundary Surah 15 (Al-Hijr) ayat 1 hai,
--- pehle galti se Surah 14 (Ibrahim) set thi - is se Para 14 list galat
--- Surah se shuru hoti thi. Baqi boundaries standard Hafs 30-Juz hain.
 local paraSurahStart = {1,2,2,3,4,4,5,6,7,8,9,11,12,15,17,18,21,23,25,27,29,33,36,39,41,46,51,58,67,78}
--- FIX (v2.1): "30 Para" mein har Para ka pehla Surah to sahi tha, lekin
--- us Surah ki KAUNSI AYAT se Para shuru hota hai (jab Para kisi lambi
--- Surah, jaise Al-Baqarah, ke beech se shuru hota hai) yeh track nahi ho
--- raha tha - is liye tap karne par poori Surah shuru se play hoti thi
--- (Para 2/3 dono "Al-Baqarah shuru se" jaisa lagta tha). Yeh standard
--- 30-Juz boundaries hain (Ayat number jahan se wo Para shuru hota hai).
 local paraFirstAyah = {1,142,253,93,24,148,82,111,88,41,93,6,53,1,1,75,1,1,21,56,46,31,28,32,47,1,31,1,1,1}
-
--- Standard ayah count per Surah (Hafs/Uthmani) - zaroori hai Ayat-ba-Ayat mode ke liye
 local surahAyahCounts = {7,286,200,176,120,165,206,75,129,109,123,111,43,52,99,128,111,110,98,135,112,78,118,64,77,227,93,88,69,60,34,30,73,54,45,83,182,88,75,85,54,53,89,59,37,35,38,29,18,45,60,49,62,55,78,96,29,22,24,13,14,11,11,18,12,12,30,52,52,44,28,28,20,56,40,31,50,40,46,42,29,19,36,25,22,17,19,26,30,20,15,21,11,8,8,19,5,8,8,11,11,8,3,9,5,4,7,3,6,3,5,4,5,6}
-
---------------------------------------------------
--- URDU TRANSLATION (v2.1) - Arabic recitation + Urdu tarjuma COMBINED in
--- ek hi file per Surah (archive.org: complete-quran-with-urdu-translation-
--- mishary-rashid-alafasy). Filenames formula se nahi bantay (typos/spacing
--- quirks hain asal source mein), is liye 114/114 individually verify kar
--- ke yahan likhi gayi hain, taake koi 404 na aaye.
---------------------------------------------------
--- FIX (v2.2): saari base-download URLs ek hi table mein consolidate kar
--- di hain (pehle har ek apna alag top-level "local" tha) - AndroLua ke
--- Lua interpreter ki "too many local variables (limit is 200) in main
--- function" hard-limit se bachne ke liye zaroori tha (yeh file itni
--- badi ho chuki hai ke individual locals ginti mein khatam ho rahi thi).
-local URLBASES = {
-  urdu = "https://archive.org/download/complete-quran-with-urdu-translation-mishary-rashid-alafasy/",
-  hindi = "https://archive.org/download/The_Noble_Quran_With_Hindi_Translation-Audio_MP3_HQ/",
-  punjabi = "https://archive.org/download/AlQuranWithPunjabiTranslation/",
-  english = "https://archive.org/download/quran-english-translation-audio/",
-  sindhi = "https://archive.org/download/Al-quran-with-sindhi-translation------high-quality-audio-mp3/",
-  hadith = "https://archive.org/download/sahih-bukhari-english-audio/",
-  israrTafseer = "https://archive.org/download/tafseer-e-quran-urdu/",
-  nawawi = "https://archive.org/download/40HadithNawawi/",
+local URLBASES = { urdu = "https://archive.org/download/complete-quran-with-urdu-translation-mishary-rashid-alafasy/", hindi = "https://archive.org/download/The_Noble_Quran_With_Hindi_Translation-Audio_MP3_HQ/", punjabi = "https://archive.org/download/AlQuranWithPunjabiTranslation/", english = "https://archive.org/download/quran-english-translation-audio/", sindhi = "https://archive.org/download/Al-quran-with-sindhi-translation------high-quality-audio-mp3/", hadith = "https://archive.org/download/sahih-bukhari-english-audio/", israrTafseer = "https://archive.org/download/tafseer-e-quran-urdu/", nawawi = "https://archive.org/download/40HadithNawawi/", }
+local _lazyCache = {}
+M.urduTranslationFiles = function()
+if not _lazyCache.urdu then
+_lazyCache.urdu = {
+"001 Surah Fatiha.mp3", "002 Surah Al-Baqarah.mp3", "003 Surah Al-Imran.mp3", "004 Surah An-Nisa.mp3",
+"005 Surah Maidah.mp3", "006 Surah Al Anam.mp3", "007 Surah Araf.mp3", "008 Surah Anfal.mp3",
+"009 Surah Al Tauba.mp3", "010 Surah Yunus.mp3", "011 Surah Hud.mp3", "012 Suarh Yusuf.mp3",
+"013 Surah Ar-Rad .mp3", "014 Surah Ibrahim.mp3", "015 Surah Hijr .mp3", "016 Surah Nahl.mp3",
+"017 Surah Isra .mp3", "018 Surah Kahf .mp3", "019 Surah Maryam .mp3", "020 Surah Taha .mp3",
+"021 Surah Al Anbiya .mp3", "022 Surah Hajj .mp3", "023 Surah Mumenoon.mp3", "024 Surah Noor .mp3",
+"025 Surah Al-Furqan .mp3", "026 Surah Ash-Shuara .mp3", "027 Surah Naml .mp3", "028 Surah Qasas .mp3",
+"029 Surah Ankaboot .mp3", "030 Surah Room .mp3", "031 Surah Luqman .mp3", "032 Surah Sajda .mp3",
+"033 Surah Ahzab .mp3", "034 Surah Saba .mp3", "035 Surah Fatir .mp3", "036 Surah Yasin.mp3",
+"037 Surah As-Saaffat .mp3", "038 Surah Sad .mp3", "039 Surah Az-Zumar .mp3", "040 Sarah Ghafir .mp3",
+"041 Surah Fussilat .mp3", "042 Surah Ash-Shura .mp3", "043 Surah Zukhruf .mp3", "044 Surah Dukhan .mp3",
+"045 Surah Al-Jathiya .mp3", "046 Surah Ahqaf .mp3", "047 Surah Muhammad .mp3", "048 Surah Fath .mp3",
+"049 Surah Hujraat .mp3", "050 Surah Qaf .mp3", "051 Surah Adh-Dhariyat .mp3", "052 Surah At-Tur.mp3",
+"053 Surah An-Najm.mp3", "054 Surah Al-Qamar.mp3", "055 Surah Rahman - wi.mp3", "056 Surah Al-Waqiah.mp3",
+"057 Surah Al-Hadid.mp3", "058 Surah Al-Mujadilah.mp3", "059 Surah Al-Hashr.mp3", "060 Surah Al Mumtahana.mp3",
+"061 Surah As-Saff.mp3", "062 Surah Al-Jumuah.mp3", "063 Surah Al-Munafiqun.mp3", "064 Surah At Taghabun - wi.mp3",
+"065 Surah At Talaq.mp3", "066 Surah Tahreem.mp3", "067 Surah Mulk.mp3", "068 Surah Al-Qalam.mp3",
+"069 Surah Al-Haqqah.mp3", "070 Surah Al Maarij.mp3", "071 Surah Nuh.mp3", "072 Surah Al-Jinn.mp3",
+"073 Surah Muzzammil.mp3", "074 Surah Mudassir.mp3", "075 Surah Qiyamah.mp3", "076 Surah Insan.mp3",
+"077 Surah Mursalat.mp3", "078 Surah An-Naba.mp3", "079 Surah An-Naziat -.mp3", "080 Surah Abasa.mp3",
+"081 Surah At-Takwir.mp3", "082 Surah Al Infitar.mp3", "083 Surah Al-Mutaffifin.mp3", "084 Suarh Al Inshiqaq.mp3",
+"085 Surah Burooj.mp3", "086 Surah At-Tariq.mp3", "087 Surah Al Ala.mp3", "088 Surah Al Ghashiya.mp3",
+"089 Surah Al-Fajr.mp3", "090 Surah Al Balad.mp3", "091 Surah Ash-Shams.mp3", "092 Surah Al-Lail.mp3",
+"093 Surah Ad-Duha.mp3", "094 Surah Al Ash Sharh .mp3", "095 Surah At-Tin.mp3", "096 Surah Al-Alaq.mp3",
+"097 Surah Al-Qadr.mp3", "098 Surat Al Bayyinah.mp3", "099 Surah Al-Zilzala.mp3", "100 Surah Al-Adiyat.mp3",
+"101 Surah Al-Qariah.mp3", "102 Surah At Takasur.mp3", "103 Surah Al-Asr.mp3", "104 Surah Al-Humazah.mp3",
+"105 Surah Al-Fil.mp3", "106 Surah Al-Quraish.mp3", "107 Surah Al Maun.mp3", "108 Surah Kausar - wi.mp3",
+"109 Surah Al-Kafirun.mp3", "110 Surah An-Nasr.mp3", "111 Surah Al-Lahab.mp3", "112 Surah Al-Ikhlas.mp3",
+"113 Surah Al-Falaq.mp3", "114 Surah An-Nas.mp3"
 }
-local _lazyCache = {}  -- shared cache table (keeps top-level local count down)
-local function urduTranslationFiles()
-  if not _lazyCache.urdu then
-    _lazyCache.urdu = {
-  "001 Surah Fatiha.mp3", "002 Surah Al-Baqarah.mp3", "003 Surah Al-Imran.mp3", "004 Surah An-Nisa.mp3",
-  "005 Surah Maidah.mp3", "006 Surah Al Anam.mp3", "007 Surah Araf.mp3", "008 Surah Anfal.mp3",
-  "009 Surah Al Tauba.mp3", "010 Surah Yunus.mp3", "011 Surah Hud.mp3", "012 Suarh Yusuf.mp3",
-  "013 Surah Ar-Rad .mp3", "014 Surah Ibrahim.mp3", "015 Surah Hijr .mp3", "016 Surah Nahl.mp3",
-  "017 Surah Isra .mp3", "018 Surah Kahf .mp3", "019 Surah Maryam .mp3", "020 Surah Taha .mp3",
-  "021 Surah Al Anbiya .mp3", "022 Surah Hajj .mp3", "023 Surah Mumenoon.mp3", "024 Surah Noor .mp3",
-  "025 Surah Al-Furqan .mp3", "026 Surah Ash-Shuara .mp3", "027 Surah Naml .mp3", "028 Surah Qasas .mp3",
-  "029 Surah Ankaboot .mp3", "030 Surah Room .mp3", "031 Surah Luqman .mp3", "032 Surah Sajda .mp3",
-  "033 Surah Ahzab .mp3", "034 Surah Saba .mp3", "035 Surah Fatir .mp3", "036 Surah Yasin.mp3",
-  "037 Surah As-Saaffat .mp3", "038 Surah Sad .mp3", "039 Surah Az-Zumar .mp3", "040 Sarah Ghafir .mp3",
-  "041 Surah Fussilat .mp3", "042 Surah Ash-Shura .mp3", "043 Surah Zukhruf .mp3", "044 Surah Dukhan .mp3",
-  "045 Surah Al-Jathiya .mp3", "046 Surah Ahqaf .mp3", "047 Surah Muhammad .mp3", "048 Surah Fath .mp3",
-  "049 Surah Hujraat .mp3", "050 Surah Qaf .mp3", "051 Surah Adh-Dhariyat .mp3", "052 Surah At-Tur.mp3",
-  "053 Surah An-Najm.mp3", "054 Surah Al-Qamar.mp3", "055 Surah Rahman - wi.mp3", "056 Surah Al-Waqiah.mp3",
-  "057 Surah Al-Hadid.mp3", "058 Surah Al-Mujadilah.mp3", "059 Surah Al-Hashr.mp3", "060 Surah Al Mumtahana.mp3",
-  "061 Surah As-Saff.mp3", "062 Surah Al-Jumuah.mp3", "063 Surah Al-Munafiqun.mp3", "064 Surah At Taghabun - wi.mp3",
-  "065 Surah At Talaq.mp3", "066 Surah Tahreem.mp3", "067 Surah Mulk.mp3", "068 Surah Al-Qalam.mp3",
-  "069 Surah Al-Haqqah.mp3", "070 Surah Al Maarij.mp3", "071 Surah Nuh.mp3", "072 Surah Al-Jinn.mp3",
-  "073 Surah Muzzammil.mp3", "074 Surah Mudassir.mp3", "075 Surah Qiyamah.mp3", "076 Surah Insan.mp3",
-  "077 Surah Mursalat.mp3", "078 Surah An-Naba.mp3", "079 Surah An-Naziat -.mp3", "080 Surah Abasa.mp3",
-  "081 Surah At-Takwir.mp3", "082 Surah Al Infitar.mp3", "083 Surah Al-Mutaffifin.mp3", "084 Suarh Al Inshiqaq.mp3",
-  "085 Surah Burooj.mp3", "086 Surah At-Tariq.mp3", "087 Surah Al Ala.mp3", "088 Surah Al Ghashiya.mp3",
-  "089 Surah Al-Fajr.mp3", "090 Surah Al Balad.mp3", "091 Surah Ash-Shams.mp3", "092 Surah Al-Lail.mp3",
-  "093 Surah Ad-Duha.mp3", "094 Surah Al Ash Sharh .mp3", "095 Surah At-Tin.mp3", "096 Surah Al-Alaq.mp3",
-  "097 Surah Al-Qadr.mp3", "098 Surat Al Bayyinah.mp3", "099 Surah Al-Zilzala.mp3", "100 Surah Al-Adiyat.mp3",
-  "101 Surah Al-Qariah.mp3", "102 Surah At Takasur.mp3", "103 Surah Al-Asr.mp3", "104 Surah Al-Humazah.mp3",
-  "105 Surah Al-Fil.mp3", "106 Surah Al-Quraish.mp3", "107 Surah Al Maun.mp3", "108 Surah Kausar - wi.mp3",
-  "109 Surah Al-Kafirun.mp3", "110 Surah An-Nasr.mp3", "111 Surah Al-Lahab.mp3", "112 Surah Al-Ikhlas.mp3",
-  "113 Surah Al-Falaq.mp3", "114 Surah An-Nas.mp3"
-}
-  end
-  return _lazyCache.urdu
 end
-local function buildUrduSurahUrl(surahIdx)
-  local fn = urduTranslationFiles()[surahIdx]
-  if not fn then return nil end
-  return URLBASES.urdu .. fn:gsub(" ", "%%20")
+return _lazyCache.urdu
 end
-
--- NAYA (v2.1): Hindi Translation - Arabic recitation (Sheikh Abdur Rehman
--- Al Sudes) + Hindi tarjuma awaz (Younus Khan) COMBINED, ek hi file per
--- Surah (archive.org: The_Noble_Quran_With_Hindi_Translation-Audio_MP3_HQ) -
--- 114/114 verified. Filenames mein Arabic characters bhi hain, is liye
--- proper byte-level URL-encoding zaroori hai (sirf space nahi).
+M.buildUrduSurahUrl = function(surahIdx)
+local fn = M.urduTranslationFiles()[surahIdx]
+if not fn then return nil end
+return URLBASES.urdu .. fn:gsub(" ", "%%20")
+end
 local function urlEncodeBytes(str)
-  return (str:gsub("[^%w%-%.%_%~]", function(c) return string.format("%%%02X", string.byte(c)) end))
+return (str:gsub("[^%w%-%.%_%~]", function(c) return string.format("%%%02X", string.byte(c)) end))
 end
-local function hindiTranslationFiles()
-  if not _lazyCache.hindi then
-    _lazyCache.hindi = {
-  "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3", "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
-  "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3", "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
-  "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3", "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
-  "007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3", "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
-  "009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3", "010 - Yunus ( Jonah ) - سورة يونس.mp3",
-  "011 - Hud - سورة هود.mp3", "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
-  "013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3", "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
-  "015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3", "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
-  "017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3", "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
-  "019 - Maryam ( Mary ) - سورة مريم.mp3", "020 - Taha - سورة طه.mp3",
-  "021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3", "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
-  "023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3", "024 - An-Noor ( The Light ) - سورة النور.mp3",
-  "025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3", "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
-  "027 - An-Naml (The Ants ) - سورة النمل.mp3", "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
-  "029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3", "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
-  "031 - Luqman - سورة لقمان.mp3", "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
-  "033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3", "034 - Saba ( Sheba ) - سورة سبأ.mp3",
-  "035 - Fatir ( The Orignator ) - سورة فاطر.mp3", "036 - Ya-seen - سورة يس.mp3",
-  "037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3", "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
-  "039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3", "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
-  "041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3", "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
-  "043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3", "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
-  "045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3", "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
-  "047 - Muhammad - سورة محمد.mp3", "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
-  "049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3", "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
-  "051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3", "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
-  "053 - An-Najm ( The Star ) - سورة النجم.mp3", "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
-  "055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3", "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
-  "057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3", "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
-  "059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3", "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
-  "061 - As-Saff ( The Row ) - سورة الصف.mp3", "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
-  "063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3", "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
-  "065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3", "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
-  "067 - Al-Mulk ( Dominion ) - سورة الملك.mp3", "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
-  "069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3", "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
-  "071 - Nooh - سورة نوح.mp3", "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
-  "073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3", "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
-  "075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3", "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
-  "077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3", "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
-  "079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3", "080 - Abasa ( He frowned ) - سورة عبس.mp3",
-  "081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3", "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
-  "083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3", "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
-  "085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3", "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
-  "087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3", "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
-  "089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3", "090 - Al-Balad ( The City ) - سورة البلد.mp3",
-  "091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3", "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
-  "093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3", "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
-  "095 - At-Tin ( The Fig ) - سورة التين.mp3", "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
-  "097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3", "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
-  "099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3", "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
-  "101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3", "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
-  "103 - Al-Asr ( The Time ) - سورة العصر.mp3", "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
-  "105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3", "106 - Quraish - سورة قريش.mp3",
-  "107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3", "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
-  "109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3", "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
-  "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3", "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
-  "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3", "114 - An-Nas ( Mankind ) - سورة الناس.mp3"
+M.hindiTranslationFiles = function()
+if not _lazyCache.hindi then
+_lazyCache.hindi = {
+"001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3", "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
+"003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3", "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
+"005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3", "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
+"007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3", "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
+"009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3", "010 - Yunus ( Jonah ) - سورة يونس.mp3",
+"011 - Hud - سورة هود.mp3", "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
+"013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3", "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
+"015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3", "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
+"017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3", "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
+"019 - Maryam ( Mary ) - سورة مريم.mp3", "020 - Taha - سورة طه.mp3",
+"021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3", "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
+"023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3", "024 - An-Noor ( The Light ) - سورة النور.mp3",
+"025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3", "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
+"027 - An-Naml (The Ants ) - سورة النمل.mp3", "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
+"029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3", "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
+"031 - Luqman - سورة لقمان.mp3", "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
+"033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3", "034 - Saba ( Sheba ) - سورة سبأ.mp3",
+"035 - Fatir ( The Orignator ) - سورة فاطر.mp3", "036 - Ya-seen - سورة يس.mp3",
+"037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3", "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
+"039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3", "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
+"041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3", "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
+"043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3", "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
+"045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3", "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
+"047 - Muhammad - سورة محمد.mp3", "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
+"049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3", "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
+"051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3", "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
+"053 - An-Najm ( The Star ) - سورة النجم.mp3", "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
+"055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3", "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
+"057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3", "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
+"059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3", "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
+"061 - As-Saff ( The Row ) - سورة الصف.mp3", "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
+"063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3", "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
+"065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3", "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
+"067 - Al-Mulk ( Dominion ) - سورة الملك.mp3", "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
+"069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3", "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
+"071 - Nooh - سورة نوح.mp3", "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
+"073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3", "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
+"075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3", "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
+"077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3", "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
+"079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3", "080 - Abasa ( He frowned ) - سورة عبس.mp3",
+"081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3", "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
+"083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3", "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
+"085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3", "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
+"087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3", "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
+"089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3", "090 - Al-Balad ( The City ) - سورة البلد.mp3",
+"091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3", "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
+"093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3", "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
+"095 - At-Tin ( The Fig ) - سورة التين.mp3", "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
+"097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3", "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
+"099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3", "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
+"101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3", "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
+"103 - Al-Asr ( The Time ) - سورة العصر.mp3", "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
+"105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3", "106 - Quraish - سورة قريش.mp3",
+"107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3", "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
+"109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3", "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
+"111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3", "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
+"113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3", "114 - An-Nas ( Mankind ) - سورة الناس.mp3"
 }
-  end
-  return _lazyCache.hindi
 end
-local function buildHindiSurahUrl(surahIdx)
-  local fn = hindiTranslationFiles()[surahIdx]
-  if not fn then return nil end
-  return URLBASES.hindi .. urlEncodeBytes(fn)
+return _lazyCache.hindi
 end
-
--- NAYA (v2.1): Punjabi Translation - Arabic recitation (Qari Khushi
--- Muhammad-ul-Azhari) + Punjabi tarjuma (Hidayatullah, awaz Aziz Malik)
--- COMBINED, ek hi file per Surah (archive.org:
--- AlQuranWithPunjabiTranslation) - 114/114 verified.
-local function punjabiTranslationFiles()
-  if not _lazyCache.punjabi then
-    _lazyCache.punjabi = {
-  "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3", "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
-  "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3", "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
-  "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3", "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
-  "007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3", "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
-  "009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3", "010 - Yunus ( Jonah ) - سورة يونس.mp3",
-  "011 - Hud - سورة هود.mp3", "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
-  "013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3", "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
-  "015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3", "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
-  "017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3", "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
-  "019 - Maryam ( Mary ) - سورة مريم.mp3", "020 - Taha - سورة طه.mp3",
-  "021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3", "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
-  "023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3", "024 - An-Noor ( The Light ) - سورة النور.mp3",
-  "025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3", "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
-  "027 - An-Naml (The Ants ) - سورة النمل.mp3", "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
-  "029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3", "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
-  "031 - Luqman - سورة لقمان.mp3", "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
-  "033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3", "034 - Saba ( Sheba ) - سورة سبأ.mp3",
-  "035 - Fatir ( The Orignator ) - سورة فاطر.mp3", "036 - Ya-seen - سورة يس.mp3",
-  "037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3", "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
-  "039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3", "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
-  "041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3", "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
-  "043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3", "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
-  "045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3", "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
-  "047 - Muhammad - سورة محمد.mp3", "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
-  "049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3", "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
-  "051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3", "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
-  "053 - An-Najm ( The Star ) - سورة النجم.mp3", "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
-  "055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3", "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
-  "057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3", "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
-  "059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3", "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
-  "061 - As-Saff ( The Row ) - سورة الصف.mp3", "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
-  "063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3", "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
-  "065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3", "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
-  "067 - Al-Mulk ( Dominion ) - سورة الملك.mp3", "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
-  "069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3", "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
-  "071 - Nooh - سورة نوح.mp3", "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
-  "073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3", "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
-  "075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3", "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
-  "077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3", "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
-  "079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3", "080 - Abasa ( He frowned ) - سورة عبس.mp3",
-  "081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3", "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
-  "083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3", "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
-  "085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3", "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
-  "087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3", "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
-  "089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3", "090 - Al-Balad ( The City ) - سورة البلد.mp3",
-  "091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3", "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
-  "093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3", "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
-  "095 - At-Tin ( The Fig ) - سورة التين.mp3", "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
-  "097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3", "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
-  "099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3", "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
-  "101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3", "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
-  "103 - Al-Asr ( The Time ) - سورة العصر.mp3", "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
-  "105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3", "106 - Quraish - سورة قريش.mp3",
-  "107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3", "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
-  "109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3", "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
-  "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3", "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
-  "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3", "114 - An-Nas ( Mankind ) - سورة الناس.mp3"
+M.buildHindiSurahUrl = function(surahIdx)
+local fn = M.hindiTranslationFiles()[surahIdx]
+if not fn then return nil end
+return URLBASES.hindi .. urlEncodeBytes(fn)
+end
+M.punjabiTranslationFiles = function() return M.hindiTranslationFiles() end
+M.buildPunjabiSurahUrl = function(surahIdx)
+local fn = M.punjabiTranslationFiles()[surahIdx]
+if not fn then return nil end
+return URLBASES.punjabi .. urlEncodeBytes(fn)
+end
+M.englishTranslationFiles = function()
+if not _lazyCache.english then
+_lazyCache.english = {
+"001 - Al-Fatihah (The Opening).mp3", "002 - Al-Baqarah (The Cow).mp3", "003 - Al-Imran (The Family of Imran).mp3",
+"004 - An-Nisa (Women).mp3", "005 - Al-Maidah (The Table Spread).mp3", "006 - Al-Anam (The Cattle).mp3",
+"007 - Al-Araf (The Heights).mp3", "008 - Al-Anfal (The Spoils of War).mp3", "009 - At-Tawbah (Repentance).mp3",
+"010 - Yunus (Jonah).mp3", "011 - Hud (Hud).mp3", "012 - Yusuf (Joseph).mp3",
+"013 - Ar-Rad (Thunder).mp3", "014 - Ibrahim (Abraham).mp3", "015 - Al-Hijr (The Stoneland).mp3",
+"016 - An-Nahl (The Bees).mp3", "017 - Al-Isra (The Night Journey).mp3", "018 - Al-Kahf (The Cave).mp3",
+"019 - Maryam (Mary).mp3", "020 - Ta Ha (Ta Ha).mp3", "021 - Al-Anbiya (The Prophets).mp3",
+"022 - Al-Hajj (The Pilgrimage).mp3", "023 - Al-Muminun (The Believers).mp3", "024 - An-Nur (The Light).mp3",
+"025 - Al-Furqan (The Criterion).mp3", "026 - Ash-Shuara (The Poets).mp3", "027 - An-Naml (The Ants).mp3",
+"028 - Al-Qasas (The Narrative).mp3", "029 - Al-Ankabut (The Spider).mp3", "030 - Ar-Rum (The Romans).mp3",
+"031 - Luqman (Luqman).mp3", "032 - As-Sajdah (The Prostration).mp3", "033 - Al-Ahzab (The Combined Forces).mp3",
+"034 - Saba (Sheba).mp3", "035 - Al-Fatir (The Originator).mp3", "036 - Ya Sin (Ya Sin).mp3",
+"037 - As-Saffat (Those Ranged in Ranks).mp3", "038 - Sad (Sad).mp3", "039 - Az-Zumar (The Groups).mp3",
+"040 - Ghafir (The Forgiver).mp3", "041 - Fussilat (Explained in Detail).mp3", "042 - Ash-Shura (The Consultation).mp3",
+"043 - Az-Zukhruf (Ornaments of Gold).mp3", "044 - Ad-Dukhan (The Smoke).mp3", "045 - Al-Jathiyah (The Kneeling).mp3",
+"046 - Al-Ahqaf (The Sandhills).mp3", "047 - Muhammad (Muhammad).mp3", "048 - Al-Fath (The Victory).mp3",
+"049 - Al-Hujurat (The Chambers).mp3", "050 - Qaf (Qaf).mp3", "051 - Ad-Dhariyat (The Winnowing Winds).mp3",
+"052 - At-Tur (The Mount).mp3", "053 - An-Najm (The Star).mp3", "054 - Al-Qamar (The Moon).mp3",
+"055 - Ar-Rahman (The Beneficent).mp3", "056 - Al-Waqiah (The Inevitable Event).mp3", "057 - Al-Hadid (The Iron).mp3",
+"058 - Al-Mujadilah (The Pleading Woman).mp3", "059 - Al-Hashr (The Gathering).mp3", "060 - Al-Mumtahanah (The Woman to be Examined).mp3",
+"061 - As-Saff (The Ranks).mp3", "062 - Al-Jumuah (Friday Prayer).mp3", "063 - Al-Munafiqun (The Hypocrites).mp3",
+"064 - At-Taghabun (The Manifestation of Losses).mp3", "065 - At-Talaq (Divorce).mp3", "066 - At-Tahrim (The Prohibition).mp3",
+"067- Al-Mulk (The Sovereignty).mp3", "068 - Al-Qalam (The Pen).mp3", "069 - Al-Haqqah (The Inevitable Truth).mp3",
+"070 - Al-Maarij (The Ways of Ascent).mp3", "071 - Nuh (Noah).mp3", "072 - Al-Jinn (The Jinn).mp3",
+"073 - Al-Muzzammil (The Enshrouded).mp3", "074 - Al-Muddaththir (The Cloaked One).mp3", "075 - Al-Qiyamah (The Resurrection).mp3",
+"076 - Al-Insan (Man).mp3", "077 - Al-Mursalat (Winds Sent Forth).mp3", "078 - An-Naba (The Tidings).mp3",
+"079 - An-Naziat (Those Who Drag Forth).mp3", "080 - Abasa (He Frowned).mp3", "081 - At-Takwir (The Overthrowing).mp3",
+"082 - Al-Infitar (The Cleaving).mp3", "083 - Al-Mutaffifin (The Defrauders).mp3", "084 - Al-Inshiqaq (The Cracking).mp3",
+"085 - Al-Buruj (The Constellations).mp3", "086 - At-Tariq (The Night-Comer).mp3", "087 - Al-Ala (The Most High).mp3",
+"088 - Al-Ghashiyah (The Overwhelming Event).mp3", "089 - Al-Fajr (The Dawn).mp3", "090 - Al-Balad (The City).mp3",
+"091 - Ash-Shams (The Sun).mp3", "092 - Al-Layl (The Night).mp3", "093 - Ad-Duha (The Morning Brightness).mp3",
+"094 - Ash-Sharh (The Relief).mp3", "095 - At-Tin (The Fig).mp3", "096 - Al-Alaq (The Clot).mp3",
+"097 - Al-Qadr (Power, Fate).mp3", "098 - Al-Bayyinah (The Clear Evidence).mp3", "099 - Az-Zalzala (The Earthquake).mp3",
+"100 - Al-Adiyat (The Charging Horses).mp3", "101 - Al-Qariah (The Striking Calamity).mp3", "102 - At-Takathur (Rivalry In Worldly Increase).mp3",
+"103 - Al-Asr (The Time).mp3", "104 - Al-Humazah (The Slanderer).mp3", "105 - Al-Fil (The Elephant).mp3",
+"106 - Quraysh (Quraish).mp3", "107 - Al-Maun (Small Kindnesses).mp3", "108 - Al-Kawthar (Abundance).mp3",
+"109 - Al-Kafirun (The Disbelievers).mp3", "110 - An-Nasr (The Help).mp3", "111 - Al-Masad (The Plaited Rope).mp3",
+"112 - Al-Ikhlas (Purity of Faith).mp3", "113 - Al-Falaq (The Daybreak).mp3", "114 - An-Nas (Mankind).mp3"
 }
-  end
-  return _lazyCache.punjabi
 end
-local function buildPunjabiSurahUrl(surahIdx)
-  local fn = punjabiTranslationFiles()[surahIdx]
-  if not fn then return nil end
-  return URLBASES.punjabi .. urlEncodeBytes(fn)
+return _lazyCache.english
 end
-
--- NAYA (v2.1): English Translation - Recitation + English tarjuma (Ibrahim
--- Walk, Saheeh International) COMBINED, ek hi file per Surah (archive.org:
--- quran-english-translation-audio) - 114/114 verified.
-local function englishTranslationFiles()
-  if not _lazyCache.english then
-    _lazyCache.english = {
-  "001 - Al-Fatihah (The Opening).mp3", "002 - Al-Baqarah (The Cow).mp3", "003 - Al-Imran (The Family of Imran).mp3",
-  "004 - An-Nisa (Women).mp3", "005 - Al-Maidah (The Table Spread).mp3", "006 - Al-Anam (The Cattle).mp3",
-  "007 - Al-Araf (The Heights).mp3", "008 - Al-Anfal (The Spoils of War).mp3", "009 - At-Tawbah (Repentance).mp3",
-  "010 - Yunus (Jonah).mp3", "011 - Hud (Hud).mp3", "012 - Yusuf (Joseph).mp3",
-  "013 - Ar-Rad (Thunder).mp3", "014 - Ibrahim (Abraham).mp3", "015 - Al-Hijr (The Stoneland).mp3",
-  "016 - An-Nahl (The Bees).mp3", "017 - Al-Isra (The Night Journey).mp3", "018 - Al-Kahf (The Cave).mp3",
-  "019 - Maryam (Mary).mp3", "020 - Ta Ha (Ta Ha).mp3", "021 - Al-Anbiya (The Prophets).mp3",
-  "022 - Al-Hajj (The Pilgrimage).mp3", "023 - Al-Muminun (The Believers).mp3", "024 - An-Nur (The Light).mp3",
-  "025 - Al-Furqan (The Criterion).mp3", "026 - Ash-Shuara (The Poets).mp3", "027 - An-Naml (The Ants).mp3",
-  "028 - Al-Qasas (The Narrative).mp3", "029 - Al-Ankabut (The Spider).mp3", "030 - Ar-Rum (The Romans).mp3",
-  "031 - Luqman (Luqman).mp3", "032 - As-Sajdah (The Prostration).mp3", "033 - Al-Ahzab (The Combined Forces).mp3",
-  "034 - Saba (Sheba).mp3", "035 - Al-Fatir (The Originator).mp3", "036 - Ya Sin (Ya Sin).mp3",
-  "037 - As-Saffat (Those Ranged in Ranks).mp3", "038 - Sad (Sad).mp3", "039 - Az-Zumar (The Groups).mp3",
-  "040 - Ghafir (The Forgiver).mp3", "041 - Fussilat (Explained in Detail).mp3", "042 - Ash-Shura (The Consultation).mp3",
-  "043 - Az-Zukhruf (Ornaments of Gold).mp3", "044 - Ad-Dukhan (The Smoke).mp3", "045 - Al-Jathiyah (The Kneeling).mp3",
-  "046 - Al-Ahqaf (The Sandhills).mp3", "047 - Muhammad (Muhammad).mp3", "048 - Al-Fath (The Victory).mp3",
-  "049 - Al-Hujurat (The Chambers).mp3", "050 - Qaf (Qaf).mp3", "051 - Ad-Dhariyat (The Winnowing Winds).mp3",
-  "052 - At-Tur (The Mount).mp3", "053 - An-Najm (The Star).mp3", "054 - Al-Qamar (The Moon).mp3",
-  "055 - Ar-Rahman (The Beneficent).mp3", "056 - Al-Waqiah (The Inevitable Event).mp3", "057 - Al-Hadid (The Iron).mp3",
-  "058 - Al-Mujadilah (The Pleading Woman).mp3", "059 - Al-Hashr (The Gathering).mp3", "060 - Al-Mumtahanah (The Woman to be Examined).mp3",
-  "061 - As-Saff (The Ranks).mp3", "062 - Al-Jumuah (Friday Prayer).mp3", "063 - Al-Munafiqun (The Hypocrites).mp3",
-  "064 - At-Taghabun (The Manifestation of Losses).mp3", "065 - At-Talaq (Divorce).mp3", "066 - At-Tahrim (The Prohibition).mp3",
-  "067- Al-Mulk (The Sovereignty).mp3", "068 - Al-Qalam (The Pen).mp3", "069 - Al-Haqqah (The Inevitable Truth).mp3",
-  "070 - Al-Maarij (The Ways of Ascent).mp3", "071 - Nuh (Noah).mp3", "072 - Al-Jinn (The Jinn).mp3",
-  "073 - Al-Muzzammil (The Enshrouded).mp3", "074 - Al-Muddaththir (The Cloaked One).mp3", "075 - Al-Qiyamah (The Resurrection).mp3",
-  "076 - Al-Insan (Man).mp3", "077 - Al-Mursalat (Winds Sent Forth).mp3", "078 - An-Naba (The Tidings).mp3",
-  "079 - An-Naziat (Those Who Drag Forth).mp3", "080 - Abasa (He Frowned).mp3", "081 - At-Takwir (The Overthrowing).mp3",
-  "082 - Al-Infitar (The Cleaving).mp3", "083 - Al-Mutaffifin (The Defrauders).mp3", "084 - Al-Inshiqaq (The Cracking).mp3",
-  "085 - Al-Buruj (The Constellations).mp3", "086 - At-Tariq (The Night-Comer).mp3", "087 - Al-Ala (The Most High).mp3",
-  "088 - Al-Ghashiyah (The Overwhelming Event).mp3", "089 - Al-Fajr (The Dawn).mp3", "090 - Al-Balad (The City).mp3",
-  "091 - Ash-Shams (The Sun).mp3", "092 - Al-Layl (The Night).mp3", "093 - Ad-Duha (The Morning Brightness).mp3",
-  "094 - Ash-Sharh (The Relief).mp3", "095 - At-Tin (The Fig).mp3", "096 - Al-Alaq (The Clot).mp3",
-  "097 - Al-Qadr (Power, Fate).mp3", "098 - Al-Bayyinah (The Clear Evidence).mp3", "099 - Az-Zalzala (The Earthquake).mp3",
-  "100 - Al-Adiyat (The Charging Horses).mp3", "101 - Al-Qariah (The Striking Calamity).mp3", "102 - At-Takathur (Rivalry In Worldly Increase).mp3",
-  "103 - Al-Asr (The Time).mp3", "104 - Al-Humazah (The Slanderer).mp3", "105 - Al-Fil (The Elephant).mp3",
-  "106 - Quraysh (Quraish).mp3", "107 - Al-Maun (Small Kindnesses).mp3", "108 - Al-Kawthar (Abundance).mp3",
-  "109 - Al-Kafirun (The Disbelievers).mp3", "110 - An-Nasr (The Help).mp3", "111 - Al-Masad (The Plaited Rope).mp3",
-  "112 - Al-Ikhlas (Purity of Faith).mp3", "113 - Al-Falaq (The Daybreak).mp3", "114 - An-Nas (Mankind).mp3"
-}
-  end
-  return _lazyCache.english
+M.buildEnglishSurahUrl = function(surahIdx)
+local fn = M.englishTranslationFiles()[surahIdx]
+if not fn then return nil end
+return URLBASES.english .. urlEncodeBytes(fn)
 end
-local function buildEnglishSurahUrl(surahIdx)
-  local fn = englishTranslationFiles()[surahIdx]
-  if not fn then return nil end
-  return URLBASES.english .. urlEncodeBytes(fn)
+M.buildSindhiSurahUrl = function(surahIdx)
+local fn = M.hindiTranslationFiles()[surahIdx]
+if not fn then return nil end
+return URLBASES.sindhi .. urlEncodeBytes(fn)
 end
-
--- NAYA (v2.2): Sindhi Translation - Arabic recitation (Mishary Rashid
--- Alafasy) + Sindhi tarjuma COMBINED, ek hi file per Surah (archive.org:
--- "Al Quran with Sindhi Translation" by TheChoice.one, verified) - is
--- item ke 114/114 filenames bilkul HUBAHU wahi hain jo Hindi wale item
--- (upar) mein hain (dono ek hi uploader/template se hain), is liye alag
--- se 114 filenames dobara likhne ki bajaye wahi list reuse kar rahe hain
--- - sirf base URL (aur is se folder) alag hai.
-local function buildSindhiSurahUrl(surahIdx)
-  local fn = hindiTranslationFiles()[surahIdx]
-  if not fn then return nil end
-  return URLBASES.sindhi .. urlEncodeBytes(fn)
-end
-
--- ======================================================================
--- v2.5 AUDIO TRANSLATIONS: INLINE MAPS (114 surahs per collection)
--- All filenames are embedded in this main Lua file; no require/dofile.
--- ======================================================================
--- V25 data maps populate the shared table initialized near app state.
 V25.items["EN"] = "Qur_aan"
 V25.files["EN"] = {
-    ["1"] = "001-SurahAl-faatiha.mp3",
-    ["2"] = "002-SurahAl-baqarah.mp3",
-    ["3"] = "003-SurahAal-imraan.mp3",
-    ["4"] = "004-SurahAn-nisaa.mp3",
-    ["5"] = "005-SurahAl-maaidah.mp3",
-    ["6"] = "006-SurahAl-anaam.mp3",
-    ["7"] = "007-SurahAl-araaf.mp3",
-    ["8"] = "008-SurahAl-anfaal.mp3",
-    ["9"] = "009-SurahAt-tawbah.mp3",
-    ["10"] = "010-SurahYunus.mp3",
-    ["11"] = "011-SurahHud.mp3",
-    ["12"] = "012-SurahYusuf.mp3",
-    ["13"] = "013-SurahAr-rad.mp3",
-    ["14"] = "014-SurahIbraheem.mp3",
-    ["15"] = "015-SurahAl-hijr.mp3",
-    ["16"] = "016-SurahAn-nahl.mp3",
-    ["17"] = "017-SurahAl-israa.mp3",
-    ["18"] = "018-SurahAl-kahf.mp3",
-    ["19"] = "019-SurahMaryam.mp3",
-    ["20"] = "020-SurahTaa-haa.mp3",
-    ["21"] = "021-SurahAl-anbiyaa.mp3",
-    ["22"] = "022-SurahAl-hajj.mp3",
-    ["23"] = "023-SurahAl-muminun.mp3",
-    ["24"] = "024-SurahAn-nur.mp3",
-    ["25"] = "025-SurahAl-furqaan.mp3",
-    ["26"] = "026-SurahAsh-shuaraa.mp3",
-    ["27"] = "027-SurahAn-naml.mp3",
-    ["28"] = "028-SurahAl-qasas.mp3",
-    ["29"] = "029-SurahAl-ankabut.mp3",
-    ["30"] = "030-SurahAr-rum.mp3",
-    ["31"] = "031-SurahLuqmaan.mp3",
-    ["32"] = "032-SurahAs-sajdah.mp3",
-    ["33"] = "033-SurahAl-ahzaab.mp3",
-    ["34"] = "034-SurahSaba.mp3",
-    ["35"] = "035-SurahFaatir.mp3",
-    ["36"] = "036-SurahYaa-seen.mp3",
-    ["37"] = "037-SurahAs-saaffaat.mp3",
-    ["38"] = "038-SurahSaad.mp3",
-    ["39"] = "039-SurahAz-zumar.mp3",
-    ["40"] = "040-SurahGhaafir.mp3",
-    ["41"] = "041-SurahFussilat.mp3",
-    ["42"] = "042-SurahAsh-shura.mp3",
-    ["43"] = "043-SurahAz-zukhruf.mp3",
-    ["44"] = "044-SurahAd-dukhaan.mp3",
-    ["45"] = "045-SurahAl-jaathiyah.mp3",
-    ["46"] = "046-SurahAl-ahqaaf.mp3",
-    ["47"] = "047-SurahMuhammad.mp3",
-    ["48"] = "048-SurahAl-fath.mp3",
-    ["49"] = "049-SurahAl-hujuraat.mp3",
-    ["50"] = "050-SurahQaaf.mp3",
-    ["51"] = "051-SurahAdh-dhaariyaat.mp3",
-    ["52"] = "052-SurahAt-tur.mp3",
-    ["53"] = "053-SurahAn-najm.mp3",
-    ["54"] = "054-SurahAl-qamar.mp3",
-    ["55"] = "055-SurahAr-rahmaan.mp3",
-    ["56"] = "056-SurahAl-waaqiah.mp3",
-    ["57"] = "057-SurahAl-hadeed.mp3",
-    ["58"] = "058-SurahAl-mujaadalah.mp3",
-    ["59"] = "059-SurahAl-hashr.mp3",
-    ["60"] = "060-SurahAl-mumtahinah.mp3",
-    ["61"] = "061-SurahAs-saff.mp3",
-    ["62"] = "062-SurahAl-jumuah.mp3",
-    ["63"] = "063-SurahAl-munaafiqun.mp3",
-    ["64"] = "064-SurahAt-taghaabun.mp3",
-    ["65"] = "065-SurahAt-talaaq.mp3",
-    ["66"] = "066-SurahAt-tahreem.mp3",
-    ["67"] = "067-SurahAl-mulk.mp3",
-    ["68"] = "068-SurahAl-qalam.mp3",
-    ["69"] = "069-SurahAl-haaqqah.mp3",
-    ["70"] = "070-SurahAl-maaarij.mp3",
-    ["71"] = "071-SurahNuh.mp3",
-    ["72"] = "072-SurahAl-jinn.mp3",
-    ["73"] = "073-SurahAl-muzzammil.mp3",
-    ["74"] = "074-SurahAl-muddaththir.mp3",
-    ["75"] = "075-SurahAl-qiyaamah.mp3",
-    ["76"] = "076-SurahAl-insaan.mp3",
-    ["77"] = "077-SurahAl-mursalaat.mp3",
-    ["78"] = "078-SurahAn-naba.mp3",
-    ["79"] = "079-SurahAl-naaziaat.mp3",
-    ["80"] = "080-Surahabasa.mp3",
-    ["81"] = "081-SurahAt-takweer.mp3",
-    ["82"] = "082-SurahAl-infitaar.mp3",
-    ["83"] = "083-SurahAl-mutaffifeen.mp3",
-    ["84"] = "084-SurahInshiqaaq.mp3",
-    ["85"] = "085-SurahAl-burooj.mp3",
-    ["86"] = "086-SurahAt-taariq.mp3",
-    ["87"] = "087-SurahAl-alaa.mp3",
-    ["88"] = "088-SurahAl-ghaashiyah.mp3",
-    ["89"] = "089-SurahAl-fajr.mp3",
-    ["90"] = "090-SurahAl-balad.mp3",
-    ["91"] = "091-SurahAsh-shams.mp3",
-    ["92"] = "092-SurahAl-layl.mp3",
-    ["93"] = "093-SurahAd-duha.mp3",
-    ["94"] = "094-SurahAsh-sharh.mp3",
-    ["95"] = "095-SurahAt-teen.mp3",
-    ["96"] = "096-SurahAl-alaq.mp3",
-    ["97"] = "097-SurahAl-qadr.mp3",
-    ["98"] = "098-SurahAl-bayyinah.mp3",
-    ["99"] = "099-SurahAz-zalzaalah.mp3",
-    ["100"] = "100-SurahAl-aadiyaat.mp3",
-    ["101"] = "101-SurahAl-qaariah.mp3",
-    ["102"] = "102-SurahAt-takaathur.mp3",
-    ["103"] = "103-SurahAl-asr.mp3",
-    ["104"] = "104-SurahAl-humazah.mp3",
-    ["105"] = "105-SurahAl-feel.mp3",
-    ["106"] = "106-SurahQuraysh.mp3",
-    ["107"] = "107-SurahAl-maaun.mp3",
-    ["108"] = "108-SurahAl-kawthar.mp3",
-    ["109"] = "109-SurahAl-kaafirun.mp3",
-    ["110"] = "110-SurahAn-nasr.mp3",
-    ["111"] = "111-SurahAl-masad.mp3",
-    ["112"] = "112-SurahAl-ikhlaas.mp3",
-    ["113"] = "113-SurahAl-falaq.mp3",
-    ["114"] = "114-SurahAn-naas.mp3",
-  }
+["1"] = "001-SurahAl-faatiha.mp3",
+["2"] = "002-SurahAl-baqarah.mp3",
+["3"] = "003-SurahAal-imraan.mp3",
+["4"] = "004-SurahAn-nisaa.mp3",
+["5"] = "005-SurahAl-maaidah.mp3",
+["6"] = "006-SurahAl-anaam.mp3",
+["7"] = "007-SurahAl-araaf.mp3",
+["8"] = "008-SurahAl-anfaal.mp3",
+["9"] = "009-SurahAt-tawbah.mp3",
+["10"] = "010-SurahYunus.mp3",
+["11"] = "011-SurahHud.mp3",
+["12"] = "012-SurahYusuf.mp3",
+["13"] = "013-SurahAr-rad.mp3",
+["14"] = "014-SurahIbraheem.mp3",
+["15"] = "015-SurahAl-hijr.mp3",
+["16"] = "016-SurahAn-nahl.mp3",
+["17"] = "017-SurahAl-israa.mp3",
+["18"] = "018-SurahAl-kahf.mp3",
+["19"] = "019-SurahMaryam.mp3",
+["20"] = "020-SurahTaa-haa.mp3",
+["21"] = "021-SurahAl-anbiyaa.mp3",
+["22"] = "022-SurahAl-hajj.mp3",
+["23"] = "023-SurahAl-muminun.mp3",
+["24"] = "024-SurahAn-nur.mp3",
+["25"] = "025-SurahAl-furqaan.mp3",
+["26"] = "026-SurahAsh-shuaraa.mp3",
+["27"] = "027-SurahAn-naml.mp3",
+["28"] = "028-SurahAl-qasas.mp3",
+["29"] = "029-SurahAl-ankabut.mp3",
+["30"] = "030-SurahAr-rum.mp3",
+["31"] = "031-SurahLuqmaan.mp3",
+["32"] = "032-SurahAs-sajdah.mp3",
+["33"] = "033-SurahAl-ahzaab.mp3",
+["34"] = "034-SurahSaba.mp3",
+["35"] = "035-SurahFaatir.mp3",
+["36"] = "036-SurahYaa-seen.mp3",
+["37"] = "037-SurahAs-saaffaat.mp3",
+["38"] = "038-SurahSaad.mp3",
+["39"] = "039-SurahAz-zumar.mp3",
+["40"] = "040-SurahGhaafir.mp3",
+["41"] = "041-SurahFussilat.mp3",
+["42"] = "042-SurahAsh-shura.mp3",
+["43"] = "043-SurahAz-zukhruf.mp3",
+["44"] = "044-SurahAd-dukhaan.mp3",
+["45"] = "045-SurahAl-jaathiyah.mp3",
+["46"] = "046-SurahAl-ahqaaf.mp3",
+["47"] = "047-SurahMuhammad.mp3",
+["48"] = "048-SurahAl-fath.mp3",
+["49"] = "049-SurahAl-hujuraat.mp3",
+["50"] = "050-SurahQaaf.mp3",
+["51"] = "051-SurahAdh-dhaariyaat.mp3",
+["52"] = "052-SurahAt-tur.mp3",
+["53"] = "053-SurahAn-najm.mp3",
+["54"] = "054-SurahAl-qamar.mp3",
+["55"] = "055-SurahAr-rahmaan.mp3",
+["56"] = "056-SurahAl-waaqiah.mp3",
+["57"] = "057-SurahAl-hadeed.mp3",
+["58"] = "058-SurahAl-mujaadalah.mp3",
+["59"] = "059-SurahAl-hashr.mp3",
+["60"] = "060-SurahAl-mumtahinah.mp3",
+["61"] = "061-SurahAs-saff.mp3",
+["62"] = "062-SurahAl-jumuah.mp3",
+["63"] = "063-SurahAl-munaafiqun.mp3",
+["64"] = "064-SurahAt-taghaabun.mp3",
+["65"] = "065-SurahAt-talaaq.mp3",
+["66"] = "066-SurahAt-tahreem.mp3",
+["67"] = "067-SurahAl-mulk.mp3",
+["68"] = "068-SurahAl-qalam.mp3",
+["69"] = "069-SurahAl-haaqqah.mp3",
+["70"] = "070-SurahAl-maaarij.mp3",
+["71"] = "071-SurahNuh.mp3",
+["72"] = "072-SurahAl-jinn.mp3",
+["73"] = "073-SurahAl-muzzammil.mp3",
+["74"] = "074-SurahAl-muddaththir.mp3",
+["75"] = "075-SurahAl-qiyaamah.mp3",
+["76"] = "076-SurahAl-insaan.mp3",
+["77"] = "077-SurahAl-mursalaat.mp3",
+["78"] = "078-SurahAn-naba.mp3",
+["79"] = "079-SurahAl-naaziaat.mp3",
+["80"] = "080-Surahabasa.mp3",
+["81"] = "081-SurahAt-takweer.mp3",
+["82"] = "082-SurahAl-infitaar.mp3",
+["83"] = "083-SurahAl-mutaffifeen.mp3",
+["84"] = "084-SurahInshiqaaq.mp3",
+["85"] = "085-SurahAl-burooj.mp3",
+["86"] = "086-SurahAt-taariq.mp3",
+["87"] = "087-SurahAl-alaa.mp3",
+["88"] = "088-SurahAl-ghaashiyah.mp3",
+["89"] = "089-SurahAl-fajr.mp3",
+["90"] = "090-SurahAl-balad.mp3",
+["91"] = "091-SurahAsh-shams.mp3",
+["92"] = "092-SurahAl-layl.mp3",
+["93"] = "093-SurahAd-duha.mp3",
+["94"] = "094-SurahAsh-sharh.mp3",
+["95"] = "095-SurahAt-teen.mp3",
+["96"] = "096-SurahAl-alaq.mp3",
+["97"] = "097-SurahAl-qadr.mp3",
+["98"] = "098-SurahAl-bayyinah.mp3",
+["99"] = "099-SurahAz-zalzaalah.mp3",
+["100"] = "100-SurahAl-aadiyaat.mp3",
+["101"] = "101-SurahAl-qaariah.mp3",
+["102"] = "102-SurahAt-takaathur.mp3",
+["103"] = "103-SurahAl-asr.mp3",
+["104"] = "104-SurahAl-humazah.mp3",
+["105"] = "105-SurahAl-feel.mp3",
+["106"] = "106-SurahQuraysh.mp3",
+["107"] = "107-SurahAl-maaun.mp3",
+["108"] = "108-SurahAl-kawthar.mp3",
+["109"] = "109-SurahAl-kaafirun.mp3",
+["110"] = "110-SurahAn-nasr.mp3",
+["111"] = "111-SurahAl-masad.mp3",
+["112"] = "112-SurahAl-ikhlaas.mp3",
+["113"] = "113-SurahAl-falaq.mp3",
+["114"] = "114-SurahAn-naas.mp3",
+}
 V25.items["EN2"] = "MishaariRashid-TheNobelQuran-English"
 V25.files["EN2"] = {
-    ["1"] = "001 surah_al_fatihah.mp3",
-    ["2"] = "002 surah_al_baqarah.mp3",
-    ["3"] = "003 surah_al_imran.mp3",
-    ["4"] = "004 surah_an_nisa.mp3",
-    ["5"] = "005 surah_al_maidah.mp3",
-    ["6"] = "006 surah_al_anam.mp3",
-    ["7"] = "007 surah_al_araf.mp3",
-    ["8"] = "008 surah_al_anfal.mp3",
-    ["9"] = "009 surah_at_tawbah.mp3",
-    ["10"] = "010 surah_yunus.mp3",
-    ["11"] = "011 surah_hud.mp3",
-    ["12"] = "012 surah_yusuf.mp3",
-    ["13"] = "013 surah_ar_rad.mp3",
-    ["14"] = "014 surah_ibrahim.mp3",
-    ["15"] = "015 surah_al_hijr.mp3",
-    ["16"] = "016 surah_an_nahl.mp3",
-    ["17"] = "017 surah_al_isra.mp3",
-    ["18"] = "018 surah_al_kahf.mp3",
-    ["19"] = "019 surah_maryam.mp3",
-    ["20"] = "020 surah_ta_ha.mp3",
-    ["21"] = "021 surah_al_anbiya.mp3",
-    ["22"] = "022 surah_al_hajj.mp3",
-    ["23"] = "023 surah_al_muminun.mp3",
-    ["24"] = "024 surah_an_nur.mp3",
-    ["25"] = "025 surah_al_furqan.mp3",
-    ["26"] = "026 surah_ash_shuara.mp3",
-    ["27"] = "027 surah_an_naml.mp3",
-    ["28"] = "028 surah_al_qasas.mp3",
-    ["29"] = "029 surah_al_ankabut.mp3",
-    ["30"] = "030 surah_ar_rum.mp3",
-    ["31"] = "031 surah_luqman.mp3",
-    ["32"] = "032 surah_as_sajdah.mp3",
-    ["33"] = "033 surah_al_ahzab.mp3",
-    ["34"] = "034 surah_saba.mp3",
-    ["35"] = "035 surah_fatir.mp3",
-    ["36"] = "036 surah_ya_sin.mp3",
-    ["37"] = "037 surah_as_safat.mp3",
-    ["38"] = "038 surah_sad.mp3",
-    ["39"] = "039 surah_az_zumar.mp3",
-    ["40"] = "040 surah_ghafir.mp3",
-    ["41"] = "041 surah_fussilat.mp3",
-    ["42"] = "042 surah_ash_shura.mp3",
-    ["43"] = "043 surah_az_zukhruf.mp3",
-    ["44"] = "044 surah_ad_dukhan.mp3",
-    ["45"] = "045 surah_al_jathiyah.mp3",
-    ["46"] = "046 surah_al_ahqaf.mp3",
-    ["47"] = "047 surah_muhammad.mp3",
-    ["48"] = "048 surah_al_fath.mp3",
-    ["49"] = "049 surah_al_hujurat.mp3",
-    ["50"] = "050 surah_qaf.mp3",
-    ["51"] = "051 surah_adh_dhariyat.mp3",
-    ["52"] = "052 surah_at_tur.mp3",
-    ["53"] = "053 surah_an_najm.mp3",
-    ["54"] = "054 surah_al_qamar.mp3",
-    ["55"] = "055 surah_ar_rahman.mp3",
-    ["56"] = "056 surah_al_waqiah.mp3",
-    ["57"] = "057 surah_al_hadid.mp3",
-    ["58"] = "058 surah_al_mujadilah.mp3",
-    ["59"] = "059 surah_al_hashr.mp3",
-    ["60"] = "060 surah_al_mumtahanah.mp3",
-    ["61"] = "061 surah_as_saff.mp3",
-    ["62"] = "062 surah_al_jumuah.mp3",
-    ["63"] = "063 surah_al_munafiqun.mp3",
-    ["64"] = "064 surah_at_taghabun.mp3",
-    ["65"] = "065 surah_at_talaq.mp3",
-    ["66"] = "066 surah_at_tahrim.mp3",
-    ["67"] = "067 surah_al_mulk.mp3",
-    ["68"] = "068 surah_al_qalam.mp3",
-    ["69"] = "069 surah_al_haqqah.mp3",
-    ["70"] = "070 surah_al_maarij.mp3",
-    ["71"] = "071 surah_nuh.mp3",
-    ["72"] = "072 surah_al_jinn.mp3",
-    ["73"] = "073 surah_al_muzzammil.mp3",
-    ["74"] = "074 surah_al_muddaththir.mp3",
-    ["75"] = "075 surah_al_qiyamah.mp3",
-    ["76"] = "076 surah_al_insan.mp3",
-    ["77"] = "077 surah_al_mursalat.mp3",
-    ["78"] = "078 surah_an_naba.mp3",
-    ["79"] = "079 surah_an_naziat.mp3",
-    ["80"] = "080 surah_abasa.mp3",
-    ["81"] = "081 surah_at_takwir.mp3",
-    ["82"] = "082 surah_al_infitar.mp3",
-    ["83"] = "083 surah_al_mutaffifin.mp3",
-    ["84"] = "084 surah_al_inshiqaq.mp3",
-    ["85"] = "085 surah_al_buruj.mp3",
-    ["86"] = "086 surah_at_tariq.mp3",
-    ["87"] = "087 surah_al_ala.mp3",
-    ["88"] = "088 surah_al_ghashiyah.mp3",
-    ["89"] = "089 surah_al_fajr.mp3",
-    ["90"] = "090 surah_al_balad.mp3",
-    ["91"] = "091 surah_ash_shams.mp3",
-    ["92"] = "092 surah_al_layl.mp3",
-    ["93"] = "093 surah_ad_duha.mp3",
-    ["94"] = "094 surah_ash_sharh.mp3",
-    ["95"] = "095 surah_at_tin.mp3",
-    ["96"] = "096 surah_al_alaq.mp3",
-    ["97"] = "097 surah_al_qadr.mp3",
-    ["98"] = "098 surah_al_bayyinah.mp3",
-    ["99"] = "099 surah_az_zalzalah.mp3",
-    ["100"] = "100 surah_al_adiyat.mp3",
-    ["101"] = "101 surah_al_qariah.mp3",
-    ["102"] = "102 surah_at_takathur.mp3",
-    ["103"] = "103 surah_al_asr.mp3",
-    ["104"] = "104 surah_al_humazah.mp3",
-    ["105"] = "105 surah_al_fil.mp3",
-    ["106"] = "106 surah_quraysh.mp3",
-    ["107"] = "107 surah_al_maun.mp3",
-    ["108"] = "108 surah_al_kawthar.mp3",
-    ["109"] = "109 surah_al_kafirun.mp3",
-    ["110"] = "110 surah_an_nasr.mp3",
-    ["111"] = "111 surah_al_masad.mp3",
-    ["112"] = "112 surah_al_ikhlas.mp3",
-    ["113"] = "113 surah_al_falaq.mp3",
-    ["114"] = "114 surah_an_nas.mp3",
-  }
+["1"] = "001 surah_al_fatihah.mp3",
+["2"] = "002 surah_al_baqarah.mp3",
+["3"] = "003 surah_al_imran.mp3",
+["4"] = "004 surah_an_nisa.mp3",
+["5"] = "005 surah_al_maidah.mp3",
+["6"] = "006 surah_al_anam.mp3",
+["7"] = "007 surah_al_araf.mp3",
+["8"] = "008 surah_al_anfal.mp3",
+["9"] = "009 surah_at_tawbah.mp3",
+["10"] = "010 surah_yunus.mp3",
+["11"] = "011 surah_hud.mp3",
+["12"] = "012 surah_yusuf.mp3",
+["13"] = "013 surah_ar_rad.mp3",
+["14"] = "014 surah_ibrahim.mp3",
+["15"] = "015 surah_al_hijr.mp3",
+["16"] = "016 surah_an_nahl.mp3",
+["17"] = "017 surah_al_isra.mp3",
+["18"] = "018 surah_al_kahf.mp3",
+["19"] = "019 surah_maryam.mp3",
+["20"] = "020 surah_ta_ha.mp3",
+["21"] = "021 surah_al_anbiya.mp3",
+["22"] = "022 surah_al_hajj.mp3",
+["23"] = "023 surah_al_muminun.mp3",
+["24"] = "024 surah_an_nur.mp3",
+["25"] = "025 surah_al_furqan.mp3",
+["26"] = "026 surah_ash_shuara.mp3",
+["27"] = "027 surah_an_naml.mp3",
+["28"] = "028 surah_al_qasas.mp3",
+["29"] = "029 surah_al_ankabut.mp3",
+["30"] = "030 surah_ar_rum.mp3",
+["31"] = "031 surah_luqman.mp3",
+["32"] = "032 surah_as_sajdah.mp3",
+["33"] = "033 surah_al_ahzab.mp3",
+["34"] = "034 surah_saba.mp3",
+["35"] = "035 surah_fatir.mp3",
+["36"] = "036 surah_ya_sin.mp3",
+["37"] = "037 surah_as_safat.mp3",
+["38"] = "038 surah_sad.mp3",
+["39"] = "039 surah_az_zumar.mp3",
+["40"] = "040 surah_ghafir.mp3",
+["41"] = "041 surah_fussilat.mp3",
+["42"] = "042 surah_ash_shura.mp3",
+["43"] = "043 surah_az_zukhruf.mp3",
+["44"] = "044 surah_ad_dukhan.mp3",
+["45"] = "045 surah_al_jathiyah.mp3",
+["46"] = "046 surah_al_ahqaf.mp3",
+["47"] = "047 surah_muhammad.mp3",
+["48"] = "048 surah_al_fath.mp3",
+["49"] = "049 surah_al_hujurat.mp3",
+["50"] = "050 surah_qaf.mp3",
+["51"] = "051 surah_adh_dhariyat.mp3",
+["52"] = "052 surah_at_tur.mp3",
+["53"] = "053 surah_an_najm.mp3",
+["54"] = "054 surah_al_qamar.mp3",
+["55"] = "055 surah_ar_rahman.mp3",
+["56"] = "056 surah_al_waqiah.mp3",
+["57"] = "057 surah_al_hadid.mp3",
+["58"] = "058 surah_al_mujadilah.mp3",
+["59"] = "059 surah_al_hashr.mp3",
+["60"] = "060 surah_al_mumtahanah.mp3",
+["61"] = "061 surah_as_saff.mp3",
+["62"] = "062 surah_al_jumuah.mp3",
+["63"] = "063 surah_al_munafiqun.mp3",
+["64"] = "064 surah_at_taghabun.mp3",
+["65"] = "065 surah_at_talaq.mp3",
+["66"] = "066 surah_at_tahrim.mp3",
+["67"] = "067 surah_al_mulk.mp3",
+["68"] = "068 surah_al_qalam.mp3",
+["69"] = "069 surah_al_haqqah.mp3",
+["70"] = "070 surah_al_maarij.mp3",
+["71"] = "071 surah_nuh.mp3",
+["72"] = "072 surah_al_jinn.mp3",
+["73"] = "073 surah_al_muzzammil.mp3",
+["74"] = "074 surah_al_muddaththir.mp3",
+["75"] = "075 surah_al_qiyamah.mp3",
+["76"] = "076 surah_al_insan.mp3",
+["77"] = "077 surah_al_mursalat.mp3",
+["78"] = "078 surah_an_naba.mp3",
+["79"] = "079 surah_an_naziat.mp3",
+["80"] = "080 surah_abasa.mp3",
+["81"] = "081 surah_at_takwir.mp3",
+["82"] = "082 surah_al_infitar.mp3",
+["83"] = "083 surah_al_mutaffifin.mp3",
+["84"] = "084 surah_al_inshiqaq.mp3",
+["85"] = "085 surah_al_buruj.mp3",
+["86"] = "086 surah_at_tariq.mp3",
+["87"] = "087 surah_al_ala.mp3",
+["88"] = "088 surah_al_ghashiyah.mp3",
+["89"] = "089 surah_al_fajr.mp3",
+["90"] = "090 surah_al_balad.mp3",
+["91"] = "091 surah_ash_shams.mp3",
+["92"] = "092 surah_al_layl.mp3",
+["93"] = "093 surah_ad_duha.mp3",
+["94"] = "094 surah_ash_sharh.mp3",
+["95"] = "095 surah_at_tin.mp3",
+["96"] = "096 surah_al_alaq.mp3",
+["97"] = "097 surah_al_qadr.mp3",
+["98"] = "098 surah_al_bayyinah.mp3",
+["99"] = "099 surah_az_zalzalah.mp3",
+["100"] = "100 surah_al_adiyat.mp3",
+["101"] = "101 surah_al_qariah.mp3",
+["102"] = "102 surah_at_takathur.mp3",
+["103"] = "103 surah_al_asr.mp3",
+["104"] = "104 surah_al_humazah.mp3",
+["105"] = "105 surah_al_fil.mp3",
+["106"] = "106 surah_quraysh.mp3",
+["107"] = "107 surah_al_maun.mp3",
+["108"] = "108 surah_al_kawthar.mp3",
+["109"] = "109 surah_al_kafirun.mp3",
+["110"] = "110 surah_an_nasr.mp3",
+["111"] = "111 surah_al_masad.mp3",
+["112"] = "112 surah_al_ikhlas.mp3",
+["113"] = "113 surah_al_falaq.mp3",
+["114"] = "114 surah_an_nas.mp3",
+}
 V25.items["HI"] = "hindi-meal"
 V25.files["HI"] = {
-    ["1"] = "001-Al-Fatiha.mp3",
-    ["2"] = "002-Al-Baqarah2.mp3",
-    ["3"] = "003-Al-imran.mp3",
-    ["4"] = "004-An-Nisa.mp3",
-    ["5"] = "005-Al-Maidah.mp3",
-    ["6"] = "006-Enam.mp3",
-    ["7"] = "007-Al-Araf.mp3",
-    ["8"] = "008-Al-Anfal.mp3",
-    ["9"] = "009.At-Taubah.mp3",
-    ["10"] = "010-Yunus.mp3",
-    ["11"] = "011-Hud.mp3",
-    ["12"] = "012-Yusuf.mp3",
-    ["13"] = "013-Ar-Rad.mp3",
-    ["14"] = "014-ibrahim.mp3",
-    ["15"] = "015-Al-Hijr.mp3",
-    ["16"] = "016-An-Nahl.mp3",
-    ["17"] = "017-Al-Isra.mp3",
-    ["18"] = "018-Al-Kahf.mp3",
-    ["19"] = "019.Maryam.mp3",
-    ["20"] = "020.Ta-Ha.mp3",
-    ["21"] = "021-Al-Anbiya.mp3",
-    ["22"] = "022-Al-Hajj.mp3",
-    ["23"] = "023-Al-Mu-minun.mp3",
-    ["24"] = "024-An-Nur.mp3",
-    ["25"] = "025-Al-Furqan.mp3",
-    ["26"] = "026-Ash-Shu-ara.mp3",
-    ["27"] = "027-An-Naml.mp3",
-    ["28"] = "028-Al-Qasas.mp3",
-    ["29"] = "029-Al-Ankabut.mp3",
-    ["30"] = "030-Ar-Rum.mp3",
-    ["31"] = "031-Luqman.mp3",
-    ["32"] = "032-As-Sajdah.mp3",
-    ["33"] = "033-Al-Ahzab.mp3",
-    ["34"] = "034-Saba..mp3",
-    ["35"] = "035-Fatir.mp3",
-    ["36"] = "036-Ya-Sin.mp3",
-    ["37"] = "037-As-Saffat.mp3",
-    ["38"] = "038-Sad.mp3",
-    ["39"] = "039-Az-Zumar.mp3",
-    ["40"] = "040-Mumin-Ghafir.mp3",
-    ["41"] = "041-Fussilat.mp3",
-    ["42"] = "042-Ash-Shura.mp3",
-    ["43"] = "043-Az-Zukhruf.mp3",
-    ["44"] = "044-Ad-Dukhan.mp3",
-    ["45"] = "045-Al-Jathiyah.mp3",
-    ["46"] = "046-Al-Ahqaf.mp3",
-    ["47"] = "047-Muhammad.mp3",
-    ["48"] = "048-Al-Fath.mp3",
-    ["49"] = "049-Al-Hujurat.mp3",
-    ["50"] = "050-Qaf.mp3",
-    ["51"] = "051-Adh-Dhariyat.mp3",
-    ["52"] = "052-At-Tur.mp3",
-    ["53"] = "053-An-Najm.mp3",
-    ["54"] = "054-Al-Qamar.mp3",
-    ["55"] = "055-Ar-Rahman.mp3",
-    ["56"] = "056-Al-Waqi-ah.mp3",
-    ["57"] = "057-Al-Hadid.mp3",
-    ["58"] = "058-Al-Mujadilah.mp3",
-    ["59"] = "059-Al-Hashr.mp3",
-    ["60"] = "060-Al-Mumtahanah.mp3",
-    ["61"] = "061-As-Saff.mp3",
-    ["62"] = "062-Al-Jumu-ah.mp3",
-    ["63"] = "063-Al-Munafiqun.mp3",
-    ["64"] = "064-At-Taghabun.mp3",
-    ["65"] = "065-At-Talaq.mp3",
-    ["66"] = "066-At-Tahrim.mp3",
-    ["67"] = "067-Al-Mulk.mp3",
-    ["68"] = "068-Al-Qalam.mp3",
-    ["69"] = "069-Al-Haqqah.mp3",
-    ["70"] = "070-Al-Maarij.mp3",
-    ["71"] = "071-Nuh.mp3",
-    ["72"] = "072-Al-Jinn.mp3",
-    ["73"] = "073-Al-Muzzammil.mp3",
-    ["74"] = "074-Al-Muddaththir.mp3",
-    ["75"] = "075-Al-Qiyamah.mp3",
-    ["76"] = "076-Al-Insan.mp3",
-    ["77"] = "077-Al-Mursalat.mp3",
-    ["78"] = "078-Al-Naba.mp3",
-    ["79"] = "079-Al-Naaze.mp3",
-    ["80"] = "080-Abasa.mp3",
-    ["81"] = "081-Al-Takweer.mp3",
-    ["82"] = "082-Al-Infitaar.mp3",
-    ["83"] = "083-Al-Mutaffifeen.mp3",
-    ["84"] = "084-Al-Inshiqaaq.mp3",
-    ["85"] = "085-Al-Burooj.mp3",
-    ["86"] = "086-Al-Taareq.mp3",
-    ["87"] = "087-Al-A-alaa.mp3",
-    ["88"] = "088-Al-Ghaasheyah.mp3",
-    ["89"] = "089-Al-Fajr.mp3",
-    ["90"] = "090-Al-Balad.mp3",
-    ["91"] = "091-Al-Shams.mp3",
-    ["92"] = "092-Al-Layl.mp3",
-    ["93"] = "093-Al-Duhaa.mp3",
-    ["94"] = "094-Al-insirah.mp3",
-    ["95"] = "095-Al-Teen.mp3",
-    ["96"] = "096-Al-Alaq.mp3",
-    ["97"] = "097-Al-Qadr.mp3",
-    ["98"] = "098-Al-Bayyinah.mp3",
-    ["99"] = "099-Al-Zilzalaha.mp3",
-    ["100"] = "100-Al-Aadeyat.mp3",
-    ["101"] = "101-Al-Qaare-ah.mp3",
-    ["102"] = "102-Al-Takasur.mp3",
-    ["103"] = "103-Al-Asr.mp3",
-    ["104"] = "104-Al-Humazah.mp3",
-    ["105"] = "105-Al-Feel.mp3",
-    ["106"] = "106-Al-Quraishinsirah.mp3",
-    ["107"] = "107-Al-Maa-oon.mp3",
-    ["108"] = "108-Al-Kausar.mp3",
-    ["109"] = "109-Al-Kaaferoon.mp3",
-    ["110"] = "110-Al-Nasr.mp3",
-    ["111"] = "111-Al-Masad.mp3",
-    ["112"] = "112-Al-Ikhlaas.mp3",
-    ["113"] = "113-Al-Falaq.mp3",
-    ["114"] = "114-Al-Naas.mp3",
-  }
+["1"] = "001-Al-Fatiha.mp3",
+["2"] = "002-Al-Baqarah2.mp3",
+["3"] = "003-Al-imran.mp3",
+["4"] = "004-An-Nisa.mp3",
+["5"] = "005-Al-Maidah.mp3",
+["6"] = "006-Enam.mp3",
+["7"] = "007-Al-Araf.mp3",
+["8"] = "008-Al-Anfal.mp3",
+["9"] = "009.At-Taubah.mp3",
+["10"] = "010-Yunus.mp3",
+["11"] = "011-Hud.mp3",
+["12"] = "012-Yusuf.mp3",
+["13"] = "013-Ar-Rad.mp3",
+["14"] = "014-ibrahim.mp3",
+["15"] = "015-Al-Hijr.mp3",
+["16"] = "016-An-Nahl.mp3",
+["17"] = "017-Al-Isra.mp3",
+["18"] = "018-Al-Kahf.mp3",
+["19"] = "019.Maryam.mp3",
+["20"] = "020.Ta-Ha.mp3",
+["21"] = "021-Al-Anbiya.mp3",
+["22"] = "022-Al-Hajj.mp3",
+["23"] = "023-Al-Mu-minun.mp3",
+["24"] = "024-An-Nur.mp3",
+["25"] = "025-Al-Furqan.mp3",
+["26"] = "026-Ash-Shu-ara.mp3",
+["27"] = "027-An-Naml.mp3",
+["28"] = "028-Al-Qasas.mp3",
+["29"] = "029-Al-Ankabut.mp3",
+["30"] = "030-Ar-Rum.mp3",
+["31"] = "031-Luqman.mp3",
+["32"] = "032-As-Sajdah.mp3",
+["33"] = "033-Al-Ahzab.mp3",
+["34"] = "034-Saba..mp3",
+["35"] = "035-Fatir.mp3",
+["36"] = "036-Ya-Sin.mp3",
+["37"] = "037-As-Saffat.mp3",
+["38"] = "038-Sad.mp3",
+["39"] = "039-Az-Zumar.mp3",
+["40"] = "040-Mumin-Ghafir.mp3",
+["41"] = "041-Fussilat.mp3",
+["42"] = "042-Ash-Shura.mp3",
+["43"] = "043-Az-Zukhruf.mp3",
+["44"] = "044-Ad-Dukhan.mp3",
+["45"] = "045-Al-Jathiyah.mp3",
+["46"] = "046-Al-Ahqaf.mp3",
+["47"] = "047-Muhammad.mp3",
+["48"] = "048-Al-Fath.mp3",
+["49"] = "049-Al-Hujurat.mp3",
+["50"] = "050-Qaf.mp3",
+["51"] = "051-Adh-Dhariyat.mp3",
+["52"] = "052-At-Tur.mp3",
+["53"] = "053-An-Najm.mp3",
+["54"] = "054-Al-Qamar.mp3",
+["55"] = "055-Ar-Rahman.mp3",
+["56"] = "056-Al-Waqi-ah.mp3",
+["57"] = "057-Al-Hadid.mp3",
+["58"] = "058-Al-Mujadilah.mp3",
+["59"] = "059-Al-Hashr.mp3",
+["60"] = "060-Al-Mumtahanah.mp3",
+["61"] = "061-As-Saff.mp3",
+["62"] = "062-Al-Jumu-ah.mp3",
+["63"] = "063-Al-Munafiqun.mp3",
+["64"] = "064-At-Taghabun.mp3",
+["65"] = "065-At-Talaq.mp3",
+["66"] = "066-At-Tahrim.mp3",
+["67"] = "067-Al-Mulk.mp3",
+["68"] = "068-Al-Qalam.mp3",
+["69"] = "069-Al-Haqqah.mp3",
+["70"] = "070-Al-Maarij.mp3",
+["71"] = "071-Nuh.mp3",
+["72"] = "072-Al-Jinn.mp3",
+["73"] = "073-Al-Muzzammil.mp3",
+["74"] = "074-Al-Muddaththir.mp3",
+["75"] = "075-Al-Qiyamah.mp3",
+["76"] = "076-Al-Insan.mp3",
+["77"] = "077-Al-Mursalat.mp3",
+["78"] = "078-Al-Naba.mp3",
+["79"] = "079-Al-Naaze.mp3",
+["80"] = "080-Abasa.mp3",
+["81"] = "081-Al-Takweer.mp3",
+["82"] = "082-Al-Infitaar.mp3",
+["83"] = "083-Al-Mutaffifeen.mp3",
+["84"] = "084-Al-Inshiqaaq.mp3",
+["85"] = "085-Al-Burooj.mp3",
+["86"] = "086-Al-Taareq.mp3",
+["87"] = "087-Al-A-alaa.mp3",
+["88"] = "088-Al-Ghaasheyah.mp3",
+["89"] = "089-Al-Fajr.mp3",
+["90"] = "090-Al-Balad.mp3",
+["91"] = "091-Al-Shams.mp3",
+["92"] = "092-Al-Layl.mp3",
+["93"] = "093-Al-Duhaa.mp3",
+["94"] = "094-Al-insirah.mp3",
+["95"] = "095-Al-Teen.mp3",
+["96"] = "096-Al-Alaq.mp3",
+["97"] = "097-Al-Qadr.mp3",
+["98"] = "098-Al-Bayyinah.mp3",
+["99"] = "099-Al-Zilzalaha.mp3",
+["100"] = "100-Al-Aadeyat.mp3",
+["101"] = "101-Al-Qaare-ah.mp3",
+["102"] = "102-Al-Takasur.mp3",
+["103"] = "103-Al-Asr.mp3",
+["104"] = "104-Al-Humazah.mp3",
+["105"] = "105-Al-Feel.mp3",
+["106"] = "106-Al-Quraishinsirah.mp3",
+["107"] = "107-Al-Maa-oon.mp3",
+["108"] = "108-Al-Kausar.mp3",
+["109"] = "109-Al-Kaaferoon.mp3",
+["110"] = "110-Al-Nasr.mp3",
+["111"] = "111-Al-Masad.mp3",
+["112"] = "112-Al-Ikhlaas.mp3",
+["113"] = "113-Al-Falaq.mp3",
+["114"] = "114-Al-Naas.mp3",
+}
 V25.items["BN"] = "AlQuranWithBengaliBanglaTranslation-ReciterMisharyRashidAl-Afasy"
 V25.files["BN"] = {
-    ["1"] = "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3",
-    ["2"] = "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
-    ["3"] = "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3",
-    ["4"] = "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
-    ["5"] = "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3",
-    ["6"] = "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
-    ["7"] = "007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3",
-    ["8"] = "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
-    ["9"] = "009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3",
-    ["10"] = "010 - Yunus ( Jonah ) - سورة يونس.mp3",
-    ["11"] = "011 - Hud - سورة هود.mp3",
-    ["12"] = "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
-    ["13"] = "013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3",
-    ["14"] = "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
-    ["15"] = "015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3",
-    ["16"] = "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
-    ["17"] = "017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3",
-    ["18"] = "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
-    ["19"] = "019 - Maryam ( Mary ) - سورة مريم.mp3",
-    ["20"] = "020 - Taha - سورة طه.mp3",
-    ["21"] = "021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3",
-    ["22"] = "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
-    ["23"] = "023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3",
-    ["24"] = "024 - An-Noor ( The Light ) - سورة النور.mp3",
-    ["25"] = "025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3",
-    ["26"] = "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
-    ["27"] = "027 - An-Naml (The Ants ) - سورة النمل.mp3",
-    ["28"] = "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
-    ["29"] = "029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3",
-    ["30"] = "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
-    ["31"] = "031 - Luqman - سورة لقمان.mp3",
-    ["32"] = "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
-    ["33"] = "033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3",
-    ["34"] = "034 - Saba ( Sheba ) - سورة سبأ.mp3",
-    ["35"] = "035 - Fatir ( The Orignator ) - سورة فاطر.mp3",
-    ["36"] = "036 - Ya-seen - سورة يس.mp3",
-    ["37"] = "037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3",
-    ["38"] = "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
-    ["39"] = "039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3",
-    ["40"] = "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
-    ["41"] = "041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3",
-    ["42"] = "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
-    ["43"] = "043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3",
-    ["44"] = "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
-    ["45"] = "045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3",
-    ["46"] = "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
-    ["47"] = "047 - Muhammad - سورة محمد.mp3",
-    ["48"] = "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
-    ["49"] = "049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3",
-    ["50"] = "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
-    ["51"] = "051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3",
-    ["52"] = "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
-    ["53"] = "053 - An-Najm ( The Star ) - سورة النجم.mp3",
-    ["54"] = "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
-    ["55"] = "055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3",
-    ["56"] = "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
-    ["57"] = "057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3",
-    ["58"] = "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
-    ["59"] = "059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3",
-    ["60"] = "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
-    ["61"] = "061 - As-Saff ( The Row ) - سورة الصف.mp3",
-    ["62"] = "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
-    ["63"] = "063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3",
-    ["64"] = "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
-    ["65"] = "065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3",
-    ["66"] = "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
-    ["67"] = "067 - Al-Mulk ( Dominion ) - سورة الملك.mp3",
-    ["68"] = "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
-    ["69"] = "069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3",
-    ["70"] = "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
-    ["71"] = "071 - Nooh - سورة نوح.mp3",
-    ["72"] = "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
-    ["73"] = "073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3",
-    ["74"] = "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
-    ["75"] = "075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3",
-    ["76"] = "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
-    ["77"] = "077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3",
-    ["78"] = "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
-    ["79"] = "079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3",
-    ["80"] = "080 - Abasa ( He frowned ) - سورة عبس.mp3",
-    ["81"] = "081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3",
-    ["82"] = "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
-    ["83"] = "083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3",
-    ["84"] = "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
-    ["85"] = "085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3",
-    ["86"] = "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
-    ["87"] = "087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3",
-    ["88"] = "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
-    ["89"] = "089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3",
-    ["90"] = "090 - Al-Balad ( The City ) - سورة البلد.mp3",
-    ["91"] = "091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3",
-    ["92"] = "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
-    ["93"] = "093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3",
-    ["94"] = "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
-    ["95"] = "095 - At-Tin ( The Fig ) - سورة التين.mp3",
-    ["96"] = "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
-    ["97"] = "097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3",
-    ["98"] = "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
-    ["99"] = "099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3",
-    ["100"] = "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
-    ["101"] = "101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3",
-    ["102"] = "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
-    ["103"] = "103 - Al-Asr ( The Time ) - سورة العصر.mp3",
-    ["104"] = "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
-    ["105"] = "105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3",
-    ["106"] = "106 - Quraish - سورة قريش.mp3",
-    ["107"] = "107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3",
-    ["108"] = "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
-    ["109"] = "109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3",
-    ["110"] = "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
-    ["111"] = "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3",
-    ["112"] = "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
-    ["113"] = "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3",
-    ["114"] = "114 - An-Nas ( Mankind ) - سورة الناس.mp3",
-  }
+["1"] = "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3",
+["2"] = "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
+["3"] = "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3",
+["4"] = "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
+["5"] = "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3",
+["6"] = "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
+["7"] = "007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3",
+["8"] = "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
+["9"] = "009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3",
+["10"] = "010 - Yunus ( Jonah ) - سورة يونس.mp3",
+["11"] = "011 - Hud - سورة هود.mp3",
+["12"] = "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
+["13"] = "013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3",
+["14"] = "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
+["15"] = "015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3",
+["16"] = "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
+["17"] = "017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3",
+["18"] = "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
+["19"] = "019 - Maryam ( Mary ) - سورة مريم.mp3",
+["20"] = "020 - Taha - سورة طه.mp3",
+["21"] = "021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3",
+["22"] = "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
+["23"] = "023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3",
+["24"] = "024 - An-Noor ( The Light ) - سورة النور.mp3",
+["25"] = "025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3",
+["26"] = "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
+["27"] = "027 - An-Naml (The Ants ) - سورة النمل.mp3",
+["28"] = "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
+["29"] = "029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3",
+["30"] = "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
+["31"] = "031 - Luqman - سورة لقمان.mp3",
+["32"] = "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
+["33"] = "033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3",
+["34"] = "034 - Saba ( Sheba ) - سورة سبأ.mp3",
+["35"] = "035 - Fatir ( The Orignator ) - سورة فاطر.mp3",
+["36"] = "036 - Ya-seen - سورة يس.mp3",
+["37"] = "037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3",
+["38"] = "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
+["39"] = "039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3",
+["40"] = "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
+["41"] = "041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3",
+["42"] = "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
+["43"] = "043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3",
+["44"] = "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
+["45"] = "045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3",
+["46"] = "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
+["47"] = "047 - Muhammad - سورة محمد.mp3",
+["48"] = "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
+["49"] = "049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3",
+["50"] = "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
+["51"] = "051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3",
+["52"] = "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
+["53"] = "053 - An-Najm ( The Star ) - سورة النجم.mp3",
+["54"] = "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
+["55"] = "055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3",
+["56"] = "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
+["57"] = "057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3",
+["58"] = "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
+["59"] = "059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3",
+["60"] = "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
+["61"] = "061 - As-Saff ( The Row ) - سورة الصف.mp3",
+["62"] = "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
+["63"] = "063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3",
+["64"] = "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
+["65"] = "065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3",
+["66"] = "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
+["67"] = "067 - Al-Mulk ( Dominion ) - سورة الملك.mp3",
+["68"] = "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
+["69"] = "069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3",
+["70"] = "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
+["71"] = "071 - Nooh - سورة نوح.mp3",
+["72"] = "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
+["73"] = "073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3",
+["74"] = "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
+["75"] = "075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3",
+["76"] = "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
+["77"] = "077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3",
+["78"] = "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
+["79"] = "079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3",
+["80"] = "080 - Abasa ( He frowned ) - سورة عبس.mp3",
+["81"] = "081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3",
+["82"] = "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
+["83"] = "083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3",
+["84"] = "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
+["85"] = "085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3",
+["86"] = "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
+["87"] = "087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3",
+["88"] = "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
+["89"] = "089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3",
+["90"] = "090 - Al-Balad ( The City ) - سورة البلد.mp3",
+["91"] = "091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3",
+["92"] = "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
+["93"] = "093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3",
+["94"] = "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
+["95"] = "095 - At-Tin ( The Fig ) - سورة التين.mp3",
+["96"] = "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
+["97"] = "097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3",
+["98"] = "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
+["99"] = "099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3",
+["100"] = "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
+["101"] = "101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3",
+["102"] = "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
+["103"] = "103 - Al-Asr ( The Time ) - سورة العصر.mp3",
+["104"] = "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
+["105"] = "105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3",
+["106"] = "106 - Quraish - سورة قريش.mp3",
+["107"] = "107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3",
+["108"] = "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
+["109"] = "109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3",
+["110"] = "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
+["111"] = "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3",
+["112"] = "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
+["113"] = "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3",
+["114"] = "114 - An-Nas ( Mankind ) - سورة الناس.mp3",
+}
 V25.items["FR"] = "QuranMisharyAlAfasyWithFrenchTranslation"
 V25.files["FR"] = {
-    ["1"] = "001.Al-Fatiha.mp3",
-    ["2"] = "002.Al-Baqarah.mp3",
-    ["3"] = "003.Ali-Imran.mp3",
-    ["4"] = "004.An-Nisa.mp3",
-    ["5"] = "005.Al-Maidah.mp3",
-    ["6"] = "006.Al-Anaam.mp3",
-    ["7"] = "007.Al-Araf.mp3",
-    ["8"] = "008.Al-Anfal.mp3",
-    ["9"] = "009.At-Tawbah.mp3",
-    ["10"] = "010.Yunus.mp3",
-    ["11"] = "011.Hud.mp3",
-    ["12"] = "012.Yusuf.mp3",
-    ["13"] = "013.Ar-Raad.mp3",
-    ["14"] = "014.Ibrahim.mp3",
-    ["15"] = "015.Al-Hijr.mp3",
-    ["16"] = "016.An-Nahl.mp3",
-    ["17"] = "017.Al-Isra.mp3",
-    ["18"] = "018.Al-Kahf.mp3",
-    ["19"] = "019.Maryam.mp3",
-    ["20"] = "020.Ta-Ha.mp3",
-    ["21"] = "021.Al-Anbiya.mp3",
-    ["22"] = "022.Al-Hajj.mp3",
-    ["23"] = "023.Al-Muminun.mp3",
-    ["24"] = "024.An-Nur.mp3",
-    ["25"] = "025.Al-Furqan.mp3",
-    ["26"] = "026.As-Shuaraa.mp3",
-    ["27"] = "027.An-Naml.mp3",
-    ["28"] = "028.Al-Qasas.mp3",
-    ["29"] = "029.Al-Ankabut.mp3",
-    ["30"] = "030.Ar-Rum.mp3",
-    ["31"] = "031.Luqman.mp3",
-    ["32"] = "032.As-Sajda.mp3",
-    ["33"] = "033.Al-Ahzab.mp3",
-    ["34"] = "034.Saba.mp3",
-    ["35"] = "035.Fatir.mp3",
-    ["36"] = "036.Ya-Sin.mp3",
-    ["37"] = "037.As-Saffat.mp3",
-    ["38"] = "038.Sad.mp3",
-    ["39"] = "039.Az-Zumar.mp3",
-    ["40"] = "040.Gafir.mp3",
-    ["41"] = "041.Fussilat.mp3",
-    ["42"] = "042.Achoura.mp3",
-    ["43"] = "043.Az-Zukhruf.mp3",
-    ["44"] = "044.Ad-Dukhan.mp3",
-    ["45"] = "045.Al-Jathya.mp3",
-    ["46"] = "046.Al-Ahqaf.mp3",
-    ["47"] = "047.Muhammad.mp3",
-    ["48"] = "048.Al-Fath.mp3",
-    ["49"] = "049.Al-Hujurat.mp3",
-    ["50"] = "050.Qaf.mp3",
-    ["51"] = "051.Ad-Dariyat.mp3",
-    ["52"] = "052.At-Tur.mp3",
-    ["53"] = "053.An-Najm.mp3",
-    ["54"] = "054.Al-Qamar.mp3",
-    ["55"] = "055.Ar-Rahman.mp3",
-    ["56"] = "056.Al-Waqia.mp3",
-    ["57"] = "057.Al-Hadid.mp3",
-    ["58"] = "058.Al-Mujadalah.mp3",
-    ["59"] = "059.Al-Hashr.mp3",
-    ["60"] = "060.Al-Mumtahanah.mp3",
-    ["61"] = "061.As-Saff.mp3",
-    ["62"] = "062.Al-Jumua.mp3",
-    ["63"] = "063.Al-Munafiqun.mp3",
-    ["64"] = "064.At-Tagabun.mp3",
-    ["65"] = "065.At-Talaq.mp3",
-    ["66"] = "066.At-Tahrim.mp3",
-    ["67"] = "067.Al-Mulk.mp3",
-    ["68"] = "068.Al-Qalam.mp3",
-    ["69"] = "069.Al-Haqqah.mp3",
-    ["70"] = "070.Al-Maarij.mp3",
-    ["71"] = "071.Nuh.mp3",
-    ["72"] = "072.Al-Jinn.mp3",
-    ["73"] = "073.Al-Muzzamil.mp3",
-    ["74"] = "074.Al-Muddattir.mp3",
-    ["75"] = "075.Al-Qiyamah.mp3",
-    ["76"] = "076.Al-Insan.mp3",
-    ["77"] = "077.Al-Mursalat.mp3",
-    ["78"] = "078.An-Naba.mp3",
-    ["79"] = "079.An-Naziat.mp3",
-    ["80"] = "080.Abasa.mp3",
-    ["81"] = "081.At-Takwir.mp3",
-    ["82"] = "082.Al-Infitar.mp3",
-    ["83"] = "083.Al-Mutaffifun.mp3",
-    ["84"] = "084.Al-Insiqaq.mp3",
-    ["85"] = "085.Al-Buruj.mp3",
-    ["86"] = "086.At-Tariq.mp3",
-    ["87"] = "087.Al-Ala.mp3",
-    ["88"] = "088.Al-Gashiyah.mp3",
-    ["89"] = "089.Al-Fajr.mp3",
-    ["90"] = "090.Al-Balad.mp3",
-    ["91"] = "091.Ach-Chams.mp3",
-    ["92"] = "092.Al-Layl.mp3",
-    ["93"] = "093.Ad-Duha.mp3",
-    ["94"] = "094.Al-Inshirah.mp3",
-    ["95"] = "095.At-Tin.mp3",
-    ["96"] = "096.Al-Alaq.mp3",
-    ["97"] = "097.Al-Qadr.mp3",
-    ["98"] = "098.Al-Bayyinah.mp3",
-    ["99"] = "099.Az-Zalzalah.mp3",
-    ["100"] = "100.Al-Adiyat.mp3",
-    ["101"] = "101.Al-Qariah.mp3",
-    ["102"] = "102.At-Takatur.mp3",
-    ["103"] = "103.Al-Asr.mp3",
-    ["104"] = "104.Al-Humazah.mp3",
-    ["105"] = "105.Al-Fil.mp3",
-    ["106"] = "106.Qoraish.mp3",
-    ["107"] = "107.Al-Maun.mp3",
-    ["108"] = "108.Al-Kawtar.mp3",
-    ["109"] = "109.Al-Kafirun.mp3",
-    ["110"] = "110.An-Nasr.mp3",
-    ["111"] = "111.Al-Masad.mp3",
-    ["112"] = "112.Al-Ihlas.mp3",
-    ["113"] = "113.Al-Falaq.mp3",
-    ["114"] = "114.An-Nas.mp3",
-  }
+["1"] = "001.Al-Fatiha.mp3",
+["2"] = "002.Al-Baqarah.mp3",
+["3"] = "003.Ali-Imran.mp3",
+["4"] = "004.An-Nisa.mp3",
+["5"] = "005.Al-Maidah.mp3",
+["6"] = "006.Al-Anaam.mp3",
+["7"] = "007.Al-Araf.mp3",
+["8"] = "008.Al-Anfal.mp3",
+["9"] = "009.At-Tawbah.mp3",
+["10"] = "010.Yunus.mp3",
+["11"] = "011.Hud.mp3",
+["12"] = "012.Yusuf.mp3",
+["13"] = "013.Ar-Raad.mp3",
+["14"] = "014.Ibrahim.mp3",
+["15"] = "015.Al-Hijr.mp3",
+["16"] = "016.An-Nahl.mp3",
+["17"] = "017.Al-Isra.mp3",
+["18"] = "018.Al-Kahf.mp3",
+["19"] = "019.Maryam.mp3",
+["20"] = "020.Ta-Ha.mp3",
+["21"] = "021.Al-Anbiya.mp3",
+["22"] = "022.Al-Hajj.mp3",
+["23"] = "023.Al-Muminun.mp3",
+["24"] = "024.An-Nur.mp3",
+["25"] = "025.Al-Furqan.mp3",
+["26"] = "026.As-Shuaraa.mp3",
+["27"] = "027.An-Naml.mp3",
+["28"] = "028.Al-Qasas.mp3",
+["29"] = "029.Al-Ankabut.mp3",
+["30"] = "030.Ar-Rum.mp3",
+["31"] = "031.Luqman.mp3",
+["32"] = "032.As-Sajda.mp3",
+["33"] = "033.Al-Ahzab.mp3",
+["34"] = "034.Saba.mp3",
+["35"] = "035.Fatir.mp3",
+["36"] = "036.Ya-Sin.mp3",
+["37"] = "037.As-Saffat.mp3",
+["38"] = "038.Sad.mp3",
+["39"] = "039.Az-Zumar.mp3",
+["40"] = "040.Gafir.mp3",
+["41"] = "041.Fussilat.mp3",
+["42"] = "042.Achoura.mp3",
+["43"] = "043.Az-Zukhruf.mp3",
+["44"] = "044.Ad-Dukhan.mp3",
+["45"] = "045.Al-Jathya.mp3",
+["46"] = "046.Al-Ahqaf.mp3",
+["47"] = "047.Muhammad.mp3",
+["48"] = "048.Al-Fath.mp3",
+["49"] = "049.Al-Hujurat.mp3",
+["50"] = "050.Qaf.mp3",
+["51"] = "051.Ad-Dariyat.mp3",
+["52"] = "052.At-Tur.mp3",
+["53"] = "053.An-Najm.mp3",
+["54"] = "054.Al-Qamar.mp3",
+["55"] = "055.Ar-Rahman.mp3",
+["56"] = "056.Al-Waqia.mp3",
+["57"] = "057.Al-Hadid.mp3",
+["58"] = "058.Al-Mujadalah.mp3",
+["59"] = "059.Al-Hashr.mp3",
+["60"] = "060.Al-Mumtahanah.mp3",
+["61"] = "061.As-Saff.mp3",
+["62"] = "062.Al-Jumua.mp3",
+["63"] = "063.Al-Munafiqun.mp3",
+["64"] = "064.At-Tagabun.mp3",
+["65"] = "065.At-Talaq.mp3",
+["66"] = "066.At-Tahrim.mp3",
+["67"] = "067.Al-Mulk.mp3",
+["68"] = "068.Al-Qalam.mp3",
+["69"] = "069.Al-Haqqah.mp3",
+["70"] = "070.Al-Maarij.mp3",
+["71"] = "071.Nuh.mp3",
+["72"] = "072.Al-Jinn.mp3",
+["73"] = "073.Al-Muzzamil.mp3",
+["74"] = "074.Al-Muddattir.mp3",
+["75"] = "075.Al-Qiyamah.mp3",
+["76"] = "076.Al-Insan.mp3",
+["77"] = "077.Al-Mursalat.mp3",
+["78"] = "078.An-Naba.mp3",
+["79"] = "079.An-Naziat.mp3",
+["80"] = "080.Abasa.mp3",
+["81"] = "081.At-Takwir.mp3",
+["82"] = "082.Al-Infitar.mp3",
+["83"] = "083.Al-Mutaffifun.mp3",
+["84"] = "084.Al-Insiqaq.mp3",
+["85"] = "085.Al-Buruj.mp3",
+["86"] = "086.At-Tariq.mp3",
+["87"] = "087.Al-Ala.mp3",
+["88"] = "088.Al-Gashiyah.mp3",
+["89"] = "089.Al-Fajr.mp3",
+["90"] = "090.Al-Balad.mp3",
+["91"] = "091.Ach-Chams.mp3",
+["92"] = "092.Al-Layl.mp3",
+["93"] = "093.Ad-Duha.mp3",
+["94"] = "094.Al-Inshirah.mp3",
+["95"] = "095.At-Tin.mp3",
+["96"] = "096.Al-Alaq.mp3",
+["97"] = "097.Al-Qadr.mp3",
+["98"] = "098.Al-Bayyinah.mp3",
+["99"] = "099.Az-Zalzalah.mp3",
+["100"] = "100.Al-Adiyat.mp3",
+["101"] = "101.Al-Qariah.mp3",
+["102"] = "102.At-Takatur.mp3",
+["103"] = "103.Al-Asr.mp3",
+["104"] = "104.Al-Humazah.mp3",
+["105"] = "105.Al-Fil.mp3",
+["106"] = "106.Qoraish.mp3",
+["107"] = "107.Al-Maun.mp3",
+["108"] = "108.Al-Kawtar.mp3",
+["109"] = "109.Al-Kafirun.mp3",
+["110"] = "110.An-Nasr.mp3",
+["111"] = "111.Al-Masad.mp3",
+["112"] = "112.Al-Ihlas.mp3",
+["113"] = "113.Al-Falaq.mp3",
+["114"] = "114.An-Nas.mp3",
+}
 V25.items["SD"] = "Al-quran-with-sindhi-translation------high-quality-audio-mp3"
 V25.files["SD"] = {
-    ["1"] = "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3",
-    ["2"] = "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
-    ["3"] = "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3",
-    ["4"] = "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
-    ["5"] = "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3",
-    ["6"] = "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
-    ["7"] = "007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3",
-    ["8"] = "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
-    ["9"] = "009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3",
-    ["10"] = "010 - Yunus ( Jonah ) - سورة يونس.mp3",
-    ["11"] = "011 - Hud - سورة هود.mp3",
-    ["12"] = "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
-    ["13"] = "013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3",
-    ["14"] = "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
-    ["15"] = "015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3",
-    ["16"] = "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
-    ["17"] = "017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3",
-    ["18"] = "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
-    ["19"] = "019 - Maryam ( Mary ) - سورة مريم.mp3",
-    ["20"] = "020 - Taha - سورة طه.mp3",
-    ["21"] = "021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3",
-    ["22"] = "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
-    ["23"] = "023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3",
-    ["24"] = "024 - An-Noor ( The Light ) - سورة النور.mp3",
-    ["25"] = "025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3",
-    ["26"] = "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
-    ["27"] = "027 - An-Naml (The Ants ) - سورة النمل.mp3",
-    ["28"] = "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
-    ["29"] = "029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3",
-    ["30"] = "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
-    ["31"] = "031 - Luqman - سورة لقمان.mp3",
-    ["32"] = "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
-    ["33"] = "033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3",
-    ["34"] = "034 - Saba ( Sheba ) - سورة سبأ.mp3",
-    ["35"] = "035 - Fatir ( The Orignator ) - سورة فاطر.mp3",
-    ["36"] = "036 - Ya-seen - سورة يس.mp3",
-    ["37"] = "037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3",
-    ["38"] = "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
-    ["39"] = "039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3",
-    ["40"] = "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
-    ["41"] = "041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3",
-    ["42"] = "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
-    ["43"] = "043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3",
-    ["44"] = "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
-    ["45"] = "045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3",
-    ["46"] = "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
-    ["47"] = "047 - Muhammad - سورة محمد.mp3",
-    ["48"] = "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
-    ["49"] = "049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3",
-    ["50"] = "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
-    ["51"] = "051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3",
-    ["52"] = "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
-    ["53"] = "053 - An-Najm ( The Star ) - سورة النجم.mp3",
-    ["54"] = "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
-    ["55"] = "055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3",
-    ["56"] = "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
-    ["57"] = "057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3",
-    ["58"] = "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
-    ["59"] = "059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3",
-    ["60"] = "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
-    ["61"] = "061 - As-Saff ( The Row ) - سورة الصف.mp3",
-    ["62"] = "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
-    ["63"] = "063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3",
-    ["64"] = "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
-    ["65"] = "065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3",
-    ["66"] = "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
-    ["67"] = "067 - Al-Mulk ( Dominion ) - سورة الملك.mp3",
-    ["68"] = "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
-    ["69"] = "069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3",
-    ["70"] = "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
-    ["71"] = "071 - Nooh - سورة نوح.mp3",
-    ["72"] = "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
-    ["73"] = "073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3",
-    ["74"] = "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
-    ["75"] = "075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3",
-    ["76"] = "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
-    ["77"] = "077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3",
-    ["78"] = "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
-    ["79"] = "079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3",
-    ["80"] = "080 - Abasa ( He frowned ) - سورة عبس.mp3",
-    ["81"] = "081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3",
-    ["82"] = "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
-    ["83"] = "083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3",
-    ["84"] = "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
-    ["85"] = "085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3",
-    ["86"] = "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
-    ["87"] = "087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3",
-    ["88"] = "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
-    ["89"] = "089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3",
-    ["90"] = "090 - Al-Balad ( The City ) - سورة البلد.mp3",
-    ["91"] = "091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3",
-    ["92"] = "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
-    ["93"] = "093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3",
-    ["94"] = "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
-    ["95"] = "095 - At-Tin ( The Fig ) - سورة التين.mp3",
-    ["96"] = "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
-    ["97"] = "097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3",
-    ["98"] = "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
-    ["99"] = "099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3",
-    ["100"] = "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
-    ["101"] = "101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3",
-    ["102"] = "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
-    ["103"] = "103 - Al-Asr ( The Time ) - سورة العصر.mp3",
-    ["104"] = "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
-    ["105"] = "105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3",
-    ["106"] = "106 - Quraish - سورة قريش.mp3",
-    ["107"] = "107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3",
-    ["108"] = "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
-    ["109"] = "109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3",
-    ["110"] = "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
-    ["111"] = "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3",
-    ["112"] = "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
-    ["113"] = "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3",
-    ["114"] = "114 - An-Nas ( Mankind ) - سورة الناس.mp3",
-  }
+["1"] = "001 - Al-Fatihah ( The Opening ) - سورة الفاتحة.mp3",
+["2"] = "002 - Al-Baqarah ( The Cow ) - سورة البقرة.mp3",
+["3"] = "003 - Al-Imran ( The Family of Imran ) - سورة آل عمران.mp3",
+["4"] = "004 - An-Nisa ( The Women ) - سورة النساء.mp3",
+["5"] = "005 - Al-Maidah ( The Table spread with Food ) - سورة المائدة.mp3",
+["6"] = "006 - Al-An'am ( The Cattle ) - سورة الأنعام.mp3",
+["7"] = "007 - Al-A'raf (The Heights ) - سورة الأعراف.mp3",
+["8"] = "008 - Al-Anfal ( The Spoils of War ) - سورة الأنفال.mp3",
+["9"] = "009 - At-Taubah ( The Repentance ) - سورة التوبة.mp3",
+["10"] = "010 - Yunus ( Jonah ) - سورة يونس.mp3",
+["11"] = "011 - Hud - سورة هود.mp3",
+["12"] = "012 - Yusuf (Joseph ) - سورة يوسف.mp3",
+["13"] = "013 - Ar-Ra'd ( The Thunder ) - سورة الرعد.mp3",
+["14"] = "014 - Ibrahim ( Abraham ) - سورة إبراهيم.mp3",
+["15"] = "015 - Al-Hijr ( The Rocky Tract ) - سورة الحجر.mp3",
+["16"] = "016 - An-Nahl ( The Bees ) - سورة النحل.mp3",
+["17"] = "017 - Al-Isra ( The Night Journey ) - سورة الإسراء.mp3",
+["18"] = "018 - Al-Kahf ( The Cave ) - سورة الكهف.mp3",
+["19"] = "019 - Maryam ( Mary ) - سورة مريم.mp3",
+["20"] = "020 - Taha - سورة طه.mp3",
+["21"] = "021 - Al-Anbiya ( The Prophets ) - سورة الأنبياء.mp3",
+["22"] = "022 - Al-Hajj ( The Pilgrimage ) - سورة الحج.mp3",
+["23"] = "023 - Al-Mu'minoon ( The Believers ) - سورة المؤمنون.mp3",
+["24"] = "024 - An-Noor ( The Light ) - سورة النور.mp3",
+["25"] = "025 - Al-Furqan (The Criterion ) - سورة الفرقان.mp3",
+["26"] = "026 - Ash-Shuara ( The Poets ) - سورة الشعراء.mp3",
+["27"] = "027 - An-Naml (The Ants ) - سورة النمل.mp3",
+["28"] = "028 - Al-Qasas ( The Stories ) - سورة القصص.mp3",
+["29"] = "029 - Al-Ankaboot ( The Spider ) - سورة العنكبوت.mp3",
+["30"] = "030 - Ar-Room ( The Romans ) - سورة الروم.mp3",
+["31"] = "031 - Luqman - سورة لقمان.mp3",
+["32"] = "032 - As-Sajdah ( The Prostration ) - سورة السجدة.mp3",
+["33"] = "033 - Al-Ahzab ( The Combined Forces ) - سورة الأحزاب.mp3",
+["34"] = "034 - Saba ( Sheba ) - سورة سبأ.mp3",
+["35"] = "035 - Fatir ( The Orignator ) - سورة فاطر.mp3",
+["36"] = "036 - Ya-seen - سورة يس.mp3",
+["37"] = "037 - As-Saaffat ( Those Ranges in Ranks ) - سورة الصافات.mp3",
+["38"] = "038 - Sad ( The Letter Sad ) - سورة ص.mp3",
+["39"] = "039 - Az-Zumar ( The Groups ) - سورة الزمر.mp3",
+["40"] = "040 - Ghafir ( The Forgiver God ) - سورة غافر.mp3",
+["41"] = "041 - Fussilat ( Explained in Detail ) - سورة فصلت.mp3",
+["42"] = "042 - Ash-Shura (Consultation ) - سورة الشورى.mp3",
+["43"] = "043 - Az-Zukhruf ( The Gold Adornment ) - سورة الزخرف.mp3",
+["44"] = "044 - Ad-Dukhan ( The Smoke ) - سورة الدخان.mp3",
+["45"] = "045 - Al-Jathiya ( Crouching ) - سورة الجاثية.mp3",
+["46"] = "046 - Al-Ahqaf ( The Curved Sand-hills ) - سورة الأحقاف.mp3",
+["47"] = "047 - Muhammad - سورة محمد.mp3",
+["48"] = "048 - Al-Fath ( The Victory ) - سورة الفتح.mp3",
+["49"] = "049 - Al-Hujurat ( The Dwellings ) - سورة الحجرات.mp3",
+["50"] = "050 - Qaf ( The Letter Qaf ) - سورة ق.mp3",
+["51"] = "051 - Adh-Dhariyat ( The Wind that Scatter ) - سورة الذاريات.mp3",
+["52"] = "052 - At-Tur ( The Mount ) - سورة الطور.mp3",
+["53"] = "053 - An-Najm ( The Star ) - سورة النجم.mp3",
+["54"] = "054 - Al-Qamar ( The Moon ) - سورة القمر.mp3",
+["55"] = "055 - Ar-Rahman ( The Most Graciouse ) - سورة الرحمن.mp3",
+["56"] = "056 - Al-Waqi'ah ( The Event ) - سورة الواقعة.mp3",
+["57"] = "057 - Al-Hadid ( The Iron ) - سورة الحديد.mp3",
+["58"] = "058 - Al-Mujadilah ( She That Disputeth ) - سورة المجادلة.mp3",
+["59"] = "059 - Al-Hashr ( The Gathering ) - سورة الحشر.mp3",
+["60"] = "060 - Al-Mumtahanah ( The Woman to be examined ) - سورة الممتحنة.mp3",
+["61"] = "061 - As-Saff ( The Row ) - سورة الصف.mp3",
+["62"] = "062 - Al-Jumu'ah ( Friday ) - سورة الجمعة.mp3",
+["63"] = "063 - Al-Munafiqoon ( The Hypocrites ) - سورة المنافقون.mp3",
+["64"] = "064 - At-Taghabun ( Mutual Loss & Gain ) - سورة التغابن.mp3",
+["65"] = "065 - At-Talaq ( The Divorce ) - سورة الطلاق.mp3",
+["66"] = "066 - At-Tahrim ( The Prohibition ) - سورة التحريم.mp3",
+["67"] = "067 - Al-Mulk ( Dominion ) - سورة الملك.mp3",
+["68"] = "068 - Al-Qalam ( The Pen ) - سورة القلم.mp3",
+["69"] = "069 - Al-Haaqqah ( The Inevitable ) - سورة الحاقة.mp3",
+["70"] = "070 - Al-Ma'arij (The Ways of Ascent ) - سورة المعارج.mp3",
+["71"] = "071 - Nooh - سورة نوح.mp3",
+["72"] = "072 - Al-Jinn ( The Jinn ) - سورة الجن.mp3",
+["73"] = "073 - Al-Muzzammil (The One wrapped in Garments) - سورة المزمل.mp3",
+["74"] = "074 - Al-Muddaththir ( The One Enveloped ) - سورة المدثر.mp3",
+["75"] = "075 - Al-Qiyamah ( The Resurrection ) - سورة القيامة.mp3",
+["76"] = "076 - Al-Insan ( Man ) - سورة الإنسان.mp3",
+["77"] = "077 - Al-Mursalat ( Those sent forth ) - سورة المرسلات.mp3",
+["78"] = "078 - An-Naba' ( The Great News ) - سورة النبأ.mp3",
+["79"] = "079 - An-Nazi'at ( Those who Pull Out ) - سورة النازعات.mp3",
+["80"] = "080 - Abasa ( He frowned ) - سورة عبس.mp3",
+["81"] = "081 - At-Takwir ( The Overthrowing ) - سورة التكوير.mp3",
+["82"] = "082 - Al-Infitar ( The Cleaving ) - سورة الانفطار.mp3",
+["83"] = "083 - Al-Mutaffifin (Those Who Deal in Fraud) - سورة المطففين.mp3",
+["84"] = "084 - Al-Inshiqaq (The Splitting Asunder) - سورة الانشقاق.mp3",
+["85"] = "085 - Al-Burooj ( The Big Stars ) - سورة البروج.mp3",
+["86"] = "086 - At-Tariq ( The Night-Comer ) - سورة الطارق.mp3",
+["87"] = "087 - Al-A'la ( The Most High ) - سورة الأعلى.mp3",
+["88"] = "088 - Al-Ghashiya ( The Overwhelming ) - سورة الغاشية.mp3",
+["89"] = "089 - Al-Fajr ( The Dawn ) - سورة الفجر.mp3",
+["90"] = "090 - Al-Balad ( The City ) - سورة البلد.mp3",
+["91"] = "091 - Ash-Shams ( The Sun ) - سورة الشمس.mp3",
+["92"] = "092 - Al-Layl ( The Night ) - سورة الليل.mp3",
+["93"] = "093 - Ad-Dhuha ( The Forenoon ) - سورة الضحى.mp3",
+["94"] = "094 - As-Sharh ( The Opening Forth) - سورة الشرح.mp3",
+["95"] = "095 - At-Tin ( The Fig ) - سورة التين.mp3",
+["96"] = "096 - Al-'alaq ( The Clot ) - سورة العلق.mp3",
+["97"] = "097 - Al-Qadr ( The Night of Decree ) - سورة القدر.mp3",
+["98"] = "098 - Al-Bayyinah ( The Clear Evidence ) - سورة البينة.mp3",
+["99"] = "099 - Az-Zalzalah ( The Earthquake ) - سورة الزلزلة.mp3",
+["100"] = "100 - Al-'adiyat ( Those That Run ) - سورة العاديات.mp3",
+["101"] = "101 - Al-Qari'ah ( The Striking Hour ) - سورة القارعة.mp3",
+["102"] = "102 - At-Takathur ( The piling Up ) - سورة التكاثر.mp3",
+["103"] = "103 - Al-Asr ( The Time ) - سورة العصر.mp3",
+["104"] = "104 - Al-Humazah ( The Slanderer ) - سورة الهمزة.mp3",
+["105"] = "105 - Al-Fil ( The Elephant ) - سورة الفيل.mp3",
+["106"] = "106 - Quraish - سورة قريش.mp3",
+["107"] = "107 - Al-Ma'un ( Small Kindnesses ) - سورة الماعون.mp3",
+["108"] = "108 - Al-Kauthor ( A River in Paradise) - سورة الكوثر.mp3",
+["109"] = "109 - Al-Kafiroon ( The Disbelievers ) - سورة الكافرون.mp3",
+["110"] = "110 - An-Nasr ( The Help ) - سورة النصر.mp3",
+["111"] = "111 - Al-Masad ( The Palm Fibre ) - سورة المسد.mp3",
+["112"] = "112 - Al-Ikhlas ( Sincerity ) - سورة الإخلاص.mp3",
+["113"] = "113 - Al-Falaq ( The Daybreak ) - سورة الفلق.mp3",
+["114"] = "114 - An-Nas ( Mankind ) - سورة الناس.mp3",
+}
 V25.items["PS"] = "AlQuranWithPushtoTranslationMisharyBinRashidAlafasyCD"
 V25.files["PS"] = {
-    ["1"] = "01 Al Fatiha.mp3",
-    ["2"] = "02 Al Baqara.mp3",
-    ["3"] = "03 Ale Imran.mp3",
-    ["4"] = "04 An Nisa.mp3",
-    ["5"] = "05 Al Maeda.mp3",
-    ["6"] = "06 Al Anaam.mp3",
-    ["7"] = "07 Al Aaraf.mp3",
-    ["8"] = "08 Al Anfaal.mp3",
-    ["9"] = "09 Al Tauba.mp3",
-    ["10"] = "10 Younus.mp3",
-    ["11"] = "11 Hood.mp3",
-    ["12"] = "12 Yousuf.mp3",
-    ["13"] = "13 Al Raad.mp3",
-    ["14"] = "14 Ibrahim.mp3",
-    ["15"] = "15 Al Hijr.mp3",
-    ["16"] = "16 Al Nahal.mp3",
-    ["17"] = "17 Al-Isra.mp3",
-    ["18"] = "18 Al Kahf.mp3",
-    ["19"] = "19 Mariyam.mp3",
-    ["20"] = "20 Taha.mp3",
-    ["21"] = "21 Al Ambia.mp3",
-    ["22"] = "22 Al Hajj.mp3",
-    ["23"] = "23 Al Mouminoon.mp3",
-    ["24"] = "24 Al Noor.mp3",
-    ["25"] = "25 Al Furqaan.mp3",
-    ["26"] = "26 Al Shuara.mp3",
-    ["27"] = "27 Al Naml.mp3",
-    ["28"] = "28 Al Qasas.mp3",
-    ["29"] = "29 Al Ankaboot.mp3",
-    ["30"] = "30 Al Room.mp3",
-    ["31"] = "31 Luqman.mp3",
-    ["32"] = "32 Al Sajdah.mp3",
-    ["33"] = "33 Al Ahzab.mp3",
-    ["34"] = "34 Saba.mp3",
-    ["35"] = "35 Faatir.mp3",
-    ["36"] = "36 Yaseen.mp3",
-    ["37"] = "37 Al Safaat.mp3",
-    ["38"] = "38 Suaad.mp3",
-    ["39"] = "39 Al Zumr.mp3",
-    ["40"] = "40 Al-Ghafir.mp3",
-    ["41"] = "41 Fussilat.mp3",
-    ["42"] = "42 Al Shoorah.mp3",
-    ["43"] = "43 Al Zukhraf.mp3",
-    ["44"] = "44 Al Dukhan.mp3",
-    ["45"] = "45 Al Jasiya.mp3",
-    ["46"] = "46 Al Ahqaaf.mp3",
-    ["47"] = "47 Muhammad.mp3",
-    ["48"] = "48 Al Fatha.mp3",
-    ["49"] = "49 Al Hujraat.mp3",
-    ["50"] = "50 Qaaf.mp3",
-    ["51"] = "51 Al Zarriyaat.mp3",
-    ["52"] = "52 Al Toor.mp3",
-    ["53"] = "53 Al Najam.mp3",
-    ["54"] = "54 Al Qamar.mp3",
-    ["55"] = "55 Al Rehman.mp3",
-    ["56"] = "56 Al Waqiya.mp3",
-    ["57"] = "57 Al Hadeed.mp3",
-    ["58"] = "58 Al Mujadlah.mp3",
-    ["59"] = "59 Al Hashar.mp3",
-    ["60"] = "60 Al Mumtinah.mp3",
-    ["61"] = "61 Al Saff.mp3",
-    ["62"] = "62 Al Juma.mp3",
-    ["63"] = "63 Al Munafiqoon.mp3",
-    ["64"] = "64 Al Taghabun.mp3",
-    ["65"] = "65 Al Talaaq.mp3",
-    ["66"] = "66 Al Tahreem.mp3",
-    ["67"] = "67 Al Mulk.mp3",
-    ["68"] = "68 Al Qalam.mp3",
-    ["69"] = "69 Al Haqqah.mp3",
-    ["70"] = "70 Al Muarij.mp3",
-    ["71"] = "71 Nuh.mp3",
-    ["72"] = "72 Al Jinn.mp3",
-    ["73"] = "73 Al Muzzamil.mp3",
-    ["74"] = "74 Al Muddasir.mp3",
-    ["75"] = "75 Al Qiyyamah.mp3",
-    ["76"] = "76 Al-Insan.mp3",
-    ["77"] = "77 Al Mursalat.mp3",
-    ["78"] = "78 Al Naba.mp3",
-    ["79"] = "79 Al Naziaat.mp3",
-    ["80"] = "80 Al Abas.mp3",
-    ["81"] = "81 Al Takwir.mp3",
-    ["82"] = "82 Al Infitar.mp3",
-    ["83"] = "83 Al Mutafafin.mp3",
-    ["84"] = "84 Al Inshiqaq.mp3",
-    ["85"] = "85 Al Buruj.mp3",
-    ["86"] = "86 Al Tariq.mp3",
-    ["87"] = "87 Al Aala.mp3",
-    ["88"] = "88 Al Ghashiyah.mp3",
-    ["89"] = "89 Al Fajar.mp3",
-    ["90"] = "90 Al Balad.mp3",
-    ["91"] = "91 Al Shams.mp3",
-    ["92"] = "92 Al Lail.mp3",
-    ["93"] = "93 Al Duha.mp3",
-    ["94"] = "94 Ash-Sharh.mp3",
-    ["95"] = "95 Al Teen.mp3",
-    ["96"] = "96 Al Alaq.mp3",
-    ["97"] = "97 Al Qadar.mp3",
-    ["98"] = "98 Al Bayyinah.mp3",
-    ["99"] = "99 Al Zilzal.mp3",
-    ["100"] = "100 Al Aadiat.mp3",
-    ["101"] = "101 Al Qariyah.mp3",
-    ["102"] = "102 Al Takasur.mp3",
-    ["103"] = "103 Al Aasar.mp3",
-    ["104"] = "104 Al Humzah.mp3",
-    ["105"] = "105 Al Feel.mp3",
-    ["106"] = "106 Al Quraish.mp3",
-    ["107"] = "107 Al Maoon.mp3",
-    ["108"] = "108 Al Kausar.mp3",
-    ["109"] = "109 Al kafirun.mp3",
-    ["110"] = "110 Al Nasar.mp3",
-    ["111"] = "111 Al Lahab.mp3",
-    ["112"] = "112 Al Ikhlas.mp3",
-    ["113"] = "113 Al Falaq.mp3",
-    ["114"] = "114 Al Naas.mp3",
-  }
+["1"] = "01 Al Fatiha.mp3",
+["2"] = "02 Al Baqara.mp3",
+["3"] = "03 Ale Imran.mp3",
+["4"] = "04 An Nisa.mp3",
+["5"] = "05 Al Maeda.mp3",
+["6"] = "06 Al Anaam.mp3",
+["7"] = "07 Al Aaraf.mp3",
+["8"] = "08 Al Anfaal.mp3",
+["9"] = "09 Al Tauba.mp3",
+["10"] = "10 Younus.mp3",
+["11"] = "11 Hood.mp3",
+["12"] = "12 Yousuf.mp3",
+["13"] = "13 Al Raad.mp3",
+["14"] = "14 Ibrahim.mp3",
+["15"] = "15 Al Hijr.mp3",
+["16"] = "16 Al Nahal.mp3",
+["17"] = "17 Al-Isra.mp3",
+["18"] = "18 Al Kahf.mp3",
+["19"] = "19 Mariyam.mp3",
+["20"] = "20 Taha.mp3",
+["21"] = "21 Al Ambia.mp3",
+["22"] = "22 Al Hajj.mp3",
+["23"] = "23 Al Mouminoon.mp3",
+["24"] = "24 Al Noor.mp3",
+["25"] = "25 Al Furqaan.mp3",
+["26"] = "26 Al Shuara.mp3",
+["27"] = "27 Al Naml.mp3",
+["28"] = "28 Al Qasas.mp3",
+["29"] = "29 Al Ankaboot.mp3",
+["30"] = "30 Al Room.mp3",
+["31"] = "31 Luqman.mp3",
+["32"] = "32 Al Sajdah.mp3",
+["33"] = "33 Al Ahzab.mp3",
+["34"] = "34 Saba.mp3",
+["35"] = "35 Faatir.mp3",
+["36"] = "36 Yaseen.mp3",
+["37"] = "37 Al Safaat.mp3",
+["38"] = "38 Suaad.mp3",
+["39"] = "39 Al Zumr.mp3",
+["40"] = "40 Al-Ghafir.mp3",
+["41"] = "41 Fussilat.mp3",
+["42"] = "42 Al Shoorah.mp3",
+["43"] = "43 Al Zukhraf.mp3",
+["44"] = "44 Al Dukhan.mp3",
+["45"] = "45 Al Jasiya.mp3",
+["46"] = "46 Al Ahqaaf.mp3",
+["47"] = "47 Muhammad.mp3",
+["48"] = "48 Al Fatha.mp3",
+["49"] = "49 Al Hujraat.mp3",
+["50"] = "50 Qaaf.mp3",
+["51"] = "51 Al Zarriyaat.mp3",
+["52"] = "52 Al Toor.mp3",
+["53"] = "53 Al Najam.mp3",
+["54"] = "54 Al Qamar.mp3",
+["55"] = "55 Al Rehman.mp3",
+["56"] = "56 Al Waqiya.mp3",
+["57"] = "57 Al Hadeed.mp3",
+["58"] = "58 Al Mujadlah.mp3",
+["59"] = "59 Al Hashar.mp3",
+["60"] = "60 Al Mumtinah.mp3",
+["61"] = "61 Al Saff.mp3",
+["62"] = "62 Al Juma.mp3",
+["63"] = "63 Al Munafiqoon.mp3",
+["64"] = "64 Al Taghabun.mp3",
+["65"] = "65 Al Talaaq.mp3",
+["66"] = "66 Al Tahreem.mp3",
+["67"] = "67 Al Mulk.mp3",
+["68"] = "68 Al Qalam.mp3",
+["69"] = "69 Al Haqqah.mp3",
+["70"] = "70 Al Muarij.mp3",
+["71"] = "71 Nuh.mp3",
+["72"] = "72 Al Jinn.mp3",
+["73"] = "73 Al Muzzamil.mp3",
+["74"] = "74 Al Muddasir.mp3",
+["75"] = "75 Al Qiyyamah.mp3",
+["76"] = "76 Al-Insan.mp3",
+["77"] = "77 Al Mursalat.mp3",
+["78"] = "78 Al Naba.mp3",
+["79"] = "79 Al Naziaat.mp3",
+["80"] = "80 Al Abas.mp3",
+["81"] = "81 Al Takwir.mp3",
+["82"] = "82 Al Infitar.mp3",
+["83"] = "83 Al Mutafafin.mp3",
+["84"] = "84 Al Inshiqaq.mp3",
+["85"] = "85 Al Buruj.mp3",
+["86"] = "86 Al Tariq.mp3",
+["87"] = "87 Al Aala.mp3",
+["88"] = "88 Al Ghashiyah.mp3",
+["89"] = "89 Al Fajar.mp3",
+["90"] = "90 Al Balad.mp3",
+["91"] = "91 Al Shams.mp3",
+["92"] = "92 Al Lail.mp3",
+["93"] = "93 Al Duha.mp3",
+["94"] = "94 Ash-Sharh.mp3",
+["95"] = "95 Al Teen.mp3",
+["96"] = "96 Al Alaq.mp3",
+["97"] = "97 Al Qadar.mp3",
+["98"] = "98 Al Bayyinah.mp3",
+["99"] = "99 Al Zilzal.mp3",
+["100"] = "100 Al Aadiat.mp3",
+["101"] = "101 Al Qariyah.mp3",
+["102"] = "102 Al Takasur.mp3",
+["103"] = "103 Al Aasar.mp3",
+["104"] = "104 Al Humzah.mp3",
+["105"] = "105 Al Feel.mp3",
+["106"] = "106 Al Quraish.mp3",
+["107"] = "107 Al Maoon.mp3",
+["108"] = "108 Al Kausar.mp3",
+["109"] = "109 Al kafirun.mp3",
+["110"] = "110 Al Nasar.mp3",
+["111"] = "111 Al Lahab.mp3",
+["112"] = "112 Al Ikhlas.mp3",
+["113"] = "113 Al Falaq.mp3",
+["114"] = "114 Al Naas.mp3",
+}
 V25.items["FA"] = "QuranFarsiTranslation"
 V25.files["FA"] = {
-    ["1"] = "001-alFatiha.mp3",
-    ["2"] = "002-alBaqara01.mp3",
-    ["3"] = "003-alImran01.mp3",
-    ["4"] = "004-anNisa01.mp3",
-    ["5"] = "005-alMaeda01.mp3",
-    ["6"] = "006-alAnam01.mp3",
-    ["7"] = "007-alAraf01.mp3",
-    ["8"] = "008-AlAnfal01.mp3",
-    ["9"] = "009-alTawba01.mp3",
-    ["10"] = "010-yunus01.mp3",
-    ["11"] = "011-hud01.mp3",
-    ["12"] = "012-yusuf01.mp3",
-    ["13"] = "013-alRad.mp3",
-    ["14"] = "014-Ibrahim.mp3",
-    ["15"] = "015-alHijr.mp3",
-    ["16"] = "016-alNahal01.mp3",
-    ["17"] = "017-baniIsrail01.mp3",
-    ["18"] = "018-alKahaf01.mp3",
-    ["19"] = "019-Mariyum.mp3",
-    ["20"] = "020-Taha01.mp3",
-    ["21"] = "021-alAnbia01.mp3",
-    ["22"] = "022-alHajj01.mp3",
-    ["23"] = "023-alMouminoon01.mp3",
-    ["24"] = "024-alNoor01.mp3",
-    ["25"] = "025-alFurqan.mp3",
-    ["26"] = "026-alShaura01.mp3",
-    ["27"] = "027-alNamal01.mp3",
-    ["28"] = "028-alQasas.mp3",
-    ["29"] = "029-alAnkaboor01.mp3",
-    ["30"] = "030-alRoom.mp3",
-    ["31"] = "031-LUQMAN.mp3",
-    ["32"] = "032-alSajdha.mp3",
-    ["33"] = "033-alAhzab01.mp3",
-    ["34"] = "034-Saba.mp3",
-    ["35"] = "035-Fatir.mp3",
-    ["36"] = "036-Yaseen.mp3",
-    ["37"] = "037-AsSafaat.mp3",
-    ["38"] = "038-Suaad.mp3",
-    ["39"] = "039-azZumr01.mp3",
-    ["40"] = "040-AlMumin.mp3",
-    ["41"] = "041-hameemAlSajdha.mp3",
-    ["42"] = "042-AlShoorah.mp3",
-    ["43"] = "043-alZukhruf01.mp3",
-    ["44"] = "044-alDukhaan.mp3",
-    ["45"] = "045-alJasiya.mp3",
-    ["46"] = "046-alAhqaf.mp3",
-    ["47"] = "047-MUHAMMAD.mp3",
-    ["48"] = "048-alFatha01.mp3",
-    ["49"] = "049-alHujrat.mp3",
-    ["50"] = "050-QAAF.mp3",
-    ["51"] = "051-azZariyat.mp3",
-    ["52"] = "052-alToor.mp3",
-    ["53"] = "053-alNajm.mp3",
-    ["54"] = "054-alQamar.mp3",
-    ["55"] = "055-alRehman.mp3",
-    ["56"] = "056-alWaqiya.mp3",
-    ["57"] = "057-alHadeed.mp3",
-    ["58"] = "058-alMujaadlah.mp3",
-    ["59"] = "059-alHashr.mp3",
-    ["60"] = "060-alMumtahina.mp3",
-    ["61"] = "061-alSaff.mp3",
-    ["62"] = "062-alJumma.mp3",
-    ["63"] = "063-alMunafoqoon.mp3",
-    ["64"] = "064-alTaghabun.mp3",
-    ["65"] = "065-alTalaq.mp3",
-    ["66"] = "066-alTahreem.mp3",
-    ["67"] = "067-alMulk.mp3",
-    ["68"] = "068-alQalm.mp3",
-    ["69"] = "069-alHaqqah.mp3",
-    ["70"] = "070-alMaurij.mp3",
-    ["71"] = "071-Nuh.mp3",
-    ["72"] = "072-alJin.mp3",
-    ["73"] = "073-alMuzamil.mp3",
-    ["74"] = "074-alMudasir.mp3",
-    ["75"] = "075-alQiyamah.mp3",
-    ["76"] = "076-alDuhar.mp3",
-    ["77"] = "077-AlMursilat.mp3",
-    ["78"] = "078-anNaba.mp3",
-    ["79"] = "079-alNaziaat.mp3",
-    ["80"] = "080-ABASA.mp3",
-    ["81"] = "081-alTakwir.mp3",
-    ["82"] = "082-alInfitar.mp3",
-    ["83"] = "083-alMutafafin.mp3",
-    ["84"] = "084-alInshiqaq.mp3",
-    ["85"] = "085-alBuruj.mp3",
-    ["86"] = "086-alTariq.mp3",
-    ["87"] = "087-AlAala.mp3",
-    ["88"] = "088-alGhashiyah.mp3",
-    ["89"] = "089-alFajr.mp3",
-    ["90"] = "090-alBalad.mp3",
-    ["91"] = "091-alShams.mp3",
-    ["92"] = "092-alLail.mp3",
-    ["93"] = "093-alDuha.mp3",
-    ["94"] = "094-alamNashrah.mp3",
-    ["95"] = "095-AlTeen.mp3",
-    ["96"] = "096-alAlaq.mp3",
-    ["97"] = "097-alQadar.mp3",
-    ["98"] = "098-alBayyinah.mp3",
-    ["99"] = "099-alZizal.mp3",
-    ["100"] = "100-alAadiat.mp3",
-    ["101"] = "101-alQariyah.mp3",
-    ["102"] = "102-AlTakasur.mp3",
-    ["103"] = "103-alAsar.mp3",
-    ["104"] = "104-alHumazah.mp3",
-    ["105"] = "105-AlFeel.mp3",
-    ["106"] = "106-QURAISH.mp3",
-    ["107"] = "107-alMaoon.mp3",
-    ["108"] = "108-alKausar.mp3",
-    ["109"] = "109-alKafiroon.mp3",
-    ["110"] = "110-AlNasar.mp3",
-    ["111"] = "111-alLahab.mp3",
-    ["112"] = "112-AlIkhlas.mp3",
-    ["113"] = "113-alFalaq.mp3",
-    ["114"] = "114-AlNaas.mp3",
-  }
+["1"] = "001-alFatiha.mp3",
+["2"] = "002-alBaqara01.mp3",
+["3"] = "003-alImran01.mp3",
+["4"] = "004-anNisa01.mp3",
+["5"] = "005-alMaeda01.mp3",
+["6"] = "006-alAnam01.mp3",
+["7"] = "007-alAraf01.mp3",
+["8"] = "008-AlAnfal01.mp3",
+["9"] = "009-alTawba01.mp3",
+["10"] = "010-yunus01.mp3",
+["11"] = "011-hud01.mp3",
+["12"] = "012-yusuf01.mp3",
+["13"] = "013-alRad.mp3",
+["14"] = "014-Ibrahim.mp3",
+["15"] = "015-alHijr.mp3",
+["16"] = "016-alNahal01.mp3",
+["17"] = "017-baniIsrail01.mp3",
+["18"] = "018-alKahaf01.mp3",
+["19"] = "019-Mariyum.mp3",
+["20"] = "020-Taha01.mp3",
+["21"] = "021-alAnbia01.mp3",
+["22"] = "022-alHajj01.mp3",
+["23"] = "023-alMouminoon01.mp3",
+["24"] = "024-alNoor01.mp3",
+["25"] = "025-alFurqan.mp3",
+["26"] = "026-alShaura01.mp3",
+["27"] = "027-alNamal01.mp3",
+["28"] = "028-alQasas.mp3",
+["29"] = "029-alAnkaboor01.mp3",
+["30"] = "030-alRoom.mp3",
+["31"] = "031-LUQMAN.mp3",
+["32"] = "032-alSajdha.mp3",
+["33"] = "033-alAhzab01.mp3",
+["34"] = "034-Saba.mp3",
+["35"] = "035-Fatir.mp3",
+["36"] = "036-Yaseen.mp3",
+["37"] = "037-AsSafaat.mp3",
+["38"] = "038-Suaad.mp3",
+["39"] = "039-azZumr01.mp3",
+["40"] = "040-AlMumin.mp3",
+["41"] = "041-hameemAlSajdha.mp3",
+["42"] = "042-AlShoorah.mp3",
+["43"] = "043-alZukhruf01.mp3",
+["44"] = "044-alDukhaan.mp3",
+["45"] = "045-alJasiya.mp3",
+["46"] = "046-alAhqaf.mp3",
+["47"] = "047-MUHAMMAD.mp3",
+["48"] = "048-alFatha01.mp3",
+["49"] = "049-alHujrat.mp3",
+["50"] = "050-QAAF.mp3",
+["51"] = "051-azZariyat.mp3",
+["52"] = "052-alToor.mp3",
+["53"] = "053-alNajm.mp3",
+["54"] = "054-alQamar.mp3",
+["55"] = "055-alRehman.mp3",
+["56"] = "056-alWaqiya.mp3",
+["57"] = "057-alHadeed.mp3",
+["58"] = "058-alMujaadlah.mp3",
+["59"] = "059-alHashr.mp3",
+["60"] = "060-alMumtahina.mp3",
+["61"] = "061-alSaff.mp3",
+["62"] = "062-alJumma.mp3",
+["63"] = "063-alMunafoqoon.mp3",
+["64"] = "064-alTaghabun.mp3",
+["65"] = "065-alTalaq.mp3",
+["66"] = "066-alTahreem.mp3",
+["67"] = "067-alMulk.mp3",
+["68"] = "068-alQalm.mp3",
+["69"] = "069-alHaqqah.mp3",
+["70"] = "070-alMaurij.mp3",
+["71"] = "071-Nuh.mp3",
+["72"] = "072-alJin.mp3",
+["73"] = "073-alMuzamil.mp3",
+["74"] = "074-alMudasir.mp3",
+["75"] = "075-alQiyamah.mp3",
+["76"] = "076-alDuhar.mp3",
+["77"] = "077-AlMursilat.mp3",
+["78"] = "078-anNaba.mp3",
+["79"] = "079-alNaziaat.mp3",
+["80"] = "080-ABASA.mp3",
+["81"] = "081-alTakwir.mp3",
+["82"] = "082-alInfitar.mp3",
+["83"] = "083-alMutafafin.mp3",
+["84"] = "084-alInshiqaq.mp3",
+["85"] = "085-alBuruj.mp3",
+["86"] = "086-alTariq.mp3",
+["87"] = "087-AlAala.mp3",
+["88"] = "088-alGhashiyah.mp3",
+["89"] = "089-alFajr.mp3",
+["90"] = "090-alBalad.mp3",
+["91"] = "091-alShams.mp3",
+["92"] = "092-alLail.mp3",
+["93"] = "093-alDuha.mp3",
+["94"] = "094-alamNashrah.mp3",
+["95"] = "095-AlTeen.mp3",
+["96"] = "096-alAlaq.mp3",
+["97"] = "097-alQadar.mp3",
+["98"] = "098-alBayyinah.mp3",
+["99"] = "099-alZizal.mp3",
+["100"] = "100-alAadiat.mp3",
+["101"] = "101-alQariyah.mp3",
+["102"] = "102-AlTakasur.mp3",
+["103"] = "103-alAsar.mp3",
+["104"] = "104-alHumazah.mp3",
+["105"] = "105-AlFeel.mp3",
+["106"] = "106-QURAISH.mp3",
+["107"] = "107-alMaoon.mp3",
+["108"] = "108-alKausar.mp3",
+["109"] = "109-alKafiroon.mp3",
+["110"] = "110-AlNasar.mp3",
+["111"] = "111-alLahab.mp3",
+["112"] = "112-AlIkhlas.mp3",
+["113"] = "113-alFalaq.mp3",
+["114"] = "114-AlNaas.mp3",
+}
 V25.qariItems["waheed"] = "AlQuranWithUrduTranslationRecitationByQariWaheedZafarQasmiTranslationByMaulanaFatehMuhammadJalandhry"
 V25.qariFiles["waheed"] = {
-    ["1"] = "001-Surah_Al-Fatiha.mp3",
-    ["2"] = "002-Surah_Al-Baqarah.mp3",
-    ["3"] = "003-Surah_Aal-Imran.mp3",
-    ["4"] = "004-Surah_An-Nissa.mp3",
-    ["5"] = "005-Surah_Al-Maidah.mp3",
-    ["6"] = "006-Surah_Al-An'am.mp3",
-    ["7"] = "007-Surah_Al-A'raf.mp3",
-    ["8"] = "008-Surah_Al-Anfal.mp3",
-    ["9"] = "009-Surah_At-Tawba.mp3",
-    ["10"] = "010-Surah_Yunus.mp3",
-    ["11"] = "011-Surah_Hud.mp3",
-    ["12"] = "012-Surah_Yusuf.mp3",
-    ["13"] = "013-Surah_Ar-Ra'd.mp3",
-    ["14"] = "014-Surah_Ibrahim.mp3",
-    ["15"] = "015-Surah_Al-Hijr.mp3",
-    ["16"] = "016-Surah_Al-Nahl.mp3",
-    ["17"] = "017-Surah_Al-Israa.mp3",
-    ["18"] = "018-Surah_Al-Kahf.mp3",
-    ["19"] = "019-Surah_Marium.mp3",
-    ["20"] = "020-Surah_Ta-ha.mp3",
-    ["21"] = "021-Surah_Al-Anbiyaa.mp3",
-    ["22"] = "022-Surah_Al-Hajj.mp3",
-    ["23"] = "023-Surah_Al-Muminun.mp3",
-    ["24"] = "024-Surah_An-Nur.mp3",
-    ["25"] = "025-Surah_Al-Furqan.mp3",
-    ["26"] = "026-Surah_Ash-Shu'araa.mp3",
-    ["27"] = "027-Surah_An-Naml.mp3",
-    ["28"] = "028-Surah_Al-Qasas.mp3",
-    ["29"] = "029-Surah_Al-'Ankabut.mp3",
-    ["30"] = "030-Surah_Ar-Rum.mp3",
-    ["31"] = "031-Surah_Luqman.mp3",
-    ["32"] = "032-Surah_As-Sajda.mp3",
-    ["33"] = "033-Surah_Al-Ahzab.mp3",
-    ["34"] = "034-Surah_Saba.mp3",
-    ["35"] = "035-Surah_Fatir.mp3",
-    ["36"] = "036-Surah_Yaseen.mp3",
-    ["37"] = "037-Surah_As-Saffat.mp3",
-    ["38"] = "038-Surah_Su'aad.mp3",
-    ["39"] = "039-Surah_Az_Zumar.mp3",
-    ["40"] = "040-Surah_Momin.mp3",
-    ["41"] = "041-Surah_HamimSajda.mp3",
-    ["42"] = "042-Surah_Ash_Shura.mp3",
-    ["43"] = "043-Surah_Az_Zukhruf.mp3",
-    ["44"] = "044-Surah_Ad_Dukhan.mp3",
-    ["45"] = "045-Surah_Al_Jathiya.mp3",
-    ["46"] = "046-Surah_Al_Ahqaf.mp3",
-    ["47"] = "047-Surah_Muhammad.mp3",
-    ["48"] = "048-Surah_Al_Fath.mp3",
-    ["49"] = "049-Surah_Al_Hujurat.mp3",
-    ["50"] = "050-Surah_Qaf.mp3",
-    ["51"] = "051-Surah_Az_Zariyat.mp3",
-    ["52"] = "052-Surah_At_Tur.mp3",
-    ["53"] = "053-Surah_An_Najm.mp3",
-    ["54"] = "054-Surah_Al_Qamar.mp3",
-    ["55"] = "055-Surah_Ar_Rahman.mp3",
-    ["56"] = "056-Surah_Al_Waqi'a.mp3",
-    ["57"] = "057-Surah_Al_Hadid.mp3",
-    ["58"] = "058-Surah_Al_Mujadila.mp3",
-    ["59"] = "059-Surah_Al_Hashr.mp3",
-    ["60"] = "060-Surah_Al_Mumtahana.mp3",
-    ["61"] = "061-Surah_As_Saff.mp3",
-    ["62"] = "062-Surah_Al_Jumu'a.mp3",
-    ["63"] = "063-Surah_Al_Munafiqun.mp3",
-    ["64"] = "064-Surah_At_Tagabun.mp3",
-    ["65"] = "065-Surah_At_Talaq.mp3",
-    ["66"] = "066-Surah_At_Tahrim.mp3",
-    ["67"] = "067-Surah_Al_Mulk.mp3",
-    ["68"] = "068-Surah_Al_Qalam.mp3",
-    ["69"] = "069-Surah_Al_Haqqa.mp3",
-    ["70"] = "070-Surah_Al_Ma'arij.mp3",
-    ["71"] = "071-Surah_Nuh.mp3",
-    ["72"] = "072-Surah_Al_Jinn.mp3",
-    ["73"] = "073-Surah_Al_Muzzammil.mp3",
-    ["74"] = "074-Surah_Al_Muddaththir.mp3",
-    ["75"] = "075-Surah_Al_Qiyamat.mp3",
-    ["76"] = "076-Surah_Al_Insan.mp3",
-    ["77"] = "077-Surah_Al_Mursalat.mp3",
-    ["78"] = "078-Surah_An_Nabaa.mp3",
-    ["79"] = "079-Surah_An_Naziat.mp3",
-    ["80"] = "080-Surah_Abasa.mp3",
-    ["81"] = "081-Surah_At_Takwir.mp3",
-    ["82"] = "082-Surah_Al_Infita.mp3",
-    ["83"] = "083-Surah_Al_Mutaffifeen.mp3",
-    ["84"] = "084-Surah_Al_Inshiqaq.mp3",
-    ["85"] = "085-Surah_Al_Buruj.mp3",
-    ["86"] = "086-Surah_At_Tariq.mp3",
-    ["87"] = "087-Surah_Al_Ala.mp3",
-    ["88"] = "088-Surah_Al_Gashiya.mp3",
-    ["89"] = "089-Surah_Al_Fajr.mp3",
-    ["90"] = "090-Surah_Al_Balad.mp3",
-    ["91"] = "091-Surah_Ash_Shams.mp3",
-    ["92"] = "092-Surah_Al_Lail.mp3",
-    ["93"] = "093-Surah_Ad_Dhuha.mp3",
-    ["94"] = "094-Surah_Al_Sharh.mp3",
-    ["95"] = "095-Surah_At_Tin.mp3",
-    ["96"] = "096-Surah_Al_Alaq.mp3",
-    ["97"] = "097-Surah_Al_Qadr.mp3",
-    ["98"] = "098-Surah_Al_Baiyina.mp3",
-    ["99"] = "099-Surah_Al_Zalzalah.mp3",
-    ["100"] = "100-Surah_Al_Adiyat.mp3",
-    ["101"] = "101-Surah_Al_Qaria.mp3",
-    ["102"] = "102-Surah_At_Takathur.mp3",
-    ["103"] = "103-Surah_Al_Asr.mp3",
-    ["104"] = "104-Surah_Al_Humaza.mp3",
-    ["105"] = "105-Surah_Al_Fil.mp3",
-    ["106"] = "106-Surah_Quraish.mp3",
-    ["107"] = "107-Surah_Al_Maun.mp3",
-    ["108"] = "108-Surah_Al_Kauthar.mp3",
-    ["109"] = "109-Surah_Al_Kafirun.mp3",
-    ["110"] = "110-Surah_An_Nasr.mp3",
-    ["111"] = "111-Surah_Al_Masad.mp3",
-    ["112"] = "112-Surah_Al_Ikhlas.mp3",
-    ["113"] = "113-Surah_Al_Falaq.mp3",
-    ["114"] = "114-Surah_An_Nas.mp3",
-  }
+["1"] = "001-Surah_Al-Fatiha.mp3",
+["2"] = "002-Surah_Al-Baqarah.mp3",
+["3"] = "003-Surah_Aal-Imran.mp3",
+["4"] = "004-Surah_An-Nissa.mp3",
+["5"] = "005-Surah_Al-Maidah.mp3",
+["6"] = "006-Surah_Al-An'am.mp3",
+["7"] = "007-Surah_Al-A'raf.mp3",
+["8"] = "008-Surah_Al-Anfal.mp3",
+["9"] = "009-Surah_At-Tawba.mp3",
+["10"] = "010-Surah_Yunus.mp3",
+["11"] = "011-Surah_Hud.mp3",
+["12"] = "012-Surah_Yusuf.mp3",
+["13"] = "013-Surah_Ar-Ra'd.mp3",
+["14"] = "014-Surah_Ibrahim.mp3",
+["15"] = "015-Surah_Al-Hijr.mp3",
+["16"] = "016-Surah_Al-Nahl.mp3",
+["17"] = "017-Surah_Al-Israa.mp3",
+["18"] = "018-Surah_Al-Kahf.mp3",
+["19"] = "019-Surah_Marium.mp3",
+["20"] = "020-Surah_Ta-ha.mp3",
+["21"] = "021-Surah_Al-Anbiyaa.mp3",
+["22"] = "022-Surah_Al-Hajj.mp3",
+["23"] = "023-Surah_Al-Muminun.mp3",
+["24"] = "024-Surah_An-Nur.mp3",
+["25"] = "025-Surah_Al-Furqan.mp3",
+["26"] = "026-Surah_Ash-Shu'araa.mp3",
+["27"] = "027-Surah_An-Naml.mp3",
+["28"] = "028-Surah_Al-Qasas.mp3",
+["29"] = "029-Surah_Al-'Ankabut.mp3",
+["30"] = "030-Surah_Ar-Rum.mp3",
+["31"] = "031-Surah_Luqman.mp3",
+["32"] = "032-Surah_As-Sajda.mp3",
+["33"] = "033-Surah_Al-Ahzab.mp3",
+["34"] = "034-Surah_Saba.mp3",
+["35"] = "035-Surah_Fatir.mp3",
+["36"] = "036-Surah_Yaseen.mp3",
+["37"] = "037-Surah_As-Saffat.mp3",
+["38"] = "038-Surah_Su'aad.mp3",
+["39"] = "039-Surah_Az_Zumar.mp3",
+["40"] = "040-Surah_Momin.mp3",
+["41"] = "041-Surah_HamimSajda.mp3",
+["42"] = "042-Surah_Ash_Shura.mp3",
+["43"] = "043-Surah_Az_Zukhruf.mp3",
+["44"] = "044-Surah_Ad_Dukhan.mp3",
+["45"] = "045-Surah_Al_Jathiya.mp3",
+["46"] = "046-Surah_Al_Ahqaf.mp3",
+["47"] = "047-Surah_Muhammad.mp3",
+["48"] = "048-Surah_Al_Fath.mp3",
+["49"] = "049-Surah_Al_Hujurat.mp3",
+["50"] = "050-Surah_Qaf.mp3",
+["51"] = "051-Surah_Az_Zariyat.mp3",
+["52"] = "052-Surah_At_Tur.mp3",
+["53"] = "053-Surah_An_Najm.mp3",
+["54"] = "054-Surah_Al_Qamar.mp3",
+["55"] = "055-Surah_Ar_Rahman.mp3",
+["56"] = "056-Surah_Al_Waqi'a.mp3",
+["57"] = "057-Surah_Al_Hadid.mp3",
+["58"] = "058-Surah_Al_Mujadila.mp3",
+["59"] = "059-Surah_Al_Hashr.mp3",
+["60"] = "060-Surah_Al_Mumtahana.mp3",
+["61"] = "061-Surah_As_Saff.mp3",
+["62"] = "062-Surah_Al_Jumu'a.mp3",
+["63"] = "063-Surah_Al_Munafiqun.mp3",
+["64"] = "064-Surah_At_Tagabun.mp3",
+["65"] = "065-Surah_At_Talaq.mp3",
+["66"] = "066-Surah_At_Tahrim.mp3",
+["67"] = "067-Surah_Al_Mulk.mp3",
+["68"] = "068-Surah_Al_Qalam.mp3",
+["69"] = "069-Surah_Al_Haqqa.mp3",
+["70"] = "070-Surah_Al_Ma'arij.mp3",
+["71"] = "071-Surah_Nuh.mp3",
+["72"] = "072-Surah_Al_Jinn.mp3",
+["73"] = "073-Surah_Al_Muzzammil.mp3",
+["74"] = "074-Surah_Al_Muddaththir.mp3",
+["75"] = "075-Surah_Al_Qiyamat.mp3",
+["76"] = "076-Surah_Al_Insan.mp3",
+["77"] = "077-Surah_Al_Mursalat.mp3",
+["78"] = "078-Surah_An_Nabaa.mp3",
+["79"] = "079-Surah_An_Naziat.mp3",
+["80"] = "080-Surah_Abasa.mp3",
+["81"] = "081-Surah_At_Takwir.mp3",
+["82"] = "082-Surah_Al_Infita.mp3",
+["83"] = "083-Surah_Al_Mutaffifeen.mp3",
+["84"] = "084-Surah_Al_Inshiqaq.mp3",
+["85"] = "085-Surah_Al_Buruj.mp3",
+["86"] = "086-Surah_At_Tariq.mp3",
+["87"] = "087-Surah_Al_Ala.mp3",
+["88"] = "088-Surah_Al_Gashiya.mp3",
+["89"] = "089-Surah_Al_Fajr.mp3",
+["90"] = "090-Surah_Al_Balad.mp3",
+["91"] = "091-Surah_Ash_Shams.mp3",
+["92"] = "092-Surah_Al_Lail.mp3",
+["93"] = "093-Surah_Ad_Dhuha.mp3",
+["94"] = "094-Surah_Al_Sharh.mp3",
+["95"] = "095-Surah_At_Tin.mp3",
+["96"] = "096-Surah_Al_Alaq.mp3",
+["97"] = "097-Surah_Al_Qadr.mp3",
+["98"] = "098-Surah_Al_Baiyina.mp3",
+["99"] = "099-Surah_Al_Zalzalah.mp3",
+["100"] = "100-Surah_Al_Adiyat.mp3",
+["101"] = "101-Surah_Al_Qaria.mp3",
+["102"] = "102-Surah_At_Takathur.mp3",
+["103"] = "103-Surah_Al_Asr.mp3",
+["104"] = "104-Surah_Al_Humaza.mp3",
+["105"] = "105-Surah_Al_Fil.mp3",
+["106"] = "106-Surah_Quraish.mp3",
+["107"] = "107-Surah_Al_Maun.mp3",
+["108"] = "108-Surah_Al_Kauthar.mp3",
+["109"] = "109-Surah_Al_Kafirun.mp3",
+["110"] = "110-Surah_An_Nasr.mp3",
+["111"] = "111-Surah_Al_Masad.mp3",
+["112"] = "112-Surah_Al_Ikhlas.mp3",
+["113"] = "113-Surah_Al_Falaq.mp3",
+["114"] = "114-Surah_An_Nas.mp3",
+}
 V25.qariItems["shakir"] = "QuranByQariShakirQasmi"
 V25.qariFiles["shakir"] = {
-    ["1"] = "Surah001Al-fateha-TheOpening.mp3",
-    ["2"] = "Surah002Al-baqarah-TheCow.mp3",
-    ["3"] = "Surah003Aal-e-imran-TheFamilyOfImran.mp3",
-    ["4"] = "Surah004An-nisa-Women.mp3",
-    ["5"] = "Surah005Al-maedah-TheTableSpread.mp3",
-    ["6"] = "Surah006Al-anaam-Livestock.mp3",
-    ["7"] = "Surah007Al-aaraaf-TheHeights.mp3",
-    ["8"] = "Surah008Al-anfal-SpoilsOfWar.mp3",
-    ["9"] = "Surah009At-tawba-Repentance.mp3",
-    ["10"] = "Surah010Yunus-Jonah.mp3",
-    ["11"] = "Surah011Hood-Hud.mp3",
-    ["12"] = "Surah012Yusuf-Joseph.mp3",
-    ["13"] = "Surah013Ar-raad-TheThunder.mp3",
-    ["14"] = "Surah014Ibrahim-Abraham.mp3",
-    ["15"] = "Surah015Al-hijr-StoneLand.mp3",
-    ["16"] = "Surah016An-nahl-TheBee.mp3",
-    ["17"] = "Surah017BaniIsraeel-ChildrenOfIsrael.mp3",
-    ["18"] = "Surah018Al-kahf-TheCave.mp3",
-    ["19"] = "Surah019Maryam-Mary.mp3",
-    ["20"] = "Surah020TaHa-TaHa.mp3",
-    ["21"] = "Surah021Al-ambiya-TheProphets.mp3",
-    ["22"] = "Surah022Al-hajj-ThePilgrimage.mp3",
-    ["23"] = "Surah023Al-momenoon-TheBelievers.mp3",
-    ["24"] = "Surah024An-noor-TheLight.mp3",
-    ["25"] = "Surah025Al-furqan-TheCriterion.mp3",
-    ["26"] = "Surah026Ash-shuara-ThePoets.mp3",
-    ["27"] = "Surah027An-naml-TheAnt.mp3",
-    ["28"] = "Surah028Al-qasas-TheStory.mp3",
-    ["29"] = "Surah029Al-ankaboot-TheSpider.mp3",
-    ["30"] = "Surah030Ar-room-TheRomans.mp3",
-    ["31"] = "Surah031Luqman-Luqman.mp3",
-    ["32"] = "Surah032As-sajda-TheProstration.mp3",
-    ["33"] = "Surah033Al-ahzab-TheClans.mp3",
-    ["34"] = "Surah034Saba-Sheba.mp3",
-    ["35"] = "Surah035Fatir-TheOriginatorOfCreation.mp3",
-    ["36"] = "Surah036YaSeen-YaSin.mp3",
-    ["37"] = "Surah037As-saffaat-DrawnUpInRanks.mp3",
-    ["38"] = "Surah038Saad-ArabicLettersaad.mp3",
-    ["39"] = "Surah039Az-zumar-TheTroops.mp3",
-    ["40"] = "Surah040Al-momin-TheBeliever.mp3",
-    ["41"] = "Surah041Haameem-HaMim.mp3",
-    ["42"] = "Surah042Ash-shoora-Consultation.mp3",
-    ["43"] = "Surah043Az-zukhruf-OrnamentsOfGold.mp3",
-    ["44"] = "Surah044Ad-dukhan-Smoke.mp3",
-    ["45"] = "Surah045Al-jaseyah-Crouching.mp3",
-    ["46"] = "Surah046Al-ahqaf-TheDunes.mp3",
-    ["47"] = "Surah047Muhammad-Mohammed.mp3",
-    ["48"] = "Surah048Al-fatah-Victory.mp3",
-    ["49"] = "Surah049Al-hujurat-ThePrivateAppartments.mp3",
-    ["50"] = "Surah050Qaaf-ArabicLetterqaaf.mp3",
-    ["51"] = "Surah051Az-zariat-TheWinnowingWinds.mp3",
-    ["52"] = "Surah052At-toor-TheMount.mp3",
-    ["53"] = "Surah053An-najm-TheStar.mp3",
-    ["54"] = "Surah054Al-qamar-TheMoon.mp3",
-    ["55"] = "Surah055Ar-rahman-TheBeneficient.mp3",
-    ["56"] = "Surah056Al-waqia-TheEvent.mp3",
-    ["57"] = "Surah057Al-hadeed-TheIron.mp3",
-    ["58"] = "Surah058Al-mujadila-SheThatDisputeth.mp3",
-    ["59"] = "Surah059Al-hashr-Exile.mp3",
-    ["60"] = "Surah060Al-mumtahina-ExaminingHer.mp3",
-    ["61"] = "Surah061As-saf-TheRanks.mp3",
-    ["62"] = "Surah062Jummah-TheCongregation.mp3",
-    ["63"] = "Surah063Al-munafiqoon-TheHypocrites.mp3",
-    ["64"] = "Surah064At-tagabun-MutualDisillusion.mp3",
-    ["65"] = "Surah065At-talaq-Divorce.mp3",
-    ["66"] = "Surah066At-tahreem-Prohibition.mp3",
-    ["67"] = "Surah067Al-mulk-TheSovereignty.mp3",
-    ["68"] = "Surah068Al-qalam-ThePen.mp3",
-    ["69"] = "Surah069Al-haaqah-TheReality.mp3",
-    ["70"] = "Surah070Al-maarij-TheAscendingStairways.mp3",
-    ["71"] = "Surah071Nuh-Noah.mp3",
-    ["72"] = "Surah072Al-jinn-TheJinn.mp3",
-    ["73"] = "Surah073Al-muzammil-TheEnshroudedOne.mp3",
-    ["74"] = "Surah074Al-muddassir-TheCloakedOne.mp3",
-    ["75"] = "Surah075Al-qiyama-TheResurrection.mp3",
-    ["76"] = "Surah076Al-insan-Man.mp3",
-    ["77"] = "Surah077Al-mursalat-TheEmissaries.mp3",
-    ["78"] = "Surah078An-naba-TheTidings.mp3",
-    ["79"] = "Surah079An-naziat-ThoseWhoDragForth.mp3",
-    ["80"] = "Surah080Abasa-HeFrowned.mp3",
-    ["81"] = "Surah081At-takwir-TheOverthrowing.mp3",
-    ["82"] = "Surah082Al-infitar-TheCleaving.mp3",
-    ["83"] = "Surah083Al-mutaffifin-Defrauding.mp3",
-    ["84"] = "Surah084Al-inshiqaq-TheSundering.mp3",
-    ["85"] = "Surah085Al-burooj-TheMansionsOfTheStars.mp3",
-    ["86"] = "Surah086At-tariq-TheMorningStar1.mp3",
-    ["87"] = "Surah087Al-ala-TheMostHigh.mp3",
-    ["88"] = "Surah088Al-ghashiya-TheOverwhelming.mp3",
-    ["89"] = "Surah089Al-fajr-TheDawn.mp3",
-    ["90"] = "Surah090Al-balad-TheCity.mp3",
-    ["91"] = "Surah091Ash-shams-TheSun.mp3",
-    ["92"] = "Surah092Al-lail-TheNight.mp3",
-    ["93"] = "Surah093Ad-dhuha-TheMorningHours.mp3",
-    ["94"] = "Surah094AlmNashra-Solace.mp3",
-    ["95"] = "Surah095At-tin-TheFig.mp3",
-    ["96"] = "Surah096Al-alaq-TheClot.mp3",
-    ["97"] = "Surah097Al-qadr-Power.mp3",
-    ["98"] = "Surah098Al-bayyina-TheClearProof.mp3",
-    ["99"] = "Surah099Az-zalzala-TheEarthquake.mp3",
-    ["100"] = "Surah100Al-adiyat-TheCoursers.mp3",
-    ["101"] = "Surah101Al-qaria-TheCalamity.mp3",
-    ["102"] = "Surah102At-takathur-Competition.mp3",
-    ["103"] = "Surah103Al-asr-TheDecliningDay.mp3",
-    ["104"] = "Surah104Al-humaza-TheTraducer.mp3",
-    ["105"] = "Surah105Al-fil-TheElephant.mp3",
-    ["106"] = "Surah106Quraish-Quraysh.mp3",
-    ["107"] = "Surah107Al-maun-SmallKindnesses.mp3",
-    ["108"] = "Surah108Al-kauther-Abundance.mp3",
-    ["109"] = "Surah109Al-kafiroon-TheDisbelievers.mp3",
-    ["110"] = "Surah110An-nasr-DivineSupport.mp3",
-    ["111"] = "Surah111Al-masadd-TheFlame.mp3",
-    ["112"] = "Surah112Al-ikhlas-TheUnityOfGod.mp3",
-    ["113"] = "Surah113Al-falaq-TheDaybreak.mp3",
-    ["114"] = "Surah114An-nas-Mankind.mp3",
-  }
-
-V25.modes = {
-  ["English"] = {kind="translation", key="EN", label="English (Ibrahim Walk)"},
-  ["English (Mishary)"] = {kind="translation", key="EN2", label="English (Mishary)"},
-  ["Hindi"] = {kind="translation", key="HI", label="Hindi"},
-  ["Bengali"] = {kind="translation", key="BN", label="Bengali"},
-  ["French"] = {kind="translation", key="FR", label="French"},
-  ["Sindhi"] = {kind="translation", key="SD", label="Sindhi"},
-  ["Pashto"] = {kind="translation", key="PS", label="Pashto"},
-  ["Farsi"] = {kind="translation", key="FA", label="Farsi"},
-  ["Urdu (Waheed Zafar)"] = {kind="qari", key="waheed", label="Urdu Audio - Whole Surah (Waheed Zafar)"},
-  ["Urdu (Shakir Qasmi)"] = {kind="qari", key="shakir", label="Urdu Whole-Surah (Shakir Qasmi)"},
+["1"] = "Surah001Al-fateha-TheOpening.mp3",
+["2"] = "Surah002Al-baqarah-TheCow.mp3",
+["3"] = "Surah003Aal-e-imran-TheFamilyOfImran.mp3",
+["4"] = "Surah004An-nisa-Women.mp3",
+["5"] = "Surah005Al-maedah-TheTableSpread.mp3",
+["6"] = "Surah006Al-anaam-Livestock.mp3",
+["7"] = "Surah007Al-aaraaf-TheHeights.mp3",
+["8"] = "Surah008Al-anfal-SpoilsOfWar.mp3",
+["9"] = "Surah009At-tawba-Repentance.mp3",
+["10"] = "Surah010Yunus-Jonah.mp3",
+["11"] = "Surah011Hood-Hud.mp3",
+["12"] = "Surah012Yusuf-Joseph.mp3",
+["13"] = "Surah013Ar-raad-TheThunder.mp3",
+["14"] = "Surah014Ibrahim-Abraham.mp3",
+["15"] = "Surah015Al-hijr-StoneLand.mp3",
+["16"] = "Surah016An-nahl-TheBee.mp3",
+["17"] = "Surah017BaniIsraeel-ChildrenOfIsrael.mp3",
+["18"] = "Surah018Al-kahf-TheCave.mp3",
+["19"] = "Surah019Maryam-Mary.mp3",
+["20"] = "Surah020TaHa-TaHa.mp3",
+["21"] = "Surah021Al-ambiya-TheProphets.mp3",
+["22"] = "Surah022Al-hajj-ThePilgrimage.mp3",
+["23"] = "Surah023Al-momenoon-TheBelievers.mp3",
+["24"] = "Surah024An-noor-TheLight.mp3",
+["25"] = "Surah025Al-furqan-TheCriterion.mp3",
+["26"] = "Surah026Ash-shuara-ThePoets.mp3",
+["27"] = "Surah027An-naml-TheAnt.mp3",
+["28"] = "Surah028Al-qasas-TheStory.mp3",
+["29"] = "Surah029Al-ankaboot-TheSpider.mp3",
+["30"] = "Surah030Ar-room-TheRomans.mp3",
+["31"] = "Surah031Luqman-Luqman.mp3",
+["32"] = "Surah032As-sajda-TheProstration.mp3",
+["33"] = "Surah033Al-ahzab-TheClans.mp3",
+["34"] = "Surah034Saba-Sheba.mp3",
+["35"] = "Surah035Fatir-TheOriginatorOfCreation.mp3",
+["36"] = "Surah036YaSeen-YaSin.mp3",
+["37"] = "Surah037As-saffaat-DrawnUpInRanks.mp3",
+["38"] = "Surah038Saad-ArabicLettersaad.mp3",
+["39"] = "Surah039Az-zumar-TheTroops.mp3",
+["40"] = "Surah040Al-momin-TheBeliever.mp3",
+["41"] = "Surah041Haameem-HaMim.mp3",
+["42"] = "Surah042Ash-shoora-Consultation.mp3",
+["43"] = "Surah043Az-zukhruf-OrnamentsOfGold.mp3",
+["44"] = "Surah044Ad-dukhan-Smoke.mp3",
+["45"] = "Surah045Al-jaseyah-Crouching.mp3",
+["46"] = "Surah046Al-ahqaf-TheDunes.mp3",
+["47"] = "Surah047Muhammad-Mohammed.mp3",
+["48"] = "Surah048Al-fatah-Victory.mp3",
+["49"] = "Surah049Al-hujurat-ThePrivateAppartments.mp3",
+["50"] = "Surah050Qaaf-ArabicLetterqaaf.mp3",
+["51"] = "Surah051Az-zariat-TheWinnowingWinds.mp3",
+["52"] = "Surah052At-toor-TheMount.mp3",
+["53"] = "Surah053An-najm-TheStar.mp3",
+["54"] = "Surah054Al-qamar-TheMoon.mp3",
+["55"] = "Surah055Ar-rahman-TheBeneficient.mp3",
+["56"] = "Surah056Al-waqia-TheEvent.mp3",
+["57"] = "Surah057Al-hadeed-TheIron.mp3",
+["58"] = "Surah058Al-mujadila-SheThatDisputeth.mp3",
+["59"] = "Surah059Al-hashr-Exile.mp3",
+["60"] = "Surah060Al-mumtahina-ExaminingHer.mp3",
+["61"] = "Surah061As-saf-TheRanks.mp3",
+["62"] = "Surah062Jummah-TheCongregation.mp3",
+["63"] = "Surah063Al-munafiqoon-TheHypocrites.mp3",
+["64"] = "Surah064At-tagabun-MutualDisillusion.mp3",
+["65"] = "Surah065At-talaq-Divorce.mp3",
+["66"] = "Surah066At-tahreem-Prohibition.mp3",
+["67"] = "Surah067Al-mulk-TheSovereignty.mp3",
+["68"] = "Surah068Al-qalam-ThePen.mp3",
+["69"] = "Surah069Al-haaqah-TheReality.mp3",
+["70"] = "Surah070Al-maarij-TheAscendingStairways.mp3",
+["71"] = "Surah071Nuh-Noah.mp3",
+["72"] = "Surah072Al-jinn-TheJinn.mp3",
+["73"] = "Surah073Al-muzammil-TheEnshroudedOne.mp3",
+["74"] = "Surah074Al-muddassir-TheCloakedOne.mp3",
+["75"] = "Surah075Al-qiyama-TheResurrection.mp3",
+["76"] = "Surah076Al-insan-Man.mp3",
+["77"] = "Surah077Al-mursalat-TheEmissaries.mp3",
+["78"] = "Surah078An-naba-TheTidings.mp3",
+["79"] = "Surah079An-naziat-ThoseWhoDragForth.mp3",
+["80"] = "Surah080Abasa-HeFrowned.mp3",
+["81"] = "Surah081At-takwir-TheOverthrowing.mp3",
+["82"] = "Surah082Al-infitar-TheCleaving.mp3",
+["83"] = "Surah083Al-mutaffifin-Defrauding.mp3",
+["84"] = "Surah084Al-inshiqaq-TheSundering.mp3",
+["85"] = "Surah085Al-burooj-TheMansionsOfTheStars.mp3",
+["86"] = "Surah086At-tariq-TheMorningStar1.mp3",
+["87"] = "Surah087Al-ala-TheMostHigh.mp3",
+["88"] = "Surah088Al-ghashiya-TheOverwhelming.mp3",
+["89"] = "Surah089Al-fajr-TheDawn.mp3",
+["90"] = "Surah090Al-balad-TheCity.mp3",
+["91"] = "Surah091Ash-shams-TheSun.mp3",
+["92"] = "Surah092Al-lail-TheNight.mp3",
+["93"] = "Surah093Ad-dhuha-TheMorningHours.mp3",
+["94"] = "Surah094AlmNashra-Solace.mp3",
+["95"] = "Surah095At-tin-TheFig.mp3",
+["96"] = "Surah096Al-alaq-TheClot.mp3",
+["97"] = "Surah097Al-qadr-Power.mp3",
+["98"] = "Surah098Al-bayyina-TheClearProof.mp3",
+["99"] = "Surah099Az-zalzala-TheEarthquake.mp3",
+["100"] = "Surah100Al-adiyat-TheCoursers.mp3",
+["101"] = "Surah101Al-qaria-TheCalamity.mp3",
+["102"] = "Surah102At-takathur-Competition.mp3",
+["103"] = "Surah103Al-asr-TheDecliningDay.mp3",
+["104"] = "Surah104Al-humaza-TheTraducer.mp3",
+["105"] = "Surah105Al-fil-TheElephant.mp3",
+["106"] = "Surah106Quraish-Quraysh.mp3",
+["107"] = "Surah107Al-maun-SmallKindnesses.mp3",
+["108"] = "Surah108Al-kauther-Abundance.mp3",
+["109"] = "Surah109Al-kafiroon-TheDisbelievers.mp3",
+["110"] = "Surah110An-nasr-DivineSupport.mp3",
+["111"] = "Surah111Al-masadd-TheFlame.mp3",
+["112"] = "Surah112Al-ikhlas-TheUnityOfGod.mp3",
+["113"] = "Surah113Al-falaq-TheDaybreak.mp3",
+["114"] = "Surah114An-nas-Mankind.mp3",
 }
+V25.modes = { ["English"] = {kind="translation", key="EN", label="English (Ibrahim Walk)"}, ["English (Mishary)"] = {kind="translation", key="EN2", label="English (Mishary)"}, ["Hindi"] = {kind="translation", key="HI", label="Hindi"}, ["Bengali"] = {kind="translation", key="BN", label="Bengali"}, ["French"] = {kind="translation", key="FR", label="French"}, ["Sindhi"] = {kind="translation", key="SD", label="Sindhi"}, ["Pashto"] = {kind="translation", key="PS", label="Pashto"}, ["Farsi"] = {kind="translation", key="FA", label="Farsi"}, ["Urdu (Waheed Zafar)"] = {kind="qari", key="waheed", label="Urdu Audio - Whole Surah (Waheed Zafar)"}, ["Urdu (Shakir Qasmi)"] = {kind="qari", key="shakir", label="Urdu Whole-Surah (Shakir Qasmi)"}, }
 local function v25UrlEncodeBytes(str)
-  return (str:gsub("[^%w%-%.%_%~]", function(c) return string.format("%%%02X", string.byte(c)) end))
+return (str:gsub("[^%w%-%.%_%~]", function(c) return string.format("%%%02X", string.byte(c)) end))
 end
-local function buildV25WholeTrack(mode, surahIdx)
-  local cfg = V25.modes[mode]
-  if not cfg or surahIdx < 1 or surahIdx > 114 then return nil, nil end
-  local files, item
-  if cfg.kind == "qari" then
-    files, item = V25.qariFiles[cfg.key], V25.qariItems[cfg.key]
-  else
-    files, item = V25.files[cfg.key], V25.items[cfg.key]
-  end
-  local fn = files and files[tostring(surahIdx)]
-  if not fn or not item then return nil, nil end
-  local url = "https://archive.org/download/" .. item .. "/" .. v25UrlEncodeBytes(fn)
-  local pathName = "v27_" .. cfg.key .. "_surah_" .. string.format("%03d", surahIdx) .. ".mp3"
-  return url, pathName
+M.buildV25WholeTrack = function(mode, surahIdx)
+local cfg = V25.modes[mode]
+if not cfg or surahIdx < 1 or surahIdx > 114 then return nil, nil end
+local files, item
+if cfg.kind == "qari" then
+files, item = V25.qariFiles[cfg.key], V25.qariItems[cfg.key]
+else
+files, item = V25.files[cfg.key], V25.items[cfg.key]
 end
-
-local V25_TRANSLATION_LABELS = {
-  "Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi",
-  "English (Mishary)", "Bengali", "French", "Pashto", "Farsi",
-  "Urdu (Waheed Zafar)", "Urdu (Shakir Qasmi)"
+local fn = files and files[tostring(surahIdx)]
+if not fn or not item then return nil, nil end
+local url = "https://archive.org/download/" .. item .. "/" .. v25UrlEncodeBytes(fn)
+local pathName = "v27_" .. cfg.key .. "_surah_" .. string.format("%03d", surahIdx) .. ".mp3"
+return url, pathName
+end
+local V25_TRANSLATION_LABELS = { "Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi", "English (Mishary)", "Bengali", "French", "Pashto", "Farsi", "Urdu (Waheed Zafar)", "Urdu (Shakir Qasmi)" }
+function V25.mkQFiles(suf, pre)
+local t = {}
+for i = 1, 114 do t[tostring(i)] = (pre or "") .. string.format("%03d", i) .. suf end
+return t
+end
+V25_KZ="Fatiha|Baqarah|AlImran|Nisa|Maidah|Anaam|Araf|Anfal|Tauba|Yunus|Hood|Yousuf|Rad|Ibrahim|Hajar|Nahl|BaniIsrael|Kahf|Maryam|Taha|Anbiya|Hajj|Muminoon|Noor|Furqan|Shuara|Naml|Qasas|Ankaboot|Room|Luqman|Sajda|Ahzab|Saba|Fatir|Ya-seen|Saaffat|Sad|Zumar|Momin|HaMeemSajda|Shura|Zukhruf|Dukhan|Jasia|Ahqaf|Muhammad|Fatah|Hujurat|Qaf|Zariyat|Tur|Najam|Qamar|Rehman|Waqiah|Hadid|Mujadila|Hashr|Mumtahina|AsSaff|Jumua|Munafiqun|Taghabun|Talaq|Tahrim|Mulk|Qalam|Haqqa|Maarij|Nuh|Jinn|Muzzammil|Mudassir|Qiyamah|Dahr|Mursalat|Naba|Naziat|Abasa|Takwir|Infitar|Mutaffifin|Inshiqaq|Burooj|Tariq|Al-ala|Ghashiya|Fajr|Balad|Shams|Al-lail|Dhuha|Sharh|At-tin|Al-alaq|Qadr|Bayyinah|Zalzalah|Adiyat|Al-qariah|Takasur|Al-asr|Humazah|Al-fil|Quraish|Al-maun|Kausar|Kafirun|Nasr|Lahab|Ikhlas|Falaq|Naas"
+function V25.mkKZFiles()
+local t={} local i=1
+for x in string.gmatch(V25_KZ,"[^|]+") do t[tostring(i)]=string.format("%03d",i).."Surah"..x..".mp3" i=i+1 end
+t["1"]="001 Surah Fatiha.mp3" return t end
+local V25_URDU_NEW = {
+ {k="u1", i="SheikhSudaisAndShuraimUrduTranslation", l="Urdu (Sudais & Shuraim)", suf="%20www.quranaudio.info.mp3"},
+ {k="u2", i="AbdulBasitAbdulSamadQuranWithUrduTranslation", l="Urdu (Abdul Basit)", suf="%20www.quranaudio.info.mp3"},
+ {k="u3", i="c3687113_trbvm_002", l="Urdu (Maher Al Muaiqly)", suf=".mp3"},
+ {k="u4", i="BeautifulAudioQuranRecitationWithUrduTranslation", l="Urdu (Abdullah Momin)", suf=".mp3"},
+ {k="u5", i="Saud_al-shuraim_with_abdulrahman_alsudaesurduTranslation_mp3_quran", l="Urdu (Saud Al Shuraim)", suf=".mp3"},
+ {k="u6", i="MohammedSiddiqAl-MinshawiWithUrduTranslationDownload", l="Urdu (Minshawi)", suf=".mp3"},
+ {k="u7", i="HANIAR-RIFAIWithUrduTranslationQuran", l="Urdu (Hani Al Rifai)", suf=".mp3"},
+ {k="u8", i="audio-quran-with-urdu-translation", l="Urdu (Aasan Tarjuma - Taqi Usmani)", suf=".mp3", pre="tu_mr_s_"},
+ {k="u9", i="quran_urdu_audio_only", l="Urdu (Sirf Tarjuma - Bagair Tilawat)", suf=".mp3"},
+ {k="u10", i="Al_Quran_Ahmad_AlAjmy_with_Urdu_Translation", l="Urdu (Ahmed Al-Ajmi)", n={["1"]="01AL-FATIHAH.mp3",["2"]="02AL-BAQARAH.mp3",["3"]="03Al-imran.mp3",["4"]="04An-nisa.mp3",["5"]="05Al-maidah.mp3",["6"]="06Al-anam.mp3",["7"]="07Al-araf.mp3",["8"]="08Al-anfal.mp3",["9"]="09At-taubah.mp3",["10"]="10Yunus.mp3",["11"]="11Hood.mp3",["12"]="12Yusuf.mp3",["13"]="13Ar-rad.mp3",["14"]="14Ibrahim.mp3",["15"]="15Al-hijr.mp3",["16"]="16Al-nahl.mp3",["17"]="17Al-israa.mp3",["18"]="18Al-kahf.mp3",["19"]="19Maryam.mp3",["20"]="20Ta-ha.mp3",["21"]="21Al-anbiya.mp3",["22"]="22Al-hajj.mp3",["23"]="23Al-muminun.mp3",["24"]="24An-nur.mp3",["25"]="25Al-furqan.mp3",["26"]="26Ash-shuara.mp3",["27"]="27An-naml.mp3",["28"]="28Al-Qasas.mp3",["29"]="29Al-ankabut.mp3",["30"]="30Ar-room.mp3",["31"]="31Luqman.mp3",["32"]="32As-sajdah.mp3",["33"]="33Al-ahzab.mp3",["34"]="34Saba.mp3",["35"]="35Fatir.mp3",["36"]="36Ya-sin.mp3",["37"]="37As-saffat.mp3",["38"]="38Sad.mp3",["39"]="39Az-zumar.mp3",["40"]="40Ghafir.mp3",["41"]="41Fussilat.mp3",["42"]="42Ash-shura.mp3",["43"]="43Az-zukhruf.mp3",["44"]="44Ad-dukhan.mp3",["45"]="45Al-jathiya.mp3",["46"]="46Al-ahqaf.mp3",["47"]="47Muhammad.mp3",["48"]="48Al-fath.mp3",["49"]="49Al-hujurat.mp3",["50"]="50Qaf.mp3",["51"]="51Az-zariyat.mp3",["52"]="52At-tur.mp3",["53"]="53An-najm.mp3",["54"]="54Al-qamar.mp3",["55"]="55Ar-rahman.mp3",["56"]="56Al-waqiah.mp3",["57"]="57Al-hadid.mp3",["58"]="58Al-mujadila.mp3",["59"]="59Al-hashr.mp3",["60"]="60Al-mumtahinah.mp3",["61"]="61As-saff.mp3",["62"]="62Al-jumuah.mp3",["63"]="63Al-munafiqun.mp3",["64"]="64At-taghabun.mp3",["65"]="65At-talaq.mp3",["66"]="66At-tahrim.mp3",["67"]="67Al-mulk.mp3",["68"]="68Al-qalam.mp3",["69"]="69Al-haqqah.mp3",["70"]="70Al-maarij.mp3",["71"]="71Nooh.mp3",["72"]="72Al-jinn.mp3",["73"]="73Al-muzzammil.mp3",["74"]="74Al-muddaththir.mp3",["75"]="75Al-qiyamah.mp3",["76"]="76Al-insan.mp3",["77"]="77Al-mursalat.mp3",["78"]="78An-naba.mp3",["79"]="79An-naziat.mp3",["80"]="80abasa.mp3",["81"]="81At-takwir.mp3",["82"]="82Al-infitar.mp3",["83"]="83Al-mutaffifin.mp3",["84"]="84Al-inshiqaq.mp3",["85"]="85Al-buruj.mp3",["86"]="86At-tariq.mp3",["87"]="87Al-ala.mp3",["88"]="88Al-ghashiyah.mp3",["89"]="89Al-fajr.mp3",["90"]="90Al-balad.mp3",["91"]="91Ash-shams.mp3",["92"]="92Al-lail.mp3",["93"]="93Ad-duha.mp3",["94"]="94Ash-sharh.mp3",["95"]="95At-tin.mp3",["96"]="96Al-alaq.mp3",["97"]="97Al-qadr.mp3",["98"]="98Al-baiyinah.mp3",["99"]="99Az-zazalah.mp3",["100"]="_100Al-adiyat.mp3",["101"]="_101Al-qaria.mp3",["102"]="_102At-takathur.mp3",["103"]="_103Al-asr.mp3",["104"]="_104Al-humazah.mp3",["105"]="_105Al-fil.mp3",["106"]="_106Quraish.mp3",["107"]="_107Al-maun.mp3",["108"]="_108Al-kauthar.mp3",["109"]="_109Al-kafirun.mp3",["110"]="_110An-nasr.mp3",["111"]="_111Al-masad.mp3",["112"]="_112Al-ikhlas.mp3",["113"]="_113Al-falaq.mp3",["114"]="_114An-nas.mp3"}},
+ {k="u11", i="AbdullahAliBasfarMp3QuranWithUrduTranslationfull-ogg", l="Urdu (Abdullah Ali Basfar)", suf=".mp3"},
+ {k="u12", i="Urdu_Audio_Quran_Translation", l="Urdu (Tarjuma - Doosri Recording)", suf=".mp3"},
+ {k="u13", i="TilawaatEQuranByMuhammadAsadAttariAndTarjumaEKanzUlImanByAbdulHabibAttari", l="Kanzul Iman - Attari", n=V25.mkKZFiles()},
 }
-
--- Farsi per-ayah voice selection; URLs use EveryAyah's per-ayah numbering.
+for _, q in ipairs(V25_URDU_NEW) do
+V25.qariItems[q.k] = q.i
+V25.qariFiles[q.k] = q.n or V25.mkQFiles(q.suf, q.pre)
+V25.modes[q.l] = {kind="qari", key=q.k, label="Urdu Tarjuma: " .. q.l .. " (poora surah)"}
+table.insert(V25_TRANSLATION_LABELS, q.l)
+end
 local farsiVoice = prefs.getString("farsiAyahVoice", "Fooladvand")
-local function saveFarsiVoice(v)
-  farsiVoice = v
-  prefs.edit().putString("farsiAyahVoice", v).apply()
+M.saveFarsiVoice = function(v)
+farsiVoice = v
+prefs.edit().putString("farsiAyahVoice", v).apply()
 end
-local function buildFarsiAyahUrl(surahIdx, ayahNum)
-  local folder = (farsiVoice == "Makarem") and "Makarem_Kabiri_16Kbps" or "Fooladvand_Hedayatfar_40Kbps"
-  return "https://everyayah.com/data/translations/" .. folder .. "/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
+M.buildFarsiAyahUrl = function(surahIdx, ayahNum)
+local folder = (farsiVoice == "Makarem") and "Makarem_Kabiri_16Kbps" or "Fooladvand_Hedayatfar_40Kbps"
+return "https://everyayah.com/data/translations/" .. folder .. "/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
 end
--- Azan audio directory and 11 available recordings (ten direct tracks plus one archive sample).
 local ADHAN_ARCHIVE="https://archive.org/download/90---azan---90---azan--many----sound----mp3---alazan/"
-local AZAN_TRACKS = {
-  {name="Adhan 1 (Archive)", url=ADHAN_ARCHIVE.."001-.mp3"},
-  {name="Adhan 2 (Archive)", url=ADHAN_ARCHIVE.."002--.mp3"},
-  {name="Adhan 3 (Archive)", url=ADHAN_ARCHIVE.."003--.mp3"},
-  {name="Adhan 4 (Archive)", url=ADHAN_ARCHIVE.."004----1.mp3"},
-  {name="Adhan 5 (Archive)", url=ADHAN_ARCHIVE.."005----2.mp3"},
-  {name="Adhan 6 (Archive)", url=ADHAN_ARCHIVE.."006--.mp3"},
-  {name="Adhan 7 (Archive)", url=ADHAN_ARCHIVE.."007--.mp3"},
-  {name="Adhan 8 (Archive)", url=ADHAN_ARCHIVE.."008--.mp3"},
-  {name="Adhan 9 (Archive)", url=ADHAN_ARCHIVE.."009--.mp3"},
-  {name="Adhan 10 (Archive)", url=ADHAN_ARCHIVE.."010--.mp3"},
-  {name="Adhan Makkah (IslamCan)", url="https://www.islamcan.com/audio/adhan/azan3.mp3"},
-  {name="Adhan (IslamCan 4)", url="https://www.islamcan.com/audio/adhan/azan4.mp3"},
-  {name="Adhan (IslamCan 5)", url="https://www.islamcan.com/audio/adhan/azan5.mp3"},
-  {name="Adhan (IslamCan 7)", url="https://www.islamcan.com/audio/adhan/azan7.mp3"},
-  {name="Adhan (IslamCan 10)", url="https://www.islamcan.com/audio/adhan/azan10.mp3"},
-}
-local function getAzanLocalPath(i) return azanAudioDir .. "azan_" .. tostring(i) .. ".mp3" end
-
-
-
--- FIX (v2.2): Chinese tarjuma hata di gayi hai (uska audio source
--- reliably kaam nahi kar raha tha) - agar kisi ne pehle se Chinese
--- select ki hui thi, usay khud-ba-khud "Off" par wapis kar dete hain
--- taake koi purani/ghalat value atki na rahe
+local AZAN_TRACKS = { {name="Adhan 1 (Archive)", url=ADHAN_ARCHIVE.."001-.mp3"}, {name="Adhan 2 (Archive)", url=ADHAN_ARCHIVE.."002--.mp3"}, {name="Adhan 3 (Archive)", url=ADHAN_ARCHIVE.."003--.mp3"}, {name="Adhan 4 (Archive)", url=ADHAN_ARCHIVE.."004----1.mp3"}, {name="Adhan 5 (Archive)", url=ADHAN_ARCHIVE.."005----2.mp3"}, {name="Adhan 6 (Archive)", url=ADHAN_ARCHIVE.."006--.mp3"}, {name="Adhan 7 (Archive)", url=ADHAN_ARCHIVE.."007--.mp3"}, {name="Adhan 8 (Archive)", url=ADHAN_ARCHIVE.."008--.mp3"}, {name="Adhan 9 (Archive)", url=ADHAN_ARCHIVE.."009--.mp3"}, {name="Adhan 10 (Archive)", url=ADHAN_ARCHIVE.."010--.mp3"}, {name="Adhan Makkah (IslamCan)", url="https://www.islamcan.com/audio/adhan/azan3.mp3"}, {name="Adhan (IslamCan 4)", url="https://www.islamcan.com/audio/adhan/azan4.mp3"}, {name="Adhan (IslamCan 5)", url="https://www.islamcan.com/audio/adhan/azan5.mp3"}, {name="Adhan (IslamCan 7)", url="https://www.islamcan.com/audio/adhan/azan7.mp3"}, {name="Adhan (IslamCan 10)", url="https://www.islamcan.com/audio/adhan/azan10.mp3"}, }
+M.getAzanLocalPath = function(i) return azanAudioDir .. "azan_" .. tostring(i) .. ".mp3" end
 local translationMode = prefs.getString("translationMode", "Off")
 if translationMode == "Chinese" then translationMode = "Off" end
 if translationMode=="Waheed Zafar" or translationMode=="Urdu Audio - Whole Surah (Waheed Zafar)" or translationMode=="Urdu Whole-Surah (Waheed Zafar)" then translationMode="Urdu (Waheed Zafar)" end
 if translationMode=="Shakir Qasmi" or translationMode=="Urdu Audio - Whole Surah (Shakir Qasmi)" or translationMode=="Urdu Whole-Surah (Shakir Qasmi)" then translationMode="Urdu (Shakir Qasmi)" end
 prefs.edit().putString("translationMode",translationMode).apply()
-local function saveTranslationMode(v)
-  translationMode = v
-  prefs.edit().putString("translationMode", v).apply()
+M.saveTranslationMode = function(v)
+translationMode = v
+prefs.edit().putString("translationMode", v).apply()
 end
-
--- Ayat-ba-Ayat audio: per-ayah files sirf ek fixed, verified reciter (Alafasy)
--- ke liye reliably available hain (everyayah.com) - app ke dynamic 50+ reciter
--- list (jo poori Surah files deti hai) mein per-ayah files available nahi hain,
--- is liye Ayat-ba-Ayat hamesha isi reciter ki awaz mein hoga
 local ayahAudioDir = duaAudioDir:gsub("Dua_Audio", "Ayah_Audio")
 if not File(ayahAudioDir).exists() then File(ayahAudioDir).mkdirs() end
-local function buildAyahUrl(surahIdx, ayahNum)
-  return "https://everyayah.com/data/Alafasy_128kbps/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
+M.buildAyahUrl = function(surahIdx, ayahNum)
+return "https://everyayah.com/data/Alafasy_128kbps/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
 end
-local function getAyahAudioLocal(surahIdx, ayahNum)
-  return ayahAudioDir .. "s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
+M.getAyahAudioLocal = function(surahIdx, ayahNum)
+return ayahAudioDir .. "s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
 end
--- NAYA (v2.1): Urdu per-Ayat tarjuma (everyayah.com: translations/
--- urdu_shamshad_ali_khan_46kbps) - bilkul wahi %03d%03d numbering jo
--- Arabic per-Ayat audio mein hai (verified), is liye Ayat-ba-Ayat aur
--- Ruku dono mode isay reuse kar sakte hain.
-local function buildUrduAyahUrl(surahIdx, ayahNum)
-  return "https://everyayah.com/data/translations/urdu_shamshad_ali_khan_46kbps/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
+M.buildUrduAyahUrl = function(surahIdx, ayahNum)
+return "https://everyayah.com/data/translations/urdu_shamshad_ali_khan_46kbps/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
 end
-local function getUrduAyahAudioLocal(surahIdx, ayahNum)
-  return ayahAudioDir .. "urdu_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
+M.getUrduAyahAudioLocal = function(surahIdx, ayahNum)
+return ayahAudioDir .. "urdu_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
 end
--- NAYA (v2.1): Farhat Hashmi ki Urdu tarjuma (everyayah.com: translations/
--- urdu_farhat_hashmi) - dusri Urdu awaz, bilkul wahi per-Ayat numbering.
-local function buildFarhatAyahUrl(surahIdx, ayahNum)
-  return "https://everyayah.com/data/translations/urdu_farhat_hashmi/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
-end
-local function getFarhatAyahAudioLocal(surahIdx, ayahNum)
-  return ayahAudioDir .. "farhat_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
-end
-local urduVoice = prefs.getString("urduVoice", "Shamshad")  -- "Shamshad" or "Farhat"
-local function saveUrduVoice(v)
-  urduVoice = v
-  prefs.edit().putString("urduVoice", v).apply()
-end
--- Ayat-ba-Ayat/Ruku mode ke liye: currently selected Urdu voice ke mutabiq
--- sahi URL/local-path jodi wapis karta hai
-local function currentUrduAyahPair(surahIdx, n)
-  if urduVoice == "Farhat" then
-    return buildFarhatAyahUrl(surahIdx, n), getFarhatAyahAudioLocal(surahIdx, n)
-  else
-    return buildUrduAyahUrl(surahIdx, n), getUrduAyahAudioLocal(surahIdx, n)
-  end
-end
--- NAYA (v2.1): English per-Ayat tarjuma (everyayah.com: English/
--- Sahih_Intnl_Ibrahim_Walk_192kbps) - wahi Ibrahim Walk ki awaz jo
--- Surah-level English mein hai, verified.
-local function buildEnglishAyahUrl(surahIdx, ayahNum)
-  return "https://everyayah.com/data/English/Sahih_Intnl_Ibrahim_Walk_192kbps/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
-end
-local function getEnglishAyahAudioLocal(surahIdx, ayahNum)
-  return ayahAudioDir .. "english_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
-end
-local function getFarsiAyahAudioLocal(surahIdx, ayahNum)
-  return ayahAudioDir .. "farsi_" .. string.lower(farsiVoice) .. "_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
-end
+M.buildFarhatAyahUrl = function(surahIdx, ayahNum)
 
--- FIX (crash): "Download All Ayahs" pehle DownloadManager use kar raha tha -
--- ek Surah ke sath sath sau se zyada chhoti files ke liye DownloadManager ko
--- baar baar (loop mein) call karna, phir har ek ke liye poll karna, device ke
--- system resources (aur uske sath Jieshuo/TalkBack) ko overload kar deta tha,
--- jis se CSR crash/hang ho raha tha. Ab ek halka, seedha HTTP download hota
--- hai (koi DownloadManager, koi notification, koi system-service overhead
--- nahi) - yeh chhoti files ke liye kaafi zyada reliable aur halka hai.
---
--- FIX (line 279 error): mera pehla byte-array banane ka tareeqa
--- (luajava.newArray / luajava.newInstance) is AndroLua build mein kaam nahi
--- kar raha tha. AndroLua_pro ke apne source code (bin.lua) mein sahi tareeqa
--- mila: "byte[size]" syntax, aur ek built-in "LuaUtil.copyFile(input, output)"
--- utility jo yeh kaam khud handle karti hai - ab pehle wahi try hoti hai.
-local function makeByteBuffer(size)
-  local ok, buf = pcall(function() return byte[size] end)
-  if ok and buf then return buf end
-  local ok2, buf2 = pcall(function() return luajava.newArray("byte", size) end)
-  if ok2 and buf2 then return buf2 end
-  return nil
+M.buildKanzulAyahUrl = function(surahIdx, ayahNum)
+return "https://archive.org/download/kanzul-iman-urdu-audio-translation/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
 end
-
+M.getKanzulAyahAudioLocal = function(surahIdx, ayahNum)
+return (string.gsub(M.getFarhatAyahAudioLocal(surahIdx, ayahNum), "farhat", "kanzul"))
+end
+return "https://everyayah.com/data/translations/urdu_farhat_hashmi/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
+end
+M.getFarhatAyahAudioLocal = function(surahIdx, ayahNum)
+return ayahAudioDir .. "farhat_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
+end
+local urduVoice = prefs.getString("urduVoice", "Shamshad")
+M.saveUrduVoice = function(v)
+urduVoice = v
+prefs.edit().putString("urduVoice", v).apply()
+end
+M.currentUrduAyahPair = function(surahIdx, n)
+if urduVoice == "Kanzul" then return M.buildKanzulAyahUrl(surahIdx, n), M.getKanzulAyahAudioLocal(surahIdx, n) end
+if urduVoice == "Farhat" then
+return M.buildFarhatAyahUrl(surahIdx, n), M.getFarhatAyahAudioLocal(surahIdx, n)
+else
+return M.buildUrduAyahUrl(surahIdx, n), M.getUrduAyahAudioLocal(surahIdx, n)
+end
+end
+M.buildEnglishAyahUrl = function(surahIdx, ayahNum)
+return "https://everyayah.com/data/English/Sahih_Intnl_Ibrahim_Walk_192kbps/" .. string.format("%03d%03d", surahIdx, ayahNum) .. ".mp3"
+end
+M.getEnglishAyahAudioLocal = function(surahIdx, ayahNum)
+return ayahAudioDir .. "english_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
+end
+M.getFarsiAyahAudioLocal = function(surahIdx, ayahNum)
+return ayahAudioDir .. "farsi_" .. string.lower(farsiVoice) .. "_s" .. surahIdx .. "_a" .. ayahNum .. ".mp3"
+end
+M.makeByteBuffer = function(size)
+local ok, buf = pcall(function() return byte[size] end)
+if ok and buf then return buf end
+local ok2, buf2 = pcall(function() return luajava.newArray("byte", size) end)
+if ok2 and buf2 then return buf2 end
+return nil
+end
 local lastDownloadError = ""
-local function directDownload(urlStr, destPath)
-  local conn, inStream, outStream
-  local ok, err = pcall(function()
-    conn = URL(urlStr).openConnection()
-    conn.setConnectTimeout(10000)
-    conn.setReadTimeout(15000)
-    conn.setInstanceFollowRedirects(true)
-    inStream = conn.getInputStream()
-    outStream = FileOutputStream(destPath)
-
-    local usedUtil = pcall(function() LuaUtil.copyFile(inStream, outStream) end)
-    if not usedUtil then
-      -- Fallback: manual copy loop with the correct byte[] array syntax
-      local buffer = makeByteBuffer(4096)
-      if not buffer then error("byte buffer creation failed - no working array API found") end
-      local len = inStream.read(buffer)
-      while len and len > 0 do
-        outStream.write(buffer, 0, len)
-        len = inStream.read(buffer)
-      end
-    end
-  end)
-  -- FIX (severe crash/reboot on bulk download): pehle yeh cleanup lines
-  -- upar wale pcall ke ANDAR, aakhir mein thi - agar koi download beech mein
-  -- fail hota (timeout, network hiccup - jo 100+ requests mein laazmi kabhi
-  -- na kabhi hota hai) to connection/stream kabhi band nahi hoti thi. Itni
-  -- saari leaked connections jama hoke poore device ko unstable/crash kar
-  -- deti thin. Ab cleanup HAMESHA hota hai, chahe download kamyab ho ya na ho.
-  pcall(function() if outStream then outStream:flush() end end)
-  pcall(function() if outStream then outStream:close() end end)
-  pcall(function() if inStream then inStream:close() end end)
-  pcall(function() if conn then conn:disconnect() end end)
-  if not ok then
-    lastDownloadError = tostring(err)
-    pcall(function() File(destPath).delete() end)
-    return false
-  end
-  -- Chhoti/khaali file ka matlab download adhoori/kharab hui - usay valid nahi maante
-  local f = File(destPath)
-  if not f.exists() or f.length() < 1000 then
-    lastDownloadError = "file too small (" .. tostring(f.exists() and f.length() or 0) .. " bytes) - likely truncated"
-    pcall(function() f.delete() end)
-    return false
-  end
-  return true
+M.directDownload = function(urlStr, destPath)
+local conn, inStream, outStream
+local ok, err = pcall(function()
+conn = URL(urlStr).openConnection()
+conn.setConnectTimeout(10000)
+conn.setReadTimeout(15000)
+conn.setInstanceFollowRedirects(true)
+inStream = conn.getInputStream()
+outStream = FileOutputStream(destPath)
+local usedUtil = pcall(function() LuaUtil.copyFile(inStream, outStream) end)
+if not usedUtil then
+local buffer = M.makeByteBuffer(4096)
+if not buffer then error("byte buffer creation failed - no working array API found") end
+local len = inStream.read(buffer)
+while len and len > 0 do
+outStream.write(buffer, 0, len)
+len = inStream.read(buffer)
 end
-
--- Bulk downloads (100+ files) ko EK lambi background thread mein loop karne
--- ki bajaye, har ayat ke liye alag CHHOTI thread banate hain, aur agli sirf
--- pichli poori khatam hone ke baad, main thread se thodi der (delay) ke sath
--- shuru karte hain. Isse system/accessibility-service ko har download ke
--- baad "saans lene" ka pura mauka milta hai - lambi, mustaqil background
--- thread na hone se watchdog/ANR ka khatra bohot kam ho jata hai.
-local function downloadSequentially(items, index, doneCount, onProgress, onComplete)
-  if index > #items then
-    onComplete(doneCount)
-    return
-  end
-  local item = items[index]
-  Thread(Runnable{run=function()
-    pcall(function() Thread.currentThread():setPriority(Thread.MIN_PRIORITY) end)
-    local success = File(item.path).exists()
-    if not success then
-      success = directDownload(item.url, item.path)
-    end
-    local newDone = doneCount + (success and 1 or 0)
-    handler.postDelayed(function()
-      pcall(onProgress, newDone, index)
-      downloadSequentially(items, index + 1, newDone, onProgress, onComplete)
-    end, 40)
-  end}).start()
 end
-
+end)
+pcall(function() if outStream then outStream:flush() end end)
+pcall(function() if outStream then outStream:close() end end)
+pcall(function() if inStream then inStream:close() end end)
+pcall(function() if conn then conn:disconnect() end end)
+if not ok then
+lastDownloadError = tostring(err)
+pcall(function() File(destPath).delete() end)
+return false
+end
+local f = File(destPath)
+if not f.exists() or f.length() < 1000 then
+lastDownloadError = "file too small (" .. tostring(f.exists() and f.length() or 0) .. " bytes) - likely truncated"
+pcall(function() f.delete() end)
+return false
+end
+return true
+end
+M.downloadSequentially = function(items, index, doneCount, onProgress, onComplete)
+if index > #items then
+onComplete(doneCount)
+return
+end
+local item = items[index]
+Thread(Runnable{run=function()
+pcall(function() Thread.currentThread():setPriority(Thread.MIN_PRIORITY) end)
+local success = File(item.path).exists()
+if not success then
+success = M.directDownload(item.url, item.path)
+end
+local newDone = doneCount + (success and 1 or 0)
+handler.postDelayed(function()
+pcall(onProgress, newDone, index)
+M.downloadSequentially(items, index + 1, newDone, onProgress, onComplete)
+end, 40)
+end}).start()
+end
 local paraNames = {}
 for i=1,30 do paraNames[i] = "Para " .. i .. " (" .. surahNames[paraSurahStart[i]] .. " se)" end
-
 local wazaifCategories = {"General Zikr", "Morning Azkar", "Evening Azkar", "Protection", "Durood Shareef"}
-local wazaifLabels = {
-  "Bismillah", "SubhanAllah", "Alhamdulillah", "Allahu Akbar", "La Ilaha Illallah", "Astaghfirullah",
-  "SubhanAllahi Wa Bihamdihi", "Hasbunallahu Wa Ni'mal Wakeel", "La Hawla Wa La Quwwata",
-  "Ayatul Kursi", "Durood-e-Ibrahimi"
-}
-local wazaifArabicText = {
-  "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ", "سُبْحَانَ اللَّهِ", "الْحَمْدُ لِلَّهِ", "اللَّهُ أَكْبَرُ", "لَا إِلَٰهَ إِلَّا اللَّهُ", "أَسْتَغْفِرُ اللَّهَ",
-  "سُبْحَانَ اللَّهِ وَبِحَمْدِهِ", "حَسْبُنَا اللَّهُ وَنِعْمَ الْوَكِيلُ", "لَا حَوْلَ وَلَا قُوَّةَ إِلَّا بِاللَّهِ",
-  "اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ الْحَيُّ الْقَيُّومُ", "اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ وَعَلَى آلِ مُحَمَّدٍ"
-}
-
-local dailyAyahs = {
-  {ar="فَإِنَّ مَعَ الْعُسْرِ يُسْرًا", ur="پس بے شک مشکل کے ساتھ آسانی ہے", ref="Surah Ash-Sharh: 5"},
-  {ar="وَاسْتَعِينُوا بِالصَّبْرِ وَالصَّلَاةِ", ur="اور صبر اور نماز کے ذریعے مدد طلب کرو", ref="Surah Al-Baqarah: 45"},
-  {ar="فَاذْكُرُونِي أَذْكُرْكُمْ", ur="پس تم مجھے یاد رکھو، میں تمہیں یاد رکھوں گا", ref="Surah Al-Baqarah: 152"}
-}
-
--- Blessed Names of Prophet Muhammad (peace be upon him) - jaise Quran ke
--- dono side par likhe hote hain, waise hi screen par show honge
-local asmaNabi = {
-  {ar="مُحَمَّد", ro="Muhammad", ur="بہت زیادہ تعریف کیا گیا"},
-  {ar="أَحْمَد", ro="Ahmad", ur="سب سے زیادہ تعریف کرنے والا"},
-  {ar="الْمَاحِي", ro="Al-Mahi", ur="کفر مٹانے والا"},
-  {ar="الْحَاشِر", ro="Al-Hashir", ur="جس کے بعد لوگ حشر کے لیے جمع ہوں گے"},
-  {ar="الْعَاقِب", ro="Al-Aqib", ur="سب سے آخری نبی"},
-  {ar="رَسُول الله", ro="Rasul Allah", ur="اللہ کے رسول"},
-  {ar="النَّبِيّ", ro="An-Nabi", ur="نبی"},
-  {ar="حَبِيب الله", ro="Habib Allah", ur="اللہ کے پیارے"},
-  {ar="المُصْطَفَى", ro="Al-Mustafa", ur="چنا ہوا"},
-  {ar="الأمِين", ro="Al-Ameen", ur="امانت دار"},
-  {ar="الصَّادِق", ro="As-Sadiq", ur="سچا"},
-  {ar="سِرَاجًا مُنِيرًا", ro="Sirajan Muneera", ur="روشن چراغ"},
-  {ar="رَحْمَة لِلْعَالَمِين", ro="Rahmatan lil-Alameen", ur="جہانوں کے لیے رحمت"},
-  {ar="شَاهِد", ro="Shahid", ur="گواہی دینے والا"},
-  {ar="مُبَشِّر", ro="Mubashshir", ur="خوشخبری دینے والا"},
-  {ar="نَذِير", ro="Nazir", ur="ڈرانے والا"},
-  {ar="دَاعِيًا إِلَى الله", ro="Da'iyan ilAllah", ur="اللہ کی طرف بلانے والا"},
-  {ar="طٰه", ro="Taha", ur="پاک، پاکیزہ"},
-  {ar="يٰسٓ", ro="Ya-Seen", ur="اے انسانوں کے سردار"},
-  {ar="خَاتَم النَّبِيِّين", ro="Khatam-un-Nabiyyeen", ur="نبیوں کے آخری"}
-}
-
--- 99 Names of Allah (each with per-name audio for individual play)
+local wazaifLabels = { "Bismillah", "SubhanAllah", "Alhamdulillah", "Allahu Akbar", "La Ilaha Illallah", "Astaghfirullah", "SubhanAllahi Wa Bihamdihi", "Hasbunallahu Wa Ni'mal Wakeel", "La Hawla Wa La Quwwata", "Ayatul Kursi", "Durood-e-Ibrahimi" }
+local wazaifArabicText = { "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ", "سُبْحَانَ اللَّهِ", "الْحَمْدُ لِلَّهِ", "اللَّهُ أَكْبَرُ", "لَا إِلَٰهَ إِلَّا اللَّهُ", "أَسْتَغْفِرُ اللَّهَ", "سُبْحَانَ اللَّهِ وَبِحَمْدِهِ", "حَسْبُنَا اللَّهُ وَنِعْمَ الْوَكِيلُ", "لَا حَوْلَ وَلَا قُوَّةَ إِلَّا بِاللَّهِ", "اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ الْحَيُّ الْقَيُّومُ", "اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ وَعَلَى آلِ مُحَمَّدٍ" }
+local dailyAyahs = { {ar="فَإِنَّ مَعَ الْعُسْرِ يُسْرًا", ur="پس بے شک مشکل کے ساتھ آسانی ہے", ref="Surah Ash-Sharh: 5"}, {ar="وَاسْتَعِينُوا بِالصَّبْرِ وَالصَّلَاةِ", ur="اور صبر اور نماز کے ذریعے مدد طلب کرو", ref="Surah Al-Baqarah: 45"}, {ar="فَاذْكُرُونِي أَذْكُرْكُمْ", ur="پس تم مجھے یاد رکھو، میں تمہیں یاد رکھوں گا", ref="Surah Al-Baqarah: 152"} }
+local asmaNabi = { {ar="مُحَمَّد", ro="Muhammad", ur="بہت زیادہ تعریف کیا گیا"}, {ar="أَحْمَد", ro="Ahmad", ur="سب سے زیادہ تعریف کرنے والا"}, {ar="الْمَاحِي", ro="Al-Mahi", ur="کفر مٹانے والا"}, {ar="الْحَاشِر", ro="Al-Hashir", ur="جس کے بعد لوگ حشر کے لیے جمع ہوں گے"}, {ar="الْعَاقِب", ro="Al-Aqib", ur="سب سے آخری نبی"}, {ar="رَسُول الله", ro="Rasul Allah", ur="اللہ کے رسول"}, {ar="النَّبِيّ", ro="An-Nabi", ur="نبی"}, {ar="حَبِيب الله", ro="Habib Allah", ur="اللہ کے پیارے"}, {ar="المُصْطَفَى", ro="Al-Mustafa", ur="چنا ہوا"}, {ar="الأمِين", ro="Al-Ameen", ur="امانت دار"}, {ar="الصَّادِق", ro="As-Sadiq", ur="سچا"}, {ar="سِرَاجًا مُنِيرًا", ro="Sirajan Muneera", ur="روشن چراغ"}, {ar="رَحْمَة لِلْعَالَمِين", ro="Rahmatan lil-Alameen", ur="جہانوں کے لیے رحمت"}, {ar="شَاهِد", ro="Shahid", ur="گواہی دینے والا"}, {ar="مُبَشِّر", ro="Mubashshir", ur="خوشخبری دینے والا"}, {ar="نَذِير", ro="Nazir", ur="ڈرانے والا"}, {ar="دَاعِيًا إِلَى الله", ro="Da'iyan ilAllah", ur="اللہ کی طرف بلانے والا"}, {ar="طٰه", ro="Taha", ur="پاک، پاکیزہ"}, {ar="يٰسٓ", ro="Ya-Seen", ur="اے انسانوں کے سردار"}, {ar="خَاتَم النَّبِيِّين", ro="Khatam-un-Nabiyyeen", ur="نبیوں کے آخری"} }
 local asmaUlHusna = {
-  {ar="الرَّحْمَٰنُ", ro="Ar-Rahman", ur="بہت مہربان"}, {ar="الرَّحِيمُ", ro="Ar-Raheem", ur="نہایت رحم والا"}, {ar="الْمَلِكُ", ro="Al-Malik", ur="بادشاہ"},
-  {ar="الْقُدُّوسُ", ro="Al-Quddus", ur="پاک ذات"}, {ar="السَّلَامُ", ro="As-Salam", ur="سلامتی دینے والا"}, {ar="الْمُؤْمِنُ", ro="Al-Mu'min", ur="امن دینے والا"},
-  {ar="الْمُهَيْمِنُ", ro="Al-Muhaymin", ur="نگہبان"}, {ar="الْعَزِيزُ", ro="Al-Aziz", ur="غالب"}, {ar="الْجَبَّارُ", ro="Al-Jabbar", ur="زبردست"},
-  {ar="الْمُتَكَبِّرُ", ro="Al-Mutakabbir", ur="بڑائی والا"}, {ar="الْخَالِقُ", ro="Al-Khaliq", ur="پیدا کرنے والا"}, {ar="الْبَارِئُ", ro="Al-Bari'", ur="جان ڈالنے والا"},
-  {ar="الْمُصَوِّرُ", ro="Al-Musawwir", ur="صورت بنانے والا"}, {ar="الْغَفَّارُ", ro="Al-Ghaffar", ur="بہت بخشنے والا"}, {ar="الْقَهَّارُ", ro="Al-Qahhar", ur="قہر ڈالنے والا"},
-  {ar="الْوَهَّابُ", ro="Al-Wahhab", ur="سب کچھ عطا کرنے والا"}, {ar="الرَّزَّاقُ", ro="Ar-Razzaq", ur="رزق دینے والا"}, {ar="الْفَتَّاحُ", ro="Al-Fattah", ur="کھولنے والا"},
-  {ar="اَلْعَلِيْمُ", ro="Al-Alim", ur="جاننے والا"}, {ar="الْقَابِضُ", ro="Al-Qabid", ur="تنگی کرنے والا"}, {ar="الْبَاسِطُ", ro="Al-Basit", ur="فراخی کرنے والا"},
-  {ar="الْخَافِضُ", ro="Al-Khafid", ur="پست کرنے والا"}, {ar="الرَّافِعُ", ro="Ar-Rafi'", ur="بلند کرنے والا"}, {ar="الْمُعِزُّ", ro="Al-Mu'izz", ur="عزت دینے والا"},
-  {ar="المذِلُّ", ro="Al-Mudhill", ur="ذلت دینے والا"}, {ar="السَّمِيعُ", ro="As-Sami'", ur="سننے والا"}, {ar="الْبَصِيرُ", ro="Al-Basir", ur="دیکھنے والا"},
-  {ar="الْحَكَمُ", ro="Al-Hakam", ur="فیصلہ کرنے والا"}, {ar="الْعَدْلُ", ro="Al-Adl", ur="انصاف کرنے والا"}, {ar="اللَّطِيفُ", ro="Al-Latif", ur="مہربان"},
-  {ar="الْخَبِيرُ", ro="Al-Khabir", ur="خبردار"}, {ar="الْحَلِيمُ", ro="Al-Halim", ur="بردبار"}, {ar="الْعَظِيمُ", ro="Al-Azim", ur="عظمت والا"},
-  {ar="الْغَفُورُ", ro="Al-Ghafur", ur="بہت بخشنے والا"}, {ar="الشَّكُورُ", ro="Ash-Shakur", ur="قدردان"}, {ar="الْعَلِيُّ", ro="Al-Ali", ur="بہت بلند"},
-  {ar="الْكَبِيرُ", ro="Al-Kabir", ur="بہت بڑا"}, {ar="الْحَفِيظُ", ro="Al-Hafiz", ur="حفاظت کرنے والا"}, {ar="المُقيِتُ", ro="Al-Muqit", ur="روزی پہنچانے والا"},
-  {ar="الْحَسِيبُ", ro="Al-Hasib", ur="حساب لینے والا"}, {ar="الْجَلِيلُ", ro="Al-Jalil", ur="بزرگ"}, {ar="الْكَرِيمُ", ro="Al-Karim", ur="کرم کرنے والا"},
-  {ar="الرَّقِيبُ", ro="Ar-Raqib", ur="نگہبان"}, {ar="الْمُجِيبُ", ro="Al-Mujib", ur="دعا قبول کرنے والا"}, {ar="الْوَاسِعُ", ro="Al-Wasi'", ur="وسعت والا"},
-  {ar="الْحَكِيمُ", ro="Al-Hakim", ur="حکمت والا"}, {ar="الْوَدُودُ", ro="Al-Wadud", ur="محبت کرنے والا"}, {ar="الْمَجِيدُ", ro="Al-Majid", ur="بزرگی والا"},
-  {ar="الْبَاعِثُ", ro="Al-Ba'ith", ur="اٹھانے والا"}, {ar="الشَّهِيدُ", ro="Ash-Shahid", ur="حاضر"}, {ar="الْحَقُّ", ro="Al-Haqq", ur="سچ"},
-  {ar="الْوَكِيلُ", ro="Al-Wakil", ur="کارساز"}, {ar="الْقَوِيُّ", ro="Al-Qawiyy", ur="طاقتور"}, {ar="الْمَتِينُ", ro="Al-Matin", ur="مضبوط"},
-  {ar="الْوَلِيُّ", ro="Al-Waliyy", ur="دوست"}, {ar="الْحَمِيدُ", ro="Al-Hamid", ur="تعریف کے لائق"}, {ar="الْمُحْصِي", ro="Al-Muhsi", ur="گننے والا"},
-  {ar="الْمُبْدِئُ", ro="Al-Mubdi'", ur="پہلی بار پیدا کرنے والا"}, {ar="الْمُعِيدُ", ro="Al-Mu'id", ur="دوبارہ پیدا کرنے والا"}, {ar="الْمُحْيِي", ro="Al-Muhyi", ur="زندہ کرنے والا"},
-  {ar="اَلْمُمِيتُ", ro="Al-Mumit", ur="مارنے والا"}, {ar="الْحَيُّ", ro="Al-Hayy", ur="ہمیشہ زندہ رہنے والا"}, {ar="الْقَيُّومُ", ro="Al-Qayyum", ur="قائم رکھنے والا"},
-  {ar="الْوَاجِدُ", ro="Al-Wajid", ur="پانے والا"}, {ar="الْمَاجِدُ", ro="Al-Majid", ur="بزرگی والا"}, {ar="الْوَاحِدُ", ro="Al-Wahid", ur="اکیلا"},
-  {ar="اَلْأَحَد", ro="Al-Ahad", ur="ایک"}, {ar="الصَّمَدُ", ro="As-Samad", ur="بے نیاز"}, {ar="الْقَادِرُ", ro="Al-Qadir", ur="قدرت والا"},
-  {ar="الْمُقْتَدِرُ", ro="Al-Muqtadir", ur="اقتدار والا"}, {ar="الْمُقَدِّمُ", ro="Al-Muqaddim", ur="آگے کرنے والا"}, {ar="الْمُؤَخِّرُ", ro="Al-Mu'akhkhir", ur="پیچھے کرنے والا"},
-  {ar="الأوَّلُ", ro="Al-Awwal", ur="سب سے پہلا"}, {ar="الْآخِرُ", ro="Al-Akhir", ur="سب سے آخری"}, {ar="الظَّاهِرُ", ro="Az-Zahir", ur="ظاہر"},
-  {ar="الْبَاطِنُ", ro="Al-Batin", ur="چھپا ہوا"}, {ar="الْوَالِي", ro="Al-Wali", ur="مالک"}, {ar="الْمُتَعَالِي", ro="Al-Muta'ali", ur="بہت بلند"},
-  {ar="الْبَرُّ", ro="Al-Barr", ur="بھلائی کرنے والا"}, {ar="التَّوَّابُ", ro="At-Tawwab", ur="توبہ قبول کرنے والا"}, {ar="الْمُنْتَقِمُ", ro="Al-Muntaqim", ur="انتقام لینے والا"},
-  {ar="العَفُوُّ", ro="Al-Afuww", ur="معاف کرنے والا"}, {ar="الرَّؤُوفُ", ro="Ar-Ra'uf", ur="شفقت کرنے والا"}, {ar="مَالِكُ الْمُلْكِ", ro="Malik-ul-Mulk", ur="ملک کا مالک"},
-  {ar="ذُوالْجَلَالِ وَالْإِكْرَامِ", ro="Dhul-Jalal-wal-Ikram", ur="جلال اور انعام والا"}, {ar="الْمُقْسِطُ", ro="Al-Muqsit", ur="انصاف کرنے والا"}, {ar="الْجَامِعُ", ro="Al-Jami'", ur="جمع کرنے والا"},
-  {ar="الْغَنِيُّ", ro="Al-Ghaniyy", ur="بے پرواہ"}, {ar="الْمُغْنِي", ro="Al-Mughni", ur="غنی کرنے والا"}, {ar="اَلْمَانِعُ", ro="Al-Mani'", ur="روکنے والا"},
-  {ar="الضَّارَّ", ro="Ad-Darr", ur="نقصان پہنچانے والا"}, {ar="النَّافِعُ", ro="An-Nafi'", ur="نفع پہنچانے والا"}, {ar="النُّورُ", ro="An-Nur", ur="روشنی کرنے والا"},
-  {ar="الْهَادِي", ro="Al-Hadi", ur="ہدایت دینے والا"}, {ar="الْبَدِيعُ", ro="Al-Badi'", ur="نئی طرح پیدا کرنے والا"}, {ar="اَلْبَاقِي", ro="Al-Baqi", ur="باقی رہنے والا"},
-  {ar="الْوَارِثُ", ro="Al-Warith", ur="وارث"}, {ar="الرَّشِيدُ", ro="Ar-Rashid", ur="ہدایت دینے والا"}, {ar="الصَّبُور", ro="As-Sabur", ur="صبر کرنے والا"}
+{ar="الرَّحْمَٰنُ", ro="Ar-Rahman", ur="بہت مہربان"}, {ar="الرَّحِيمُ", ro="Ar-Raheem", ur="نہایت رحم والا"}, {ar="الْمَلِكُ", ro="Al-Malik", ur="بادشاہ"},
+{ar="الْقُدُّوسُ", ro="Al-Quddus", ur="پاک ذات"}, {ar="السَّلَامُ", ro="As-Salam", ur="سلامتی دینے والا"}, {ar="الْمُؤْمِنُ", ro="Al-Mu'min", ur="امن دینے والا"},
+{ar="الْمُهَيْمِنُ", ro="Al-Muhaymin", ur="نگہبان"}, {ar="الْعَزِيزُ", ro="Al-Aziz", ur="غالب"}, {ar="الْجَبَّارُ", ro="Al-Jabbar", ur="زبردست"},
+{ar="الْمُتَكَبِّرُ", ro="Al-Mutakabbir", ur="بڑائی والا"}, {ar="الْخَالِقُ", ro="Al-Khaliq", ur="پیدا کرنے والا"}, {ar="الْبَارِئُ", ro="Al-Bari'", ur="جان ڈالنے والا"},
+{ar="الْمُصَوِّرُ", ro="Al-Musawwir", ur="صورت بنانے والا"}, {ar="الْغَفَّارُ", ro="Al-Ghaffar", ur="بہت بخشنے والا"}, {ar="الْقَهَّارُ", ro="Al-Qahhar", ur="قہر ڈالنے والا"},
+{ar="الْوَهَّابُ", ro="Al-Wahhab", ur="سب کچھ عطا کرنے والا"}, {ar="الرَّزَّاقُ", ro="Ar-Razzaq", ur="رزق دینے والا"}, {ar="الْفَتَّاحُ", ro="Al-Fattah", ur="کھولنے والا"},
+{ar="اَلْعَلِيْمُ", ro="Al-Alim", ur="جاننے والا"}, {ar="الْقَابِضُ", ro="Al-Qabid", ur="تنگی کرنے والا"}, {ar="الْبَاسِطُ", ro="Al-Basit", ur="فراخی کرنے والا"},
+{ar="الْخَافِضُ", ro="Al-Khafid", ur="پست کرنے والا"}, {ar="الرَّافِعُ", ro="Ar-Rafi'", ur="بلند کرنے والا"}, {ar="الْمُعِزُّ", ro="Al-Mu'izz", ur="عزت دینے والا"},
+{ar="المذِلُّ", ro="Al-Mudhill", ur="ذلت دینے والا"}, {ar="السَّمِيعُ", ro="As-Sami'", ur="سننے والا"}, {ar="الْبَصِيرُ", ro="Al-Basir", ur="دیکھنے والا"},
+{ar="الْحَكَمُ", ro="Al-Hakam", ur="فیصلہ کرنے والا"}, {ar="الْعَدْلُ", ro="Al-Adl", ur="انصاف کرنے والا"}, {ar="اللَّطِيفُ", ro="Al-Latif", ur="مہربان"},
+{ar="الْخَبِيرُ", ro="Al-Khabir", ur="خبردار"}, {ar="الْحَلِيمُ", ro="Al-Halim", ur="بردبار"}, {ar="الْعَظِيمُ", ro="Al-Azim", ur="عظمت والا"},
+{ar="الْغَفُورُ", ro="Al-Ghafur", ur="بہت بخشنے والا"}, {ar="الشَّكُورُ", ro="Ash-Shakur", ur="قدردان"}, {ar="الْعَلِيُّ", ro="Al-Ali", ur="بہت بلند"},
+{ar="الْكَبِيرُ", ro="Al-Kabir", ur="بہت بڑا"}, {ar="الْحَفِيظُ", ro="Al-Hafiz", ur="حفاظت کرنے والا"}, {ar="المُقيِتُ", ro="Al-Muqit", ur="روزی پہنچانے والا"},
+{ar="الْحَسِيبُ", ro="Al-Hasib", ur="حساب لینے والا"}, {ar="الْجَلِيلُ", ro="Al-Jalil", ur="بزرگ"}, {ar="الْكَرِيمُ", ro="Al-Karim", ur="کرم کرنے والا"},
+{ar="الرَّقِيبُ", ro="Ar-Raqib", ur="نگہبان"}, {ar="الْمُجِيبُ", ro="Al-Mujib", ur="دعا قبول کرنے والا"}, {ar="الْوَاسِعُ", ro="Al-Wasi'", ur="وسعت والا"},
+{ar="الْحَكِيمُ", ro="Al-Hakim", ur="حکمت والا"}, {ar="الْوَدُودُ", ro="Al-Wadud", ur="محبت کرنے والا"}, {ar="الْمَجِيدُ", ro="Al-Majid", ur="بزرگی والا"},
+{ar="الْبَاعِثُ", ro="Al-Ba'ith", ur="اٹھانے والا"}, {ar="الشَّهِيدُ", ro="Ash-Shahid", ur="حاضر"}, {ar="الْحَقُّ", ro="Al-Haqq", ur="سچ"},
+{ar="الْوَكِيلُ", ro="Al-Wakil", ur="کارساز"}, {ar="الْقَوِيُّ", ro="Al-Qawiyy", ur="طاقتور"}, {ar="الْمَتِينُ", ro="Al-Matin", ur="مضبوط"},
+{ar="الْوَلِيُّ", ro="Al-Waliyy", ur="دوست"}, {ar="الْحَمِيدُ", ro="Al-Hamid", ur="تعریف کے لائق"}, {ar="الْمُحْصِي", ro="Al-Muhsi", ur="گننے والا"},
+{ar="الْمُبْدِئُ", ro="Al-Mubdi'", ur="پہلی بار پیدا کرنے والا"}, {ar="الْمُعِيدُ", ro="Al-Mu'id", ur="دوبارہ پیدا کرنے والا"}, {ar="الْمُحْيِي", ro="Al-Muhyi", ur="زندہ کرنے والا"},
+{ar="اَلْمُمِيتُ", ro="Al-Mumit", ur="مارنے والا"}, {ar="الْحَيُّ", ro="Al-Hayy", ur="ہمیشہ زندہ رہنے والا"}, {ar="الْقَيُّومُ", ro="Al-Qayyum", ur="قائم رکھنے والا"},
+{ar="الْوَاجِدُ", ro="Al-Wajid", ur="پانے والا"}, {ar="الْمَاجِدُ", ro="Al-Majid", ur="بزرگی والا"}, {ar="الْوَاحِدُ", ro="Al-Wahid", ur="اکیلا"},
+{ar="اَلْأَحَد", ro="Al-Ahad", ur="ایک"}, {ar="الصَّمَدُ", ro="As-Samad", ur="بے نیاز"}, {ar="الْقَادِرُ", ro="Al-Qadir", ur="قدرت والا"},
+{ar="الْمُقْتَدِرُ", ro="Al-Muqtadir", ur="اقتدار والا"}, {ar="الْمُقَدِّمُ", ro="Al-Muqaddim", ur="آگے کرنے والا"}, {ar="الْمُؤَخِّرُ", ro="Al-Mu'akhkhir", ur="پیچھے کرنے والا"},
+{ar="الأوَّلُ", ro="Al-Awwal", ur="سب سے پہلا"}, {ar="الْآخِرُ", ro="Al-Akhir", ur="سب سے آخری"}, {ar="الظَّاهِرُ", ro="Az-Zahir", ur="ظاہر"},
+{ar="الْبَاطِنُ", ro="Al-Batin", ur="چھپا ہوا"}, {ar="الْوَالِي", ro="Al-Wali", ur="مالک"}, {ar="الْمُتَعَالِي", ro="Al-Muta'ali", ur="بہت بلند"},
+{ar="الْبَرُّ", ro="Al-Barr", ur="بھلائی کرنے والا"}, {ar="التَّوَّابُ", ro="At-Tawwab", ur="توبہ قبول کرنے والا"}, {ar="الْمُنْتَقِمُ", ro="Al-Muntaqim", ur="انتقام لینے والا"},
+{ar="العَفُوُّ", ro="Al-Afuww", ur="معاف کرنے والا"}, {ar="الرَّؤُوفُ", ro="Ar-Ra'uf", ur="شفقت کرنے والا"}, {ar="مَالِكُ الْمُلْكِ", ro="Malik-ul-Mulk", ur="ملک کا مالک"},
+{ar="ذُوالْجَلَالِ وَالْإِكْرَامِ", ro="Dhul-Jalal-wal-Ikram", ur="جلال اور انعام والا"}, {ar="الْمُقْسِطُ", ro="Al-Muqsit", ur="انصاف کرنے والا"}, {ar="الْجَامِعُ", ro="Al-Jami'", ur="جمع کرنے والا"},
+{ar="الْغَنِيُّ", ro="Al-Ghaniyy", ur="بے پرواہ"}, {ar="الْمُغْنِي", ro="Al-Mughni", ur="غنی کرنے والا"}, {ar="اَلْمَانِعُ", ro="Al-Mani'", ur="روکنے والا"},
+{ar="الضَّارَّ", ro="Ad-Darr", ur="نقصان پہنچانے والا"}, {ar="النَّافِعُ", ro="An-Nafi'", ur="نفع پہنچانے والا"}, {ar="النُّورُ", ro="An-Nur", ur="روشنی کرنے والا"},
+{ar="الْهَادِي", ro="Al-Hadi", ur="ہدایت دینے والا"}, {ar="الْبَدِيعُ", ro="Al-Badi'", ur="نئی طرح پیدا کرنے والا"}, {ar="اَلْبَاقِي", ro="Al-Baqi", ur="باقی رہنے والا"},
+{ar="الْوَارِثُ", ro="Al-Warith", ur="وارث"}, {ar="الرَّشِيدُ", ro="Ar-Rashid", ur="ہدایت دینے والا"}, {ar="الصَّبُور", ro="As-Sabur", ur="صبر کرنے والا"}
 }
-
---------------------------------------------------
--- HOME "SPOTLIGHT" - jaise Quran app open karte hi kabhi surah ka naam, kabhi
--- Allah ka naam, kabhi Nabi ka naam, kabhi ayat likhi nazar aati hai - ek hi
--- jagah par, har baar app kholne par NAYA text (sirf roz nahi, har open par)
---------------------------------------------------
+local AIO = "https://archive.org/download/"
+M.SF = function(x) return "archive.org (" .. x .. ")" end
 local spotlightList = {}
 do
-  local maxLen = math.max(#dailyAyahs, #asmaUlHusna, #asmaNabi, #surahNames)
-  for i=1, maxLen do
-    if dailyAyahs[i] then table.insert(spotlightList, {kind="ayah", data=dailyAyahs[i]}) end
-    if asmaUlHusna[i] then table.insert(spotlightList, {kind="allahname", data=asmaUlHusna[i]}) end
-    if asmaNabi[i] then table.insert(spotlightList, {kind="nabiname", data=asmaNabi[i]}) end
-    if surahNames[i] then table.insert(spotlightList, {kind="surah", data=surahNames[i], surahIdx=i}) end
-  end
+local maxLen = math.max(#dailyAyahs, #asmaUlHusna, #asmaNabi, #surahNames)
+for i=1, maxLen do
+if dailyAyahs[i] then table.insert(spotlightList, {kind="ayah", data=dailyAyahs[i]}) end
+if asmaUlHusna[i] then table.insert(spotlightList, {kind="allahname", data=asmaUlHusna[i]}) end
+if asmaNabi[i] then table.insert(spotlightList, {kind="nabiname", data=asmaNabi[i]}) end
+if surahNames[i] then table.insert(spotlightList, {kind="surah", data=surahNames[i], surahIdx=i}) end
 end
-local function pickSpotlight()
-  local idx = prefs.getInt("spotlightIndex", 0)
-  local item = spotlightList[(idx % #spotlightList) + 1]
-  prefs.edit().putInt("spotlightIndex", idx + 1).apply()
-  return item
 end
-
---------------------------------------------------
--- DAILY MASNOON DUAS DATA
---------------------------------------------------
--- NOTE: audio="" means no verified working audio URL has been added yet for
--- that dua. Individually-labeled verified audio per hadith-dua is hard to find
--- as a direct freely-linkable file, so per your instruction these entries use
--- pure hadith wording only (no Quran ayat text). A "Full Masnoon Duas Audio"
--- button below plays/downloads the complete verified Hisnul Muslim recording
--- instead, so users still get audio even without a per-dua link.
+M.pickSpotlight = function()
+local idx = prefs.getInt("spotlightIndex", 0)
+local item = spotlightList[(idx % #spotlightList) + 1]
+prefs.edit().putInt("spotlightIndex", idx + 1).apply()
+return item
+end
 local function dailyDuas()
-  if not _lazyCache.dailyDuas then
-    _lazyCache.dailyDuas = {
-  -- NAYA (v2.7-fix2): چھ کلمے / ایمان مفصل / ایمان مجمل / نماز کا سبق / نماز جنازہ
-  -- Ab ye sab ALAG ALAG tracks hain (ek lambi recording ke andar chhupe nahi):
-  --  * 6 Kalme - 6 alag entries, har ek usi recording ka alag clip (startAt).
-  --  * Namaz ka Sabaq - 8 alag alag verified files (har step ki apni file).
-  --  * Namaz-e-Janaza - poora audio + takbeer-wise 4 step entries.
-  -- Sab audio links archive.org se hain aur HTTP 200 + audio/mpeg verify kiye
-  -- gaye hain. Playback sirf ONLINE STREAM hai (auto-download band - hang fix).
-  {cat="6 Kalme / Iman / Namaz", title='Kalima Tayyiba (Pehla Kalma)', en='Pehla Kalma - La ilaha illallah Muhammad-ur-Rasool-Allah.', ar='لا إله إلا الله محمد رسول الله', ur='پہلا کلمہ: اللہ کے سوا کوئی معبود نہیں، محمد ﷺ اللہ کے رسول ہیں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=0, cacheKey="6kalimas_full", endAt=300},
-  {cat="6 Kalme / Iman / Namaz", title='Kalima Shahadat (Doosra Kalma)', en='Doosra Kalma - the testimony of faith.', ar='أشهد أن لا إله إلا الله وحده لا شريك له وأشهد أن محمدا عبده ورسوله', ur='دوسرا کلمہ: گواہی کہ اللہ اکیلا ہے، اس کا کوئی شریک نہیں اور محمد ﷺ اس کے بندے اور رسول ہیں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=245, cacheKey="6kalimas_full", endAt=545},
-  {cat="6 Kalme / Iman / Namaz", title='Kalima Tamjeed (Teesra Kalma)', en='Teesra Kalma - glorification of Allah.', ar='سبحان الله والحمد لله ولا إله إلا الله والله أكبر', ur='تیسرا کلمہ: اللہ پاک ہے، سب تعریف اللہ کے لیے، اللہ کے سوا کوئی معبود نہیں، اللہ سب سے بڑا ہے', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=368, cacheKey="6kalimas_full", endAt=668},
-  {cat="6 Kalme / Iman / Namaz", title='Kalima Tawheed (Chautha Kalma)', en='Chautha Kalma - the oneness of Allah.', ar='لا إله إلا الله وحده لا شريك له له الملك وله الحمد يحيي ويميت وهو حي لا يموت', ur='چوتھا کلمہ: اللہ کے سوا کوئی معبود نہیں، وہ اکیلا ہے، بادشاہی اور تعریف اسی کی ہے، وہی زندگی اور موت دیتا ہے', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=1090, cacheKey="6kalimas_full", endAt=1390},
-  {cat="6 Kalme / Iman / Namaz", title='Kalima Istighfar (Paanchwa Kalma)', en='Paanchwa Kalma - seeking forgiveness.', ar='أستغفر الله ربي من كل ذنب وأتوب إليه', ur='پانچواں کلمہ: میں اپنے رب اللہ سے ہر گناہ کی معافی مانگتا ہوں اور اسی کی طرف رجوع کرتا ہوں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=1288, cacheKey="6kalimas_full", endAt=1588},
-  {cat="6 Kalme / Iman / Namaz", title='Kalima Radd-e-Kufr (Chhata Kalma)', en='Chhata Kalma - rejection of disbelief.', ar='اللهم إني أعوذ بك من أن أشرك بك شيئا وأنا أعلم به وأستغفرك لما لا أعلم به', ur='چھٹا کلمہ: اے اللہ! میں تیری پناہ مانگتا ہوں کہ کسی چیز کو تیرا شریک بناؤں اور تیری بخشش مانگتا ہوں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio="https://archive.org/download/6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src="archive.org (6 Kalimas Urdu and English)", startAt=1486, cacheKey="6kalimas_full", endAt=1786},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Namaz ki Ahmiyat (Importance)', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Namaz ki Ahmiyat (Importance)', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz01_Introduction_and_Importance_1.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Auqat-e-Namaz (Timings)', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Auqat-e-Namaz (Timings)', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz04_Auqat1.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Azan aur Iqamat', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Azan aur Iqamat', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz09_Azan_Iqamat-1.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ka Tareeqa', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ka Tareeqa', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz12-Wuzu-1.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ke Masail', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ke Masail', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz20-Wuzu-2.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ki Sunnatain', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ki Sunnatain', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz21-Wuzu-3.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Taharat ke Masail', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Taharat ke Masail', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz13_Taharat-1_Masail-e-Istanja.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Ghusl aur Sunnatain', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Ghusl aur Sunnatain', tip='Alag alag track - har step ke liye alag audio', audio="https://archive.org/download/NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz22-Bathing-Sunnatain.mp3", src="archive.org (Namaz Series By Shaykh Mufti Muhammad Saeed Khan)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Poora Tareeqa (Molana Mehboob Elahi)', en='Complete Urdu lesson on offering Salah, step by step.', ar='', ur='نماز کا مکمل سبق - مولانا محبوب الٰہی صاحب', tip='Poora tareeqa ek recording mein', audio="https://archive.org/download/molana-mehboob-elahi-namaz-ka-tareeqa-www.aswatalislam.net/Molana%20Mehboob%20Elahi%20-%20Namaz%20Ka%20Tareeqa%20%28www.aswatalislam.net%29.mp3", src="archive.org (Molana Mehboob Elahi)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza ka Poora Tareeqa (Audio)', en='Complete method and masail of the funeral prayer, in Urdu.', ar='', ur='نماز جنازہ کا طریقہ اور مسائل', tip='Poora tareeqa sunne ke liye', audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)"},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Pehli Takbeer', en='Janaza namaz ka pehla hissa - is clip mein 1 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 1 تکبیر', tip="Chhota clip - sirf 1 takbeer ka hissa (poora audio upar)", audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)", startAt=0, cacheKey="janaza_full", endAt=420},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Doosri Takbeer', en='Janaza namaz ka doosra hissa - is clip mein 2 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 2 تکبیر', tip="Chhota clip - sirf 2 takbeer ka hissa (poora audio upar)", audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)", startAt=420, cacheKey="janaza_full", endAt=840},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Teesri Takbeer', en='Janaza namaz ka teesra hissa - is clip mein 3 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 3 تکبیر', tip="Chhota clip - sirf 3 takbeer ka hissa (poora audio upar)", audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)", startAt=840, cacheKey="janaza_full", endAt=1260},
-  {cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Chauthi Takbeer', en='Janaza namaz ka chautha hissa - is clip mein 4 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 4 تکبیر', tip="Chhota clip - sirf 4 takbeer ka hissa (poora audio upar)", audio="https://archive.org/download/Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src="archive.org (Namaz-e-Janaza k Masail)", startAt=1260, cacheKey="janaza_full", endAt=1680},
-  {cat="6 Kalme / Iman / Namaz", title='Iman-e-Mufassal', en='I believe in Allah, His Angels, His Books, His Messengers, the Last Day, and in Qadar - that good and evil are from Allah - and in the resurrection after death.', ar='آمَنْتُ بِاللَّهِ وَمَلَائِكَتِهِ وَكُتُبِهِ وَرُسُلِهِ وَالْيَوْمِ الْآخِرِ وَالْقَدْرِ خَيْرِهِ وَشَرِّهِ مِنَ اللَّهِ تَعَالَى وَالْبَعْثِ بَعْدَ الْمَوْتِ', ur='میں اللہ پر، اس کے فرشتوں پر، اس کی کتابوں پر، اس کے رسولوں پر، آخرت کے دن پر، اور تقدیر پر ایمان لایا', tip='Verified direct MP3 nahi mila - mukammal text + online link', audio="", src="", link="https://www.nooresunnat.com/Audios/iman-e-mufassal-in-english"},
-  {cat="6 Kalme / Iman / Namaz", title='Iman-e-Mujmal', en='I believe in Allah as He is, with His names and attributes, and I accept all His commands, with affirmation by the tongue and conviction in the heart.', ar='آمَنْتُ بِاللَّهِ كَمَا هُوَ بِأَسْمَائِهِ وَصِفَاتِهِ وَقَبِلْتُ جَمِيعَ أَحْكَامِهِ إِقْرَارٌ بِاللِّسَانِ وَتَصْدِيقٌ بِالْقَلْبِ', ur='میں اللہ پر ایمان لایا جیسا وہ اپنے ناموں اور صفات کے ساتھ ہے، اور اس کے تمام احکام قبول کیے', tip='Verified direct MP3 nahi mila - mukammal text + online link', audio="", src="", link="https://www.nooresunnat.com/Audios/iman-e-mujmal-with-translation"},
-  {cat="Khaana Peena", title="Khana Khane Ke Baad", en="All praise is for Allah, who fed me this and provided it for me without any power or strength on my part.", ar="الْحَمْدُ لِلَّهِ الَّذِي أَطْعَمَنِي هَٰذَا وَرَزَقَنِيهِ مِنْ غَيْرِ حَوْلٍ مِنِّي وَلَا قُوَّةٍ", ur="تمام تعریفیں اللہ کے لیے جس نے مجھے یہ کھلایا اور رزق دیا", tip="Khana khatam hone ke baad parhein", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Doodh Peene Ke Baad", en="O Allah, bless it for us and give us more of it.", ar="اللَّهُمَّ بَارِكْ لَنَا فِيهِ وَزِدْنَا مِنْهُ", ur="اے اللہ اس میں برکت دے اور اس سے زیادہ عطا فرما", tip="Doodh peene ke khaas baad ki dua", audio="", src=""},
-  {cat="Sona Uthna", title="Sone Se Pehle Ki Dua", en="In Your name, O Allah, I die and I live.", ar="بِاسْمِكَ اللَّهُمَّ أَمُوتُ وَأَحْيَا", ur="اے اللہ! تیرے نام سے میں مرتا ہوں اور جیتا ہوں", tip="Bistar par lait kar dayin karwat par parhein (Sahih Bukhari)", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-sleeping.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-before-sleeping.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
-  {cat="Sona Uthna", title="Neend Se Uthne Ki Dua", en="All praise is for Allah, who gave us life after causing us to die, and to Him is the resurrection.", ar="الْحَمْدُ لِلَّهِ الَّذِي أَحْيَانَا بَعْدَ مَا أَمَاتَنَا وَإِلَيْهِ النُّشُورُ", ur="تمام تعریفیں اللہ کے لیے جس نے ہمیں مارنے کے بعد زندہ کیا اور اسی کی طرف اٹھنا ہے", tip="Neend se uthte hi sab se pehle parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--8-.mp3", audioAlternates={"https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--8-.mp3"}, src="TheSufi.com (Arabic+Urdu)", audioSrcAlt="TheSufi.com (Arabic+Urdu)"},
-  {cat="Sona Uthna", title="Karwat Badalte Waqt", en="There is no deity but Allah, the One, the Subduer, Lord of the heavens, earth, and all between them, the Almighty, the Forgiving.", ar="لَا إِلَٰهَ إِلَّا اللَّهُ الْوَاحِدُ الْقَهَّارُ رَبُّ السَّمَاوَاتِ وَالْأَرْضِ وَمَا بَيْنَهُمَا الْعَزِيزُ الْغَفَّارُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ اکیلا غالب ہے، آسمانوں اور زمین اور جو ان کے درمیان ہے سب کا رب، عزت والا بخشنے والا", tip="Raat ko neend mein karwat lete waqt", audio="", src=""},
-  {cat="Baithna Ghar", title="Majlis Mein Baithne Ki Dua", en="Glory and praise be to You, O Allah. I bear witness there is no deity but You; I seek Your forgiveness and turn to You in repentance.", ar="سُبْحَانَكَ اللَّهُمَّ وَبِحَمْدِكَ أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا أَنْتَ أَسْتَغْفِرُكَ وَأَتُوبُ إِلَيْكَ", ur="اے اللہ تو پاک ہے اور تیری ہی تعریف ہے، میں گواہی دیتا ہوں کہ تیرے سوا کوئی معبود نہیں، تجھ سے معافی مانگتا ہوں اور تیری طرف توبہ کرتا ہوں", tip="Kaffaratul Majlis - majlis se uthte waqt bhi parhein", audio="", src=""},
-  {cat="Hifazat", title="Sayyid-ul-Istighfar", en="O Allah, You are my Lord; there is no deity except You. You created me, and I am Your servant.", ar="اللَّهُمَّ أَنْتَ رَبِّي لَا إِلَٰهَ إِلَّا أَنْتَ خَلَقْتَنِي وَأَنَا عَبْدُكَ", ur="اے اللہ تو میرا رب ہے، تیرے سوا کوئی معبود نہیں، تو نے مجھے پیدا کیا اور میں تیرا بندہ ہوں", tip="Sab se afzal istighfar (Sahih Bukhari)", audio="", src=""},
-  {cat="Hifazat", title="Durood-e-Ibrahimi", en="O Allah, send blessings upon Muhammad and the family of Muhammad as You sent blessings upon Ibrahim and his family. You are Praiseworthy and Glorious.", ar="اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ وَعَلَى آلِ مُحَمَّدٍ كَمَا صَلَّيْتَ عَلَى إِبْرَاهِيمَ وَعَلَى آلِ إِبْرَاهِيمَ إِنَّكَ حَمِيدٌ مَجِيدٌ", ur="اے اللہ محمد ﷺ اور ان کی آل پر رحمت نازل فرما جیسے ابراہیم اور ان کی آل پر نازل فرمائی، بیشک تو تعریف والا بزرگی والا ہے", tip="Namaz ke Tashahhud mein aur Juma ke din", audio="", src=""},
-  -- NAYA (v2.5): zyada masnoon text duas (Urdu + Arabic) - category-wise
-  {cat="Hifazat", title="Ayatul Kursi", en="Allah—there is no deity except Him, the Ever-Living, the Sustainer of all.", ar="اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ الْحَيُّ الْقَيُّومُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ زندہ ہے اور سب کو قائم رکھنے والا ہے", tip="Har namaz ke baad aur sone se pehle", audio="", src=""},
-  {cat="Hifazat", title="Qul Huwallahu Ahad (Ikhlas)", en="Say: He is Allah, the One; Allah, the Eternal Refuge.", ar="قُلْ هُوَ اللَّهُ أَحَدٌ اللَّهُ الصَّمَدُ", ur="کہو وہ اللہ ایک ہے، اللہ بے نیاز ہے", tip="Hifazat ke liye 3 martaba", audio="", src=""},
-  {cat="Subah Shaam", title="Subah Ki Masnoon Dua (Full)", en="We have entered the morning, and all sovereignty belongs to Allah; all praise belongs to Allah.", ar="أَصْبَحْنَا وَأَصْبَحَ الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے صبح کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Fajr ke baad", audio="", src=""},
-  {cat="Subah Shaam", title="Shaam Ki Masnoon Dua", en="We have entered the evening, and all sovereignty belongs to Allah; all praise belongs to Allah.", ar="أَمْسَيْنَا وَأَمْسَى الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے شام کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Maghrib ke baad", audio="", src=""},
-  {cat="Safar", title="Safar Ki Dua", en="Glory be to the One who placed this at our service; we could not have done so ourselves, and to our Lord we will return.", ar="سُبْحَانَ الَّذِي سَخَّرَ لَنَا هَٰذَا وَمَا كُنَّا لَهُ مُقْرِنِينَ وَإِنَّا إِلَىٰ رَبِّنَا لَمُنْقَلِبُونَ", ur="پاک ہے وہ ذات جس نے ہمارے لیے اس سواری کو مسخر کیا اور ہم اس کے قابو میں لانے والے نہ تھے، اور بیشک ہم اپنے رب کی طرف لوٹنے والے ہیں", tip="Sawari par baithte waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--28-.mp3", audioAlternates={"https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--28-.mp3"}, src="TheSufi.com (Arabic+Urdu)", audioSrcAlt="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaana Peena", title="Khana Khane Se Pehle", en="In the name of Allah.", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے شروع", tip="Khana shuru karte waqt Bismillah", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-eating.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-before-eating.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
-  {cat="Tahaarat", title="Wuzu Se Pehle", en="In the name of Allah.", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے", tip="Wuzu shuru karte waqt", audio="", src=""},
-  {cat="Tahaarat", title="Wuzu Ke Baad", en="I bear witness there is no deity but Allah alone, without partner, and Muhammad is His servant and Messenger.", ar="أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا اللَّهُ وَحْدَهُ لَا شَرِيكَ لَهُ وَأَشْهَدُ أَنَّ مُحَمَّدًا عَبْدُهُ وَرَسُولُهُ", ur="میں گواہی دیتا ہوں کہ اللہ کے سوا کوئی معبود نہیں وہ اکیلا ہے اس کا کوئی شریک نہیں اور محمد ﷺ اس کے بندے اور رسول ہیں", tip="Wuzu ke baad", audio="", src=""},
-  {cat="Masjid", title="Masjid Mein Dakhil Hone Ki Dua", en="O Allah, open for me the gates of Your mercy.", ar="اللَّهُمَّ افْتَحْ لِي أَبْوَابَ رَحْمَتِكَ", ur="اے اللہ میرے لیے اپنی رحمت کے دروازے کھول دے", tip="Masjid mein dakhil hote waqt", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-masjid.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-for-entering-masjid.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
-  {cat="Masjid", title="Masjid Se Nikalne Ki Dua", en="O Allah, I ask You for Your bounty.", ar="اللَّهُمَّ إِنِّي أَسْأَلُكَ مِنْ فَضْلِكَ", ur="اے اللہ میں تجھ سے تیرا فضل مانگتا ہوں", tip="Masjid se nikalte waqt", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-exiting-masjid.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-for-exiting-masjid.mp3"}, src="archive.org (Islamic Dua in Audio)", audioSrcAlt="archive.org (Islamic Dua in Audio)"},
-  -- Neeche di gayi duas ka audio verify hokar mila hai (TheSufi.com, Arabic+Urdu translation):
-  {cat="Subah Shaam", title="Subah Ki Dua (Morning Prayer)", en="Morning supplication asking Allah for blessing and protection.", ar="", ur="Subah ki masnoon dua", tip="Fajr ke baad parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications-Morning-Prayer.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Sona Uthna", title="Buri Neend/Darawana Khawab Aane Ki Dua", en="Supplication for seeking refuge and safety after a disturbing dream.", ar="", ur="Bura khawab ya neend ki bechaini ki dua", tip="Darawana khawab ane par parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--7-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Namaz", title="Namaz Ke Baad Ki Dua", en="Supplication to be recited after completing the obligatory prayer.", ar="", ur="Namaz mukammal karne ke baad ki dua", tip="Har farz namaz ke baad", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--15-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Roza", title="Sehri Ki Dua", en="Supplication/intention associated with beginning the fast at Suhoor.", ar="", ur="Roza shuru karne (Sehri) ki niyat wali dua", tip="Sehri ke waqt parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--22-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Roza", title="Iftar Ki Dua", en="Supplication for breaking the fast at Iftar.", ar="", ur="Roza kholte waqt ki dua", tip="Iftar ke waqt parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--23-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Dua-e-Haajit", en="Supplication asking Allah to fulfil a need.", ar="", ur="Zaroorat poori hone ki dua", tip="Kisi khaas zaroorat ke waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--1-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Fot Hone Par Taziyat Ki Dua", en="Supplication of condolence and patience after a death.", ar="", ur="Kisi ki wafat par sabr/taziyat ki dua", tip="Ghum ke waqt aur taziyat karte waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--55-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Kamyabi/Muqable Mein Kamyabi Ki Dua", en="Supplication asking Allah for help and success in a difficult task.", ar="", ur="Muqable ya mushkil mein kamyabi ki dua", tip="Imtihan ya mushkil kaam se pehle", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--57-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Sabaat Aur Rehmat Ki Dua", en="Supplication asking Allah for steadfastness and mercy.", ar="", ur="Deen par sabaat (istiqamat) aur rehmat ki dua", tip="Rozmarra ki dua ke tor par", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--58-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  {cat="Khaas Mawaqe", title="Barkat Aur Maghfirat Ki Dua", en="Supplication asking Allah for blessing and forgiveness.", ar="", ur="Barkat aur bakhshish maangne ki dua", tip="Rozmarra ki dua ke tor par", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--64-.mp3", src="TheSufi.com (Arabic+Urdu)"},
-  -- Neeche di gayi duas archive.org "Islamic Dua in Audio" collection se hain
-  -- (83 individually-labeled files, verify ki gayi hain):
-  {cat="Khaana Peena", title="Pani Peene Ke Baad Ki Dua", en="Supplication of thanks after drinking water.", ar="", ur="Pani peene ke baad ki masnoon dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-drinking-water.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Dawat Mein Khana Khane Ke Baad Ki Dua", en="Supplication of thanks after eating at a host's meal.", ar="", ur="Kisi ki dawat mein khana khane ke baad ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-eating-dawat.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Tahaarat", title="Bathroom Se Nikalne Ki Dua", en="Supplication upon leaving the bathroom.", ar="", ur="Bathroom/toilet se nikalne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-exiting-from-the-toilet.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Baadal Chatne Ki Dua", en="Supplication for when clouds clear.", ar="", ur="Baadal chatne (khulne) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-opening-clouds.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Qarz Wapis Milne Ki Dua", en="Supplication of gratitude when a debt is repaid.", ar="", ur="Apna qarz wapis milne par shukr ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-receive-debts.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Naye Kapre Pehnne Ki Dua", en="Supplication upon wearing new clothes.", ar="", ur="Naye kapre pehante waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-after-wearing-clothes.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Musafa (Handshake) Ki Dua", en="Supplication/greeting when meeting and shaking hands.", ar="", ur="Kisi se hath milate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-handshake.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Jamhai (Ubasi) Aane Ki Dua", en="Prophetic guidance associated with yawning.", ar="", ur="Ubasi/jamhai aane par karne wala amal", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-jamahi.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Chand Grehan Ki Dua", en="Supplication and remembrance during a lunar eclipse.", ar="", ur="Chand grehan (lunar eclipse) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-lunar-eclipse.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Barish Ke Waqt Ki Dua (Audio)", en="Supplication when rain begins.", ar="", ur="Barish shuru hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-rain.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Tohfa Milne Ki Dua", en="Supplication of thanks when receiving a gift.", ar="", ur="Kisi se tohfa (gift) milne par dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-receive-gift.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Suraj Grehan Ki Dua", en="Supplication and remembrance during a solar eclipse.", ar="", ur="Suraj grehan (solar eclipse) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-solar-eclipse.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Aandhi/Toofan Ki Dua", en="Supplication asking Allah for protection during strong wind or storm.", ar="", ur="Tez aandhi/toofan ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-storm.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Suraj Nikalte Waqt Ki Dua", en="Morning remembrance at sunrise.", ar="", ur="Subah suraj nikalte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-sunrise.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Suraj Ghurub Hone Ki Dua", en="Evening remembrance at sunset.", ar="", ur="Shaam ko suraj ghurub hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-at-the-time-of-sunset.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Doodh Peene Se Pehle Ki Dua (Audio)", en="Supplication before drinking milk.", ar="", ur="Doodh peene se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-drinking-milk.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Pani Peene Se Pehle Ki Dua (Audio)", en="Supplication before drinking water.", ar="", ur="Pani peene se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-drinking-water.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Tahaarat", title="Bathroom Jaane Ki Dua", en="Supplication before entering the bathroom.", ar="", ur="Bathroom/toilet mein dakhil hone se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-entering-the-toilet.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Naya Kaam Shuru Karne Ki Dua", en="Supplication before beginning a new task.", ar="", ur="Koi naya kaam shuru karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-before-starting-new-work.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Maghfirat Maangne Ki Dua", en="Supplication asking Allah for forgiveness.", ar="", ur="Allah se maghfirat maangne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-asking-forgiveness.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Baithna Ghar", title="Ghar Mein Dakhil Hone Ki Dua (Audio)", en="Supplication upon entering one's home.", ar="", ur="Ghar mein dakhil hote waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-house.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Bazaar Mein Dakhil Hone Ki Dua", en="Supplication upon entering the marketplace.", ar="", ur="Bazaar/market mein jaate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-entering-the-marketplace.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Shukriya Ada Karne Ki Dua", en="Supplication expressing gratitude.", ar="", ur="Kisi ka shukriya ada karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-expressing-thanks.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Ramzan Ke Pehle Ashre Ki Dua", en="Supplication for the first ten days of Ramadan.", ar="", ur="Ramzan ke pehle ashre (rehmat) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-first-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Qarz Utarne Ki Dua", en="Supplication asking Allah for help in repaying debt.", ar="", ur="Qarz jaldi utarne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-payment-of-debt.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Surma Lagane Ki Dua", en="Supplication associated with applying kohl.", ar="", ur="Aankhon mein surma lagate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-putting-on-surma.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Barish Ke Liye Dua (Istisqa)", en="Supplication asking Allah to send beneficial rain.", ar="", ur="Barish na ho rahi ho to mangne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-rain-to-come.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Kitab Parhne Ki Dua", en="Supplication before reading or studying.", ar="", ur="Koi kitab parhna shuru karne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-reading-the-book.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Ramzan Ke Dusre Ashre Ki Dua", en="Supplication for the middle ten days of Ramadan.", ar="", ur="Ramzan ke dusre ashre (maghfirat) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-second-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Kisi Ko Museebat Mein Dekh Kar Dua", en="Supplication when seeing someone afflicted by hardship.", ar="", ur="Kisi ko museebat/museebat zada dekh kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-seeing-someone-in-difficulty.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Ramzan Ke Teesre Ashre Ki Dua", en="Supplication for the final ten days of Ramadan.", ar="", ur="Ramzan ke teesre ashre (jahannam se azadi) ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-third-ashra-of-ramadan.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Mushkil/Museebat Ke Waqt Ki Dua", en="Supplication asking Allah for relief in hardship.", ar="", ur="Kisi mushkil ya museebat ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-trouble.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Seerhi/Upar Chadhte Waqt Ki Dua", en="Remembrance while ascending stairs or a height.", ar="", ur="Upar chadhte (seerhi ya pahar) waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-upstairs.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Aaina Dekhne Ki Dua", en="Supplication upon looking in a mirror.", ar="", ur="Aaine mein apni surat dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-when-looking-in-a-mirror.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Gussa Aane Par Dua", en="Supplication seeking refuge from anger.", ar="", ur="Gussa aane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-for-when-one-suffers-anger.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Qurbani Ki Dua", en="Supplication said when offering a sacrifice.", ar="", ur="Qurbani karte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-qurbani.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Shab-e-Qadr Ki Dua", en="Supplication for the Night of Decree.", ar="", ur="Shab-e-Qadr mein parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-shab-e-qadr.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Cheenk Aane Ki Dua", en="Prophetic response/remembrance when sneezing.", ar="", ur="Khud ko cheenk aane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-sneezing.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Ramzan", title="Taraweeh Ki Dua", en="Supplication associated with Taraweeh prayers.", ar="", ur="Taraweeh ki namaz se mutaliq dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-of-taraweeh.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Kisi Musalman Ko Khush Dekh Kar Dua", en="Supplication when seeing a fellow Muslim cheerful.", ar="", ur="Kisi musalman bhai ko muskurate dekh kar dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-asked-upon-beholding-a-muslim-smiling.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Jaanwar Ki Awaz", title="Murgh Ki Awaz Sun Kar Dua", en="Remembrance upon hearing a rooster crow.", ar="", ur="Murgh (rooster) ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-invoked-upon-hearing-the-crowing-of-a-rooster.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Safar", title="Sawari Par Baithne Ki Dua (Audio)", en="Supplication upon mounting a vehicle or ride.", ar="", ur="Gaadi/sawari par baithte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-after-being-settled-onto-a-carriage.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Khana Saamne Rakhe Jaane Par Dua", en="Supplication when food is served.", ar="", ur="Khana saamne rakha jaye to parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-when-food-is-placed-before.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Bimari Mein Parhne Ki Dua", en="Supplication asking Allah for healing during illness.", ar="", ur="Bimari ke waqt parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-be-recited-while-feeling-sick.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Har Nawala Khane Ki Dua", en="Supplication/remembrance while eating each morsel.", ar="", ur="Har luqma/nawala khane par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-eat-every-morsel.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Pehla Nawala Khane Ki Dua", en="Supplication before eating the first morsel.", ar="", ur="Khane ka pehla nawala uthate waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-eat-first-morsel.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Thakan Dur Karne Ki Dua", en="Supplication asking Allah for relief from tiredness.", ar="", ur="Thakan mehsoos hone par parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-get-rid-of-tiredness.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaas Mawaqe", title="Waswase Se Bachne Ki Dua", en="Supplication seeking protection from intrusive whispers.", ar="", ur="Shaitani waswase se bachne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-get-rid-of-waswas.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Musalman Se Milte Waqt Ki Dua", en="Greeting and supplication when meeting another Muslim.", ar="", ur="Kisi musalman bhai se milte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-meet-with-muslim.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Mausam", title="Garaj (Thunder) Ke Waqt Ki Dua", en="Supplication upon hearing thunder.", ar="", ur="Baadal garajne (thunder) ke waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-read-at-time-of-thunder.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Chand Sitare", title="Chand Dekhne Ki Dua", en="Supplication upon seeing the moon.", ar="", ur="Chand dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-moon.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Chand Sitare", title="Sitare Dekhne Ki Dua", en="Remembrance upon observing the stars.", ar="", ur="Sitare dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-stars.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Masjid", title="Masjid Dekhte Hi Ki Dua", en="Remembrance upon seeing a mosque.", ar="", ur="Masjid nazar aate hi parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-see-the-masjid.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Khaana Peena", title="Phal Khane Ki Dua", en="Supplication before eating fruit.", ar="", ur="Naya phal khane se pehle ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-to-take-fruit.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Jaanwar Ki Awaz", title="Gadhe Ki Awaz Sun Kar Dua", en="Supplication upon hearing a donkey bray.", ar="", ur="Gadhe (donkey) ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-hearing-braying-of-a-donkey.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Jaanwar Ki Awaz", title="Kutte Ke Bhonkne Ki Awaz Sun Kar Dua", en="Supplication upon hearing a dog bark.", ar="", ur="Kutte ke bhonkne ki awaz sun kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-hearing-the-barking-of-a-dog.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Chand Sitare", title="Naya Chand Dekhne Ki Dua", en="Supplication upon sighting the new crescent.", ar="", ur="Mahine ka naya chand dekhte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-upon-sighting-the-new-moon.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Baithna Ghar", title="Ghar Se Nikalte Waqt Ki Dua (Audio)", en="Supplication upon leaving home.", ar="", ur="Ghar se bahar nikalte waqt ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-exiting-the-home.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Rozmarra", title="Kisi Ko Cheenkte Sun Kar Dua (Yarhamuk Allah)", en="Response when hearing another person sneeze.", ar="", ur="Kisi aur ko cheenkte sun kar jawab dena", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-hearing-someone-sneeze.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Chand Sitare", title="Tootay Hue Tare (Shooting Star) Dekhne Ki Dua", en="Remembrance when seeing a shooting star.", ar="", ur="Tootay hue tare ko dekh kar parhne ki dua", tip="", audio="https://archive.org/download/islamic-dua-in-audio/dua-when-seeing-shooting-star.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Hajj", title="Takbeer-e-Tashreeq", en="Takbeer recited during the days of Tashreeq.", ar="", ur="Eid ke ayyam-e-tashreeq mein parhi jane wali takbeer", tip="", audio="https://archive.org/download/islamic-dua-in-audio/takbeer-e-tashreeq.mp3", src="archive.org (Islamic Dua in Audio)"},
-  {cat="Hajj", title="Talbiyah", en="Pilgrimage response recited in Ihram: ‘Here I am, O Allah, here I am.’", ar="", ur="Hajj/Umrah ke ihram ki talbiyah", tip="", audio="https://archive.org/download/islamic-dua-in-audio/talbiyah.mp3", src="archive.org (Islamic Dua in Audio)"},
-  -- NAYA (v2.1): "Rabbana..." - Quran mein maujood 40 duaein (archive.org:
-  -- Rabbana-40-Supplications), verified, sab per-dua chhoti aur saaf files
-  {cat="Rabbana (Quranic Dua)", title="Allah Never Break His Promise", en="Our Lord, surely You will gather the people for a Day about which there is no doubt. Indeed, Allah does not fail in His promise.", ref="Quran 3:9", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/01%20Allah%20never%20break%20his%20promise.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="No Help For Zalimun", en="Our Lord, do not place us with the wrongdoing people.", ref="Quran 7:47", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/02%20No%20help%20for%20zalimun.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Grant Us What You Promised", en="Our Lord, grant us what You promised through Your messengers, and do not disgrace us on the Day of Resurrection. Indeed, You do not fail in Your promise.", ref="Quran 3:194", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/03%20Grant%20us%20what%20You%20promised.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Believe", en="Our Lord, we have believed, so register us among the witnesses.", ref="Quran 5:83", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/04%20We%20believe.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Provide Us Sustenance", en="O Allah, our Lord, send down to us a table spread with food from heaven, as a sign from You and a provision; You are the best of providers.", ref="Quran 5:114", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/05%20Provide%20us%20Sustenance.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="You Are The Best Judge", en="Our Lord, decide between us and our people in truth; You are the best of those who decide.", ref="Quran 7:89", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/06%20You%20are%20the%20best%20judge.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Save Us By Your Mercy", en="Our Lord, make us not a trial for the wrongdoing people, and save us by Your mercy from the disbelieving people.", ref="Quran 10:85-86", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/07%20Save%20us%20by%20Your%20Mercy.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Nothing Is Hidden From Allah", en="Our Lord, You know what we conceal and what we declare; nothing on earth or in heaven is hidden from Allah.", ref="Quran 14:38", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/08%20Nothing%20is%20hidden%20from%20Allah.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Fear Lest", en="Our Lord, indeed we fear that he may hasten against us or transgress.", ref="Quran 20:45", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/09%20We%20fear%20lest.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Avert The Torment Of Hell", en="Our Lord, avert from us the punishment of Hell. Its punishment is ever adhering; indeed, it is an evil settlement and residence.", ref="Quran 25:65-66", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/10%20Avert%20the%20Torment%20of%20Hell.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Leaders Of The Muttaqun", en="Our Lord, grant us from among our spouses and offspring comfort to our eyes, and make us an example for the righteous.", ref="Quran 25:74", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/11%20Leaders%20of%20the%20Muttaqun.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Punish Us Not", en="Our Lord, do not impose blame on us if we forget or err.", ref="Quran 2:286", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/12%20Punish%20us%20not.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Lay Not On Us A Burden", en="Our Lord, lay not upon us a burden like that which You laid upon those before us.", ref="Quran 2:286", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/13%20Lay%20not%20on%20us%20a%20Burden.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Pardon And Grant Us Forgiveness", en="Our Lord, burden us not with what we cannot bear. Pardon us, forgive us, have mercy on us; You are our Protector, so help us against the disbelieving people.", ref="Quran 2:286", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/14%20Pardon%20and%20Grant%20us%20Forgiveness.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Forgive Us Our Sins", en="Our Lord, we have believed, so forgive us our sins and protect us from the punishment of the Fire.", ref="Quran 3:16", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/15%20Forgive%20us%20our%20Sins.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Victory Over Disbelievers", en="Our Lord, forgive us our sins and our excesses, make our feet firm, and grant us victory over the disbelieving people.", ref="Quran 3:147", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/16%20Victory%20over%20Disbelievers.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Bestow Upon Us Your Mercy", en="Our Lord, let not our hearts deviate after You have guided us, and grant us mercy from Yourself. Indeed, You are the Bestower.", ref="Quran 3:8", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/17%20Bestow%20upon%20us%20Your%20Mercy.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Forgive Me And My Parents", en="Our Lord, forgive me, my parents, and the believers on the Day the account is established.", ref="Quran 14:41", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/18%20Forgive%20me%20and%20my%20Parents.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Grant Us Forgiveness", en="Our Lord, forgive us and our brothers who preceded us in faith, and place no resentment in our hearts toward those who believe.", ref="Quran 59:10", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/19%20Grant%20us%20Forgiveness.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Give Us In This World Good", en="Our Lord, give us good in this world and good in the Hereafter, and protect us from the punishment of the Fire.", ref="Quran 2:201", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/20%20Give%20us%20in%20this%20World%20Good.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Save Us From Fire", en="Our Lord, You did not create this aimlessly. Glory be to You; protect us from the punishment of the Fire.", ref="Quran 3:191", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/21%20Save%20us%20from%20Fire.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Place Us Not With Zalimun", en="Our Lord, make us not a trial for the wrongdoing people.", ref="Quran 10:85", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/22%20Place%20us%20not%20with%20Zalimun.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Make Them Enter The Paradise", en="Our Lord, admit them to the Gardens of Eternity You promised them, together with the righteous among their forefathers, spouses, and offspring. You are the Exalted in Might, the Wise.", ref="Quran 40:8", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/23%20Make%20them%20enter%20the%20Paradise.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Bestow Mercy From Yourself", en="Our Lord, grant us mercy from Your presence and guide our affair to what is right.", ref="Quran 18:10", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/24%20Bestow%20Mercy%20from%20Yourself.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Believe, Forgive Us", en="Our Lord, we believe, so forgive us and have mercy on us; You are the best of the merciful.", ref="Quran 23:109", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/25%20We%20Believe%2C%20Forgive%20us.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Forgive Us And Our Brethren", en="Our Lord, forgive us and our brothers who preceded us in faith, and place no resentment in our hearts toward those who believe.", ref="Quran 59:10", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/26%20Forgive%20us%20and%20our%20Brethren.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Allah Is Full Of Kindness", en="Our Lord, You are indeed Kind and Merciful.", ref="Quran 59:10", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/27%20Allah%20is%20Full%20of%20Kindness.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Make Us Not A Trail", en="Our Lord, make us not a trial for those who do wrong.", ref="Quran 10:85", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/28%20Make%20us%20not%20a%20Trail.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Accept Our Repentance", en="Our Lord, we have wronged ourselves; if You do not forgive us and have mercy on us, we will surely be among the losers.", ref="Quran 7:23", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/29%20Accesp%20our%20Repentance.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Let Not Our Hearts Deviate", en="Our Lord, let not our hearts deviate after You have guided us, and grant us mercy from Yourself.", ref="Quran 3:8", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/30%20Let%20not%20our%20Hearts%20Deviate.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Believe In What You Have Sent", en="Our Lord, we believe in what You revealed and follow the Messenger; write us among the witnesses.", ref="Quran 3:53", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/31%20We%20believe%20in%20what%20You%20have%20sent.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Believe In Allah", en="Our Lord, we have heard a caller inviting us to faith: ‘Believe in your Lord,’ and we have believed.", ref="Quran 3:193", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/32%20Believe%20in%20Allah.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Remit Our Evil Deeds", en="Our Lord, forgive our sins, remove our misdeeds, and cause us to die among the righteous.", ref="Quran 3:193", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/33%20Remit%20our%20Evil%20Deeds.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Forgive Those Who Repent", en="Our Lord, You encompass all things in mercy and knowledge. Forgive those who repent and follow Your way, and protect them from Hellfire.", ref="Quran 40:7", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/34%20Forgive%20those%20who%20Repent.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="We Turn In Repentance", en="Our Lord, upon You we rely; to You we turn in repentance, and to You is the final destination.", ref="Quran 60:4", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/35%20We%20Turn%20in%20Repentance.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Accept Our Service", en="Our Lord, accept this from us. Indeed, You are the All-Hearing, the All-Knowing.", ref="Quran 2:127", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/36%20Accept%20our%20Service.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Give Us Patience", en="Our Lord, pour upon us patience, make our feet firm, and help us against the disbelieving people.", ref="Quran 2:250", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/37%20Give%20us%20Patience.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="To Die As Muslim", en="Our Lord, pour upon us patience and let us die as Muslims in submission to You.", ref="Quran 7:126", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/38%20To%20Die%20as%20Muslim.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Accept My Invocation", en="My Lord, make me an establisher of prayer, and from my descendants as well. Our Lord, accept my supplication.", ref="Quran 14:40", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/39%20Accept%20my%20Invocation.mp3", src="archive.org (Rabbana 40 Supplications)"},
-  {cat="Rabbana (Quranic Dua)", title="Allah Is Oft-Forgiving", en="Our Lord, perfect our light for us and forgive us. Indeed, You are over all things capable.", ref="Quran 66:8", ar="", ur="", tip="", audio="https://archive.org/download/Rabbana-40-Supplications/40%20Allah%20is%20Oft-Forgiving.mp3", src="archive.org (Rabbana 40 Supplications)"},
+if not _lazyCache.dailyDuas then
+_lazyCache.dailyDuas = {
+{cat="6 Kalme / Iman / Namaz", title='Kalima Tayyiba (Pehla Kalma)', en='Pehla Kalma - La ilaha illallah Muhammad-ur-Rasool-Allah.', ar='لا إله إلا الله محمد رسول الله', ur='پہلا کلمہ: اللہ کے سوا کوئی معبود نہیں، محمد ﷺ اللہ کے رسول ہیں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio=AIO.."6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src=M.SF("6 Kalimas Urdu and English"), startAt=0, cacheKey="6kalimas_full", endAt=300},
+{cat="6 Kalme / Iman / Namaz", title='Kalima Shahadat (Doosra Kalma)', en='Doosra Kalma - the testimony of faith.', ar='أشهد أن لا إله إلا الله وحده لا شريك له وأشهد أن محمدا عبده ورسوله', ur='دوسرا کلمہ: گواہی کہ اللہ اکیلا ہے، اس کا کوئی شریک نہیں اور محمد ﷺ اس کے بندے اور رسول ہیں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio=AIO.."6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src=M.SF("6 Kalimas Urdu and English"), startAt=245, cacheKey="6kalimas_full", endAt=545},
+{cat="6 Kalme / Iman / Namaz", title='Kalima Tamjeed (Teesra Kalma)', en='Teesra Kalma - glorification of Allah.', ar='سبحان الله والحمد لله ولا إله إلا الله والله أكبر', ur='تیسرا کلمہ: اللہ پاک ہے، سب تعریف اللہ کے لیے، اللہ کے سوا کوئی معبود نہیں، اللہ سب سے بڑا ہے', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio=AIO.."6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src=M.SF("6 Kalimas Urdu and English"), startAt=368, cacheKey="6kalimas_full", endAt=668},
+{cat="6 Kalme / Iman / Namaz", title='Kalima Tawheed (Chautha Kalma)', en='Chautha Kalma - the oneness of Allah.', ar='لا إله إلا الله وحده لا شريك له له الملك وله الحمد يحيي ويميت وهو حي لا يموت', ur='چوتھا کلمہ: اللہ کے سوا کوئی معبود نہیں، وہ اکیلا ہے، بادشاہی اور تعریف اسی کی ہے، وہی زندگی اور موت دیتا ہے', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio=AIO.."6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src=M.SF("6 Kalimas Urdu and English"), startAt=1090, cacheKey="6kalimas_full", endAt=1390},
+{cat="6 Kalme / Iman / Namaz", title='Kalima Istighfar (Paanchwa Kalma)', en='Paanchwa Kalma - seeking forgiveness.', ar='أستغفر الله ربي من كل ذنب وأتوب إليه', ur='پانچواں کلمہ: میں اپنے رب اللہ سے ہر گناہ کی معافی مانگتا ہوں اور اسی کی طرف رجوع کرتا ہوں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio=AIO.."6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src=M.SF("6 Kalimas Urdu and English"), startAt=1288, cacheKey="6kalimas_full", endAt=1588},
+{cat="6 Kalme / Iman / Namaz", title='Kalima Radd-e-Kufr (Chhata Kalma)', en='Chhata Kalma - rejection of disbelief.', ar='اللهم إني أعوذ بك من أن أشرك بك شيئا وأنا أعلم به وأستغفرك لما لا أعلم به', ur='چھٹا کلمہ: اے اللہ! میں تیری پناہ مانگتا ہوں کہ کسی چیز کو تیرا شریک بناؤں اور تیری بخشش مانگتا ہوں', tip='Chhe Kalme - alag alag track (ek hi recording ka clip)', audio=AIO.."6KalimasUrduandEnglish/Recording%20Dec%204%202016%205%2015%2019%20AM%206%20Kalimas%20Urdu.mp3", src=M.SF("6 Kalimas Urdu and English"), startAt=1486, cacheKey="6kalimas_full", endAt=1786},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Namaz ki Ahmiyat (Importance)', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Namaz ki Ahmiyat (Importance)', tip='Alag alag track - har step ke liye alag audio', audio=AIO.."NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz01_Introduction_and_Importance_1.mp3", src=M.SF("Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Auqat-e-Namaz (Timings)', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Auqat-e-Namaz (Timings)', tip='Alag alag track - har step ke liye alag audio', audio=AIO.."NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz04_Auqat1.mp3", src=M.SF("Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Azan aur Iqamat', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Azan aur Iqamat', tip='Alag alag track - har step ke liye alag audio', audio=AIO.."NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz09_Azan_Iqamat-1.mp3", src=M.SF("Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ka Tareeqa', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ka Tareeqa', tip='Alag alag track - har step ke liye alag audio', audio=AIO.."NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz12-Wuzu-1.mp3", src=M.SF("Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ke Masail', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ke Masail', tip='Alag alag track - har step ke liye alag audio', audio=AIO.."NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz20-Wuzu-2.mp3", src=M.SF("Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Wuzu ki Sunnatain', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Wuzu ki Sunnatain', tip='Alag alag track - har step ke liye alag audio', audio=AIO.."NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz21-Wuzu-3.mp3", src=M.SF("Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Taharat ke Masail', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Taharat ke Masail', tip='Alag alag track - har step ke liye alag audio', audio=AIO.."NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz13_Taharat-1_Masail-e-Istanja.mp3", src=M.SF("Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Ghusl aur Sunnatain', en='Step-by-step Urdu lesson series (Shaykh Mufti Muhammad Saeed Khan).', ar='', ur='Namaz ka Sabaq - Ghusl aur Sunnatain', tip='Alag alag track - har step ke liye alag audio', audio=AIO.."NamazSeriesByShaykhMuftiMuhammadSaeedKhan/Namaz22-Bathing-Sunnatain.mp3", src=M.SF("Namaz ka Sabaq - Series (Shaykh Mufti Muhammad Saeed Khan)")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz ka Sabaq - Poora Tareeqa (Molana Mehboob Elahi)', en='Complete Urdu lesson on offering Salah, step by step.', ar='', ur='نماز کا مکمل سبق - مولانا محبوب الٰہی صاحب', tip='Poora tareeqa ek recording mein', audio=AIO.."molana-mehboob-elahi-namaz-ka-tareeqa-www.aswatalislam.net/Molana%20Mehboob%20Elahi%20-%20Namaz%20Ka%20Tareeqa%20%28www.aswatalislam.net%29.mp3", src=M.SF("Molana Mehboob Elahi")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza ka Poora Tareeqa (Audio)', en='Complete method and masail of the funeral prayer, in Urdu.', ar='', ur='نماز جنازہ کا طریقہ اور مسائل', tip='Poora tareeqa sunne ke liye', audio=AIO.."Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src=M.SF("Namaz-e-Janaza k Masail")},
+{cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Pehli Takbeer', en='Janaza namaz ka pehla hissa - is clip mein 1 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 1 تکبیر', tip="Chhota clip - sirf 1 takbeer ka hissa (poora audio upar)", audio=AIO.."Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src=M.SF("Namaz-e-Janaza k Masail"), startAt=0, cacheKey="janaza_full", endAt=420},
+{cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Doosri Takbeer', en='Janaza namaz ka doosra hissa - is clip mein 2 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 2 تکبیر', tip="Chhota clip - sirf 2 takbeer ka hissa (poora audio upar)", audio=AIO.."Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src=M.SF("Namaz-e-Janaza k Masail"), startAt=420, cacheKey="janaza_full", endAt=840},
+{cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Teesri Takbeer', en='Janaza namaz ka teesra hissa - is clip mein 3 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 3 تکبیر', tip="Chhota clip - sirf 3 takbeer ka hissa (poora audio upar)", audio=AIO.."Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src=M.SF("Namaz-e-Janaza k Masail"), startAt=840, cacheKey="janaza_full", endAt=1260},
+{cat="6 Kalme / Iman / Namaz", title='Namaz-e-Janaza - Chauthi Takbeer', en='Janaza namaz ka chautha hissa - is clip mein 4 takbeer ka tareeqa aur uske baad ki dua.', ar='', ur='نماز جنازہ - 4 تکبیر', tip="Chhota clip - sirf 4 takbeer ka hissa (poora audio upar)", audio=AIO.."Namaz-e-janazaKMasail-Www.bestrightway.com/Namaz-e-JanazaKMasail.mp3", src=M.SF("Namaz-e-Janaza k Masail"), startAt=1260, cacheKey="janaza_full", endAt=1680},
+{cat="6 Kalme / Iman / Namaz", title='Iman-e-Mufassal', en='I believe in Allah, His Angels, His Books, His Messengers, the Last Day, and in Qadar - that good and evil are from Allah - and in the resurrection after death.', ar='آمَنْتُ بِاللَّهِ وَمَلَائِكَتِهِ وَكُتُبِهِ وَرُسُلِهِ وَالْيَوْمِ الْآخِرِ وَالْقَدْرِ خَيْرِهِ وَشَرِّهِ مِنَ اللَّهِ تَعَالَى وَالْبَعْثِ بَعْدَ الْمَوْتِ', ur='میں اللہ پر، اس کے فرشتوں پر، اس کی کتابوں پر، اس کے رسولوں پر، آخرت کے دن پر، اور تقدیر پر ایمان لایا', tip='Verified direct MP3 nahi mila - mukammal text + online link', audio="", src="", link="https://www.nooresunnat.com/Audios/iman-e-mufassal-in-english"},
+{cat="6 Kalme / Iman / Namaz", title='Iman-e-Mujmal', en='I believe in Allah as He is, with His names and attributes, and I accept all His commands, with affirmation by the tongue and conviction in the heart.', ar='آمَنْتُ بِاللَّهِ كَمَا هُوَ بِأَسْمَائِهِ وَصِفَاتِهِ وَقَبِلْتُ جَمِيعَ أَحْكَامِهِ إِقْرَارٌ بِاللِّسَانِ وَتَصْدِيقٌ بِالْقَلْبِ', ur='میں اللہ پر ایمان لایا جیسا وہ اپنے ناموں اور صفات کے ساتھ ہے، اور اس کے تمام احکام قبول کیے', tip='Verified direct MP3 nahi mila - mukammal text + online link', audio="", src="", link="https://www.nooresunnat.com/Audios/iman-e-mujmal-with-translation"},
+{cat="Khaana Peena", title="Khana Khane Ke Baad", en="All praise is for Allah, who fed me this and provided it for me without any power or strength on my part.", ar="الْحَمْدُ لِلَّهِ الَّذِي أَطْعَمَنِي هَٰذَا وَرَزَقَنِيهِ مِنْ غَيْرِ حَوْلٍ مِنِّي وَلَا قُوَّةٍ", ur="تمام تعریفیں اللہ کے لیے جس نے مجھے یہ کھلایا اور رزق دیا", tip="Khana khatam hone ke baad parhein", audio=AIO.."islamic-dua-in-audio/dua-after-eating.mp3", src=M.SF(BDIT)},
+{cat="Khaana Peena", title="Doodh Peene Ke Baad", en="O Allah, bless it for us and give us more of it.", ar="اللَّهُمَّ بَارِكْ لَنَا فِيهِ وَزِدْنَا مِنْهُ", ur="اے اللہ اس میں برکت دے اور اس سے زیادہ عطا فرما", tip="Doodh peene ke khaas baad ki dua", audio="", src=""},
+{cat="Sona Uthna", title="Sone Se Pehle Ki Dua", en="In Your name, O Allah, I die and I live.", ar="بِاسْمِكَ اللَّهُمَّ أَمُوتُ وَأَحْيَا", ur="اے اللہ! تیرے نام سے میں مرتا ہوں اور جیتا ہوں", tip="Bistar par lait kar dayin karwat par parhein (Sahih Bukhari)", audio=AIO.."islamic-dua-in-audio/dua-before-sleeping.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-before-sleeping.mp3"}, src=M.SF(BDIT), audioSrcAlt="archive.org (Islamic Duain - Masnoon Duain (Audio))"},
+{cat="Sona Uthna", title="Neend Se Uthne Ki Dua", en="All praise is for Allah, who gave us life after causing us to die, and to Him is the resurrection.", ar="الْحَمْدُ لِلَّهِ الَّذِي أَحْيَانَا بَعْدَ مَا أَمَاتَنَا وَإِلَيْهِ النُّشُورُ", ur="تمام تعریفیں اللہ کے لیے جس نے ہمیں مارنے کے بعد زندہ کیا اور اسی کی طرف اٹھنا ہے", tip="Neend se uthte hi sab se pehle parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--8-.mp3", audioAlternates={"https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--8-.mp3"}, src="TheSufi.com (Arabic+Urdu)", audioSrcAlt="TheSufi.com (Arabic+Urdu)"},
+{cat="Sona Uthna", title="Karwat Badalte Waqt", en="There is no deity but Allah, the One, the Subduer, Lord of the heavens, earth, and all between them, the Almighty, the Forgiving.", ar="لَا إِلَٰهَ إِلَّا اللَّهُ الْوَاحِدُ الْقَهَّارُ رَبُّ السَّمَاوَاتِ وَالْأَرْضِ وَمَا بَيْنَهُمَا الْعَزِيزُ الْغَفَّارُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ اکیلا غالب ہے، آسمانوں اور زمین اور جو ان کے درمیان ہے سب کا رب، عزت والا بخشنے والا", tip="Raat ko neend mein karwat lete waqt", audio="", src=""},
+{cat="Baithna Ghar", title="Majlis Mein Baithne Ki Dua", en="Glory and praise be to You, O Allah. I bear witness there is no deity but You; I seek Your forgiveness and turn to You in repentance.", ar="سُبْحَانَكَ اللَّهُمَّ وَبِحَمْدِكَ أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا أَنْتَ أَسْتَغْفِرُكَ وَأَتُوبُ إِلَيْكَ", ur="اے اللہ تو پاک ہے اور تیری ہی تعریف ہے، میں گواہی دیتا ہوں کہ تیرے سوا کوئی معبود نہیں، تجھ سے معافی مانگتا ہوں اور تیری طرف توبہ کرتا ہوں", tip="Kaffaratul Majlis - majlis se uthte waqt bhi parhein", audio="", src=""},
+{cat="Hifazat", title="Sayyid-ul-Istighfar", en="O Allah, You are my Lord; there is no deity except You. You created me, and I am Your servant.", ar="اللَّهُمَّ أَنْتَ رَبِّي لَا إِلَٰهَ إِلَّا أَنْتَ خَلَقْتَنِي وَأَنَا عَبْدُكَ", ur="اے اللہ تو میرا رب ہے، تیرے سوا کوئی معبود نہیں، تو نے مجھے پیدا کیا اور میں تیرا بندہ ہوں", tip="Sab se afzal istighfar (Sahih Bukhari)", audio="", src=""},
+{cat="Hifazat", title="Durood-e-Ibrahimi", en="O Allah, send blessings upon Muhammad and the family of Muhammad as You sent blessings upon Ibrahim and his family. You are Praiseworthy and Glorious.", ar="اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ وَعَلَى آلِ مُحَمَّدٍ كَمَا صَلَّيْتَ عَلَى إِبْرَاهِيمَ وَعَلَى آلِ إِبْرَاهِيمَ إِنَّكَ حَمِيدٌ مَجِيدٌ", ur="اے اللہ محمد ﷺ اور ان کی آل پر رحمت نازل فرما جیسے ابراہیم اور ان کی آل پر نازل فرمائی، بیشک تو تعریف والا بزرگی والا ہے", tip="Namaz ke Tashahhud mein aur Juma ke din", audio="", src=""},
+{cat="Hifazat", title="Ayatul Kursi", en="Allah—there is no deity except Him, the Ever-Living, the Sustainer of all.", ar="اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ الْحَيُّ الْقَيُّومُ", ur="اللہ کے سوا کوئی معبود نہیں، وہ زندہ ہے اور سب کو قائم رکھنے والا ہے", tip="Har namaz ke baad aur sone se pehle", audio="", src=""},
+{cat="Hifazat", title="Qul Huwallahu Ahad (Ikhlas)", en="Say: He is Allah, the One; Allah, the Eternal Refuge.", ar="قُلْ هُوَ اللَّهُ أَحَدٌ اللَّهُ الصَّمَدُ", ur="کہو وہ اللہ ایک ہے، اللہ بے نیاز ہے", tip="Hifazat ke liye 3 martaba", audio="", src=""},
+{cat="Subah Shaam", title="Subah Ki Masnoon Dua (Full)", en="We have entered the morning, and all sovereignty belongs to Allah; all praise belongs to Allah.", ar="أَصْبَحْنَا وَأَصْبَحَ الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے صبح کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Fajr ke baad", audio="", src=""},
+{cat="Subah Shaam", title="Shaam Ki Masnoon Dua", en="We have entered the evening, and all sovereignty belongs to Allah; all praise belongs to Allah.", ar="أَمْسَيْنَا وَأَمْسَى الْمُلْكُ لِلَّهِ وَالْحَمْدُ لِلَّهِ", ur="ہم نے شام کی اور ساری بادشاہت اللہ کی ہے اور تمام تعریفیں اللہ ہی کے لیے ہیں", tip="Maghrib ke baad", audio="", src=""},
+{cat="Safar", title="Safar Ki Dua", en="Glory be to the One who placed this at our service; we could not have done so ourselves, and to our Lord we will return.", ar="سُبْحَانَ الَّذِي سَخَّرَ لَنَا هَٰذَا وَمَا كُنَّا لَهُ مُقْرِنِينَ وَإِنَّا إِلَىٰ رَبِّنَا لَمُنْقَلِبُونَ", ur="پاک ہے وہ ذات جس نے ہمارے لیے اس سواری کو مسخر کیا اور ہم اس کے قابو میں لانے والے نہ تھے، اور بیشک ہم اپنے رب کی طرف لوٹنے والے ہیں", tip="Sawari par baithte waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--28-.mp3", audioAlternates={"https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--28-.mp3"}, src="TheSufi.com (Arabic+Urdu)", audioSrcAlt="TheSufi.com (Arabic+Urdu)"},
+{cat="Khaana Peena", title="Khana Khane Se Pehle", en="In the name of Allah.", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے شروع", tip="Khana shuru karte waqt Bismillah", audio=AIO.."islamic-dua-in-audio/dua-before-eating.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-before-eating.mp3"}, src=M.SF(BDIT), audioSrcAlt="archive.org (Islamic Duain - Masnoon Duain (Audio))"},
+{cat="Tahaarat", title="Wuzu Se Pehle", en="In the name of Allah.", ar="بِسْمِ اللَّهِ", ur="اللہ کے نام سے", tip="Wuzu shuru karte waqt", audio="", src=""},
+{cat="Tahaarat", title="Wuzu Ke Baad", en="I bear witness there is no deity but Allah alone, without partner, and Muhammad is His servant and Messenger.", ar="أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا اللَّهُ وَحْدَهُ لَا شَرِيكَ لَهُ وَأَشْهَدُ أَنَّ مُحَمَّدًا عَبْدُهُ وَرَسُولُهُ", ur="میں گواہی دیتا ہوں کہ اللہ کے سوا کوئی معبود نہیں وہ اکیلا ہے اس کا کوئی شریک نہیں اور محمد ﷺ اس کے بندے اور رسول ہیں", tip="Wuzu ke baad", audio="", src=""},
+{cat="Masjid", title="Masjid Mein Dakhil Hone Ki Dua", en="O Allah, open for me the gates of Your mercy.", ar="اللَّهُمَّ افْتَحْ لِي أَبْوَابَ رَحْمَتِكَ", ur="اے اللہ میرے لیے اپنی رحمت کے دروازے کھول دے", tip="Masjid mein dakhil hote waqt", audio=AIO.."islamic-dua-in-audio/dua-for-entering-masjid.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-for-entering-masjid.mp3"}, src=M.SF(BDIT), audioSrcAlt="archive.org (Islamic Duain - Masnoon Duain (Audio))"},
+{cat="Masjid", title="Masjid Se Nikalne Ki Dua", en="O Allah, I ask You for Your bounty.", ar="اللَّهُمَّ إِنِّي أَسْأَلُكَ مِنْ فَضْلِكَ", ur="اے اللہ میں تجھ سے تیرا فضل مانگتا ہوں", tip="Masjid se nikalte waqt", audio=AIO.."islamic-dua-in-audio/dua-for-exiting-masjid.mp3", audioAlternates={"https://archive.org/download/islamic-dua-in-audio/dua-for-exiting-masjid.mp3"}, src=M.SF(BDIT), audioSrcAlt="archive.org (Islamic Duain - Masnoon Duain (Audio))"},
+{cat="Subah Shaam", title="Subah Ki Dua (Morning Prayer)", en="Morning supplication asking Allah for blessing and protection.", ar="", ur="Subah ki masnoon dua", tip="Fajr ke baad parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications-Morning-Prayer.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Sona Uthna", title="Buri Neend/Darawana Khawab Aane Ki Dua", en="Supplication for seeking refuge and safety after a disturbing dream.", ar="", ur="Bura khawab ya neend ki bechaini ki dua", tip="Darawana khawab ane par parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--7-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Namaz", title="Namaz Ke Baad Ki Dua", en="Supplication to be recited after completing the obligatory prayer.", ar="", ur="Namaz mukammal karne ke baad ki dua", tip="Har farz namaz ke baad", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--15-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Roza", title="Sehri Ki Dua", en="Supplication/intention associated with beginning the fast at Suhoor.", ar="", ur="Roza shuru karne (Sehri) ki niyat wali dua", tip="Sehri ke waqt parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--22-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Roza", title="Iftar Ki Dua", en="Supplication for breaking the fast at Iftar.", ar="", ur="Roza kholte waqt ki dua", tip="Iftar ke waqt parhein", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--23-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Khaas Mawaqe", title="Dua-e-Haajit", en="Supplication asking Allah to fulfil a need.", ar="", ur="Zaroorat poori hone ki dua", tip="Kisi khaas zaroorat ke waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--1-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Khaas Mawaqe", title="Fot Hone Par Taziyat Ki Dua", en="Supplication of condolence and patience after a death.", ar="", ur="Kisi ki wafat par sabr/taziyat ki dua", tip="Ghum ke waqt aur taziyat karte waqt", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--55-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Khaas Mawaqe", title="Kamyabi/Muqable Mein Kamyabi Ki Dua", en="Supplication asking Allah for help and success in a difficult task.", ar="", ur="Muqable ya mushkil mein kamyabi ki dua", tip="Imtihan ya mushkil kaam se pehle", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--57-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Khaas Mawaqe", title="Sabaat Aur Rehmat Ki Dua", en="Supplication asking Allah for steadfastness and mercy.", ar="", ur="Deen par sabaat (istiqamat) aur rehmat ki dua", tip="Rozmarra ki dua ke tor par", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--58-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Khaas Mawaqe", title="Barkat Aur Maghfirat Ki Dua", en="Supplication asking Allah for blessing and forgiveness.", ar="", ur="Barkat aur bakhshish maangne ki dua", tip="Rozmarra ki dua ke tor par", audio="https://www.thesufi.com/Islamic-Collection/Islamic_Audio_Section/67-Islamic-Masnoon-Dua-Arabic-with-Urdu-Translation-MP3/Dua-and-Supplications--64-.mp3", src="TheSufi.com (Arabic+Urdu)"},
+{cat="Khaana Peena", title="Pani Peene Ke Baad Ki Dua", en="Supplication of thanks after drinking water.", ar="", ur="Pani peene ke baad ki masnoon dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-after-drinking-water.mp3", src=M.SF(BDIT)},
+{cat="Khaana Peena", title="Dawat Mein Khana Khane Ke Baad Ki Dua", en="Supplication of thanks after eating at a host's meal.", ar="", ur="Kisi ki dawat mein khana khane ke baad ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-after-eating-dawat.mp3", src=M.SF(BDIT)},
+{cat="Tahaarat", title="Bathroom Se Nikalne Ki Dua", en="Supplication upon leaving the bathroom.", ar="", ur="Bathroom/toilet se nikalne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-after-exiting-from-the-toilet.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Baadal Chatne Ki Dua", en="Supplication for when clouds clear.", ar="", ur="Baadal chatne (khulne) ke waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-after-opening-clouds.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Qarz Wapis Milne Ki Dua", en="Supplication of gratitude when a debt is repaid.", ar="", ur="Apna qarz wapis milne par shukr ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-after-receive-debts.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Naye Kapre Pehnne Ki Dua", en="Supplication upon wearing new clothes.", ar="", ur="Naye kapre pehante waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-after-wearing-clothes.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Musafa (Handshake) Ki Dua", en="Supplication/greeting when meeting and shaking hands.", ar="", ur="Kisi se hath milate waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-handshake.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Jamhai (Ubasi) Aane Ki Dua", en="Prophetic guidance associated with yawning.", ar="", ur="Ubasi/jamhai aane par karne wala amal", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-jamahi.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Chand Grehan Ki Dua", en="Supplication and remembrance during a lunar eclipse.", ar="", ur="Chand grehan (lunar eclipse) ke waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-lunar-eclipse.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Barish Ke Waqt Ki Dua (Audio)", en="Supplication when rain begins.", ar="", ur="Barish shuru hote waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-rain.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Tohfa Milne Ki Dua", en="Supplication of thanks when receiving a gift.", ar="", ur="Kisi se tohfa (gift) milne par dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-receive-gift.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Suraj Grehan Ki Dua", en="Supplication and remembrance during a solar eclipse.", ar="", ur="Suraj grehan (solar eclipse) ke waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-solar-eclipse.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Aandhi/Toofan Ki Dua", en="Supplication asking Allah for protection during strong wind or storm.", ar="", ur="Tez aandhi/toofan ke waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-storm.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Suraj Nikalte Waqt Ki Dua", en="Morning remembrance at sunrise.", ar="", ur="Subah suraj nikalte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-sunrise.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Suraj Ghurub Hone Ki Dua", en="Evening remembrance at sunset.", ar="", ur="Shaam ko suraj ghurub hote waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-at-the-time-of-sunset.mp3", src=M.SF(BDIT)},
+{cat="Khaana Peena", title="Doodh Peene Se Pehle Ki Dua (Audio)", en="Supplication before drinking milk.", ar="", ur="Doodh peene se pehle ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-before-drinking-milk.mp3", src=M.SF(BDIT)},
+{cat="Khaana Peena", title="Pani Peene Se Pehle Ki Dua (Audio)", en="Supplication before drinking water.", ar="", ur="Pani peene se pehle ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-before-drinking-water.mp3", src=M.SF(BDIT)},
+{cat="Tahaarat", title="Bathroom Jaane Ki Dua", en="Supplication before entering the bathroom.", ar="", ur="Bathroom/toilet mein dakhil hone se pehle ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-before-entering-the-toilet.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Naya Kaam Shuru Karne Ki Dua", en="Supplication before beginning a new task.", ar="", ur="Koi naya kaam shuru karte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-before-starting-new-work.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Maghfirat Maangne Ki Dua", en="Supplication asking Allah for forgiveness.", ar="", ur="Allah se maghfirat maangne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-asking-forgiveness.mp3", src=M.SF(BDIT)},
+{cat="Baithna Ghar", title="Ghar Mein Dakhil Hone Ki Dua (Audio)", en="Supplication upon entering one's home.", ar="", ur="Ghar mein dakhil hote waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-entering-house.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Bazaar Mein Dakhil Hone Ki Dua", en="Supplication upon entering the marketplace.", ar="", ur="Bazaar/market mein jaate waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-entering-the-marketplace.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Shukriya Ada Karne Ki Dua", en="Supplication expressing gratitude.", ar="", ur="Kisi ka shukriya ada karte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-expressing-thanks.mp3", src=M.SF(BDIT)},
+{cat="Ramzan", title="Ramzan Ke Pehle Ashre Ki Dua", en="Supplication for the first ten days of Ramadan.", ar="", ur="Ramzan ke pehle ashre (rehmat) ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-first-ashra-of-ramadan.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Qarz Utarne Ki Dua", en="Supplication asking Allah for help in repaying debt.", ar="", ur="Qarz jaldi utarne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-payment-of-debt.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Surma Lagane Ki Dua", en="Supplication associated with applying kohl.", ar="", ur="Aankhon mein surma lagate waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-putting-on-surma.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Barish Ke Liye Dua (Istisqa)", en="Supplication asking Allah to send beneficial rain.", ar="", ur="Barish na ho rahi ho to mangne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-rain-to-come.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Kitab Parhne Ki Dua", en="Supplication before reading or studying.", ar="", ur="Koi kitab parhna shuru karne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-reading-the-book.mp3", src=M.SF(BDIT)},
+{cat="Ramzan", title="Ramzan Ke Dusre Ashre Ki Dua", en="Supplication for the middle ten days of Ramadan.", ar="", ur="Ramzan ke dusre ashre (maghfirat) ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-second-ashra-of-ramadan.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Kisi Ko Museebat Mein Dekh Kar Dua", en="Supplication when seeing someone afflicted by hardship.", ar="", ur="Kisi ko museebat/museebat zada dekh kar parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-seeing-someone-in-difficulty.mp3", src=M.SF(BDIT)},
+{cat="Ramzan", title="Ramzan Ke Teesre Ashre Ki Dua", en="Supplication for the final ten days of Ramadan.", ar="", ur="Ramzan ke teesre ashre (jahannam se azadi) ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-third-ashra-of-ramadan.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Mushkil/Museebat Ke Waqt Ki Dua", en="Supplication asking Allah for relief in hardship.", ar="", ur="Kisi mushkil ya museebat ke waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-trouble.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Seerhi/Upar Chadhte Waqt Ki Dua", en="Remembrance while ascending stairs or a height.", ar="", ur="Upar chadhte (seerhi ya pahar) waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-upstairs.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Aaina Dekhne Ki Dua", en="Supplication upon looking in a mirror.", ar="", ur="Aaine mein apni surat dekhte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-when-looking-in-a-mirror.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Gussa Aane Par Dua", en="Supplication seeking refuge from anger.", ar="", ur="Gussa aane par parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-for-when-one-suffers-anger.mp3", src=M.SF(BDIT)},
+{cat="Ramzan", title="Qurbani Ki Dua", en="Supplication said when offering a sacrifice.", ar="", ur="Qurbani karte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-of-qurbani.mp3", src=M.SF(BDIT)},
+{cat="Ramzan", title="Shab-e-Qadr Ki Dua", en="Supplication for the Night of Decree.", ar="", ur="Shab-e-Qadr mein parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-of-shab-e-qadr.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Cheenk Aane Ki Dua", en="Prophetic response/remembrance when sneezing.", ar="", ur="Khud ko cheenk aane par parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-of-sneezing.mp3", src=M.SF(BDIT)},
+{cat="Ramzan", title="Taraweeh Ki Dua", en="Supplication associated with Taraweeh prayers.", ar="", ur="Taraweeh ki namaz se mutaliq dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-of-taraweeh.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Kisi Musalman Ko Khush Dekh Kar Dua", en="Supplication when seeing a fellow Muslim cheerful.", ar="", ur="Kisi musalman bhai ko muskurate dekh kar dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-be-asked-upon-beholding-a-muslim-smiling.mp3", src=M.SF(BDIT)},
+{cat="Jaanwar Ki Awaz", title="Murgh Ki Awaz Sun Kar Dua", en="Remembrance upon hearing a rooster crow.", ar="", ur="Murgh (rooster) ki awaz sun kar parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-be-invoked-upon-hearing-the-crowing-of-a-rooster.mp3", src=M.SF(BDIT)},
+{cat="Safar", title="Sawari Par Baithne Ki Dua (Audio)", en="Supplication upon mounting a vehicle or ride.", ar="", ur="Gaadi/sawari par baithte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-be-recited-after-being-settled-onto-a-carriage.mp3", src=M.SF(BDIT)},
+{cat="Khaana Peena", title="Khana Saamne Rakhe Jaane Par Dua", en="Supplication when food is served.", ar="", ur="Khana saamne rakha jaye to parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-be-recited-when-food-is-placed-before.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Bimari Mein Parhne Ki Dua", en="Supplication asking Allah for healing during illness.", ar="", ur="Bimari ke waqt parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-be-recited-while-feeling-sick.mp3", src=M.SF(BDIT)},
+{cat="Khaana Peena", title="Har Nawala Khane Ki Dua", en="Supplication/remembrance while eating each morsel.", ar="", ur="Har luqma/nawala khane par parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-eat-every-morsel.mp3", src=M.SF(BDIT)},
+{cat="Khaana Peena", title="Pehla Nawala Khane Ki Dua", en="Supplication before eating the first morsel.", ar="", ur="Khane ka pehla nawala uthate waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-eat-first-morsel.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Thakan Dur Karne Ki Dua", en="Supplication asking Allah for relief from tiredness.", ar="", ur="Thakan mehsoos hone par parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-get-rid-of-tiredness.mp3", src=M.SF(BDIT)},
+{cat="Khaas Mawaqe", title="Waswase Se Bachne Ki Dua", en="Supplication seeking protection from intrusive whispers.", ar="", ur="Shaitani waswase se bachne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-get-rid-of-waswas.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Musalman Se Milte Waqt Ki Dua", en="Greeting and supplication when meeting another Muslim.", ar="", ur="Kisi musalman bhai se milte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-meet-with-muslim.mp3", src=M.SF(BDIT)},
+{cat="Mausam", title="Garaj (Thunder) Ke Waqt Ki Dua", en="Supplication upon hearing thunder.", ar="", ur="Baadal garajne (thunder) ke waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-read-at-time-of-thunder.mp3", src=M.SF(BDIT)},
+{cat="Chand Sitare", title="Chand Dekhne Ki Dua", en="Supplication upon seeing the moon.", ar="", ur="Chand dekhte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-see-moon.mp3", src=M.SF(BDIT)},
+{cat="Chand Sitare", title="Sitare Dekhne Ki Dua", en="Remembrance upon observing the stars.", ar="", ur="Sitare dekhte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-see-stars.mp3", src=M.SF(BDIT)},
+{cat="Masjid", title="Masjid Dekhte Hi Ki Dua", en="Remembrance upon seeing a mosque.", ar="", ur="Masjid nazar aate hi parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-see-the-masjid.mp3", src=M.SF(BDIT)},
+{cat="Khaana Peena", title="Phal Khane Ki Dua", en="Supplication before eating fruit.", ar="", ur="Naya phal khane se pehle ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-to-take-fruit.mp3", src=M.SF(BDIT)},
+{cat="Jaanwar Ki Awaz", title="Gadhe Ki Awaz Sun Kar Dua", en="Supplication upon hearing a donkey bray.", ar="", ur="Gadhe (donkey) ki awaz sun kar parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-upon-hearing-braying-of-a-donkey.mp3", src=M.SF(BDIT)},
+{cat="Jaanwar Ki Awaz", title="Kutte Ke Bhonkne Ki Awaz Sun Kar Dua", en="Supplication upon hearing a dog bark.", ar="", ur="Kutte ke bhonkne ki awaz sun kar parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-upon-hearing-the-barking-of-a-dog.mp3", src=M.SF(BDIT)},
+{cat="Chand Sitare", title="Naya Chand Dekhne Ki Dua", en="Supplication upon sighting the new crescent.", ar="", ur="Mahine ka naya chand dekhte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-upon-sighting-the-new-moon.mp3", src=M.SF(BDIT)},
+{cat="Baithna Ghar", title="Ghar Se Nikalte Waqt Ki Dua (Audio)", en="Supplication upon leaving home.", ar="", ur="Ghar se bahar nikalte waqt ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-when-exiting-the-home.mp3", src=M.SF(BDIT)},
+{cat="Rozmarra", title="Kisi Ko Cheenkte Sun Kar Dua (Yarhamuk Allah)", en="Response when hearing another person sneeze.", ar="", ur="Kisi aur ko cheenkte sun kar jawab dena", tip="", audio=AIO.."islamic-dua-in-audio/dua-when-hearing-someone-sneeze.mp3", src=M.SF(BDIT)},
+{cat="Chand Sitare", title="Tootay Hue Tare (Shooting Star) Dekhne Ki Dua", en="Remembrance when seeing a shooting star.", ar="", ur="Tootay hue tare ko dekh kar parhne ki dua", tip="", audio=AIO.."islamic-dua-in-audio/dua-when-seeing-shooting-star.mp3", src=M.SF(BDIT)},
+{cat="Hajj", title="Takbeer-e-Tashreeq", en="Takbeer recited during the days of Tashreeq.", ar="", ur="Eid ke ayyam-e-tashreeq mein parhi jane wali takbeer", tip="", audio=AIO.."islamic-dua-in-audio/takbeer-e-tashreeq.mp3", src=M.SF(BDIT)},
+{cat="Hajj", title="Talbiyah", en="Pilgrimage response recited in Ihram: ‘Here I am, O Allah, here I am.’", ar="", ur="Hajj/Umrah ke ihram ki talbiyah", tip="", audio=AIO.."islamic-dua-in-audio/talbiyah.mp3", src=M.SF(BDIT)},
+{cat="Rabbana (Quranic Dua)", title="Allah Never Break His Promise", en="Our Lord, surely You will gather the people for a Day about which there is no doubt. Indeed, Allah does not fail in His promise.", ref="Quran 3:9", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/01%20Allah%20never%20break%20his%20promise.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="No Help For Zalimun", en="Our Lord, do not place us with the wrongdoing people.", ref="Quran 7:47", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/02%20No%20help%20for%20zalimun.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Grant Us What You Promised", en="Our Lord, grant us what You promised through Your messengers, and do not disgrace us on the Day of Resurrection. Indeed, You do not fail in Your promise.", ref="Quran 3:194", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/03%20Grant%20us%20what%20You%20promised.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="We Believe", en="Our Lord, we have believed, so register us among the witnesses.", ref="Quran 5:83", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/04%20We%20believe.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Provide Us Sustenance", en="O Allah, our Lord, send down to us a table spread with food from heaven, as a sign from You and a provision; You are the best of providers.", ref="Quran 5:114", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/05%20Provide%20us%20Sustenance.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="You Are The Best Judge", en="Our Lord, decide between us and our people in truth; You are the best of those who decide.", ref="Quran 7:89", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/06%20You%20are%20the%20best%20judge.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Save Us By Your Mercy", en="Our Lord, make us not a trial for the wrongdoing people, and save us by Your mercy from the disbelieving people.", ref="Quran 10:85-86", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/07%20Save%20us%20by%20Your%20Mercy.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Nothing Is Hidden From Allah", en="Our Lord, You know what we conceal and what we declare; nothing on earth or in heaven is hidden from Allah.", ref="Quran 14:38", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/08%20Nothing%20is%20hidden%20from%20Allah.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="We Fear Lest", en="Our Lord, indeed we fear that he may hasten against us or transgress.", ref="Quran 20:45", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/09%20We%20fear%20lest.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Avert The Torment Of Hell", en="Our Lord, avert from us the punishment of Hell. Its punishment is ever adhering; indeed, it is an evil settlement and residence.", ref="Quran 25:65-66", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/10%20Avert%20the%20Torment%20of%20Hell.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Leaders Of The Muttaqun", en="Our Lord, grant us from among our spouses and offspring comfort to our eyes, and make us an example for the righteous.", ref="Quran 25:74", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/11%20Leaders%20of%20the%20Muttaqun.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Punish Us Not", en="Our Lord, do not impose blame on us if we forget or err.", ref="Quran 2:286", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/12%20Punish%20us%20not.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Lay Not On Us A Burden", en="Our Lord, lay not upon us a burden like that which You laid upon those before us.", ref="Quran 2:286", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/13%20Lay%20not%20on%20us%20a%20Burden.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Pardon And Grant Us Forgiveness", en="Our Lord, burden us not with what we cannot bear. Pardon us, forgive us, have mercy on us; You are our Protector, so help us against the disbelieving people.", ref="Quran 2:286", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/14%20Pardon%20and%20Grant%20us%20Forgiveness.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Forgive Us Our Sins", en="Our Lord, we have believed, so forgive us our sins and protect us from the punishment of the Fire.", ref="Quran 3:16", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/15%20Forgive%20us%20our%20Sins.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Victory Over Disbelievers", en="Our Lord, forgive us our sins and our excesses, make our feet firm, and grant us victory over the disbelieving people.", ref="Quran 3:147", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/16%20Victory%20over%20Disbelievers.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Bestow Upon Us Your Mercy", en="Our Lord, let not our hearts deviate after You have guided us, and grant us mercy from Yourself. Indeed, You are the Bestower.", ref="Quran 3:8", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/17%20Bestow%20upon%20us%20Your%20Mercy.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Forgive Me And My Parents", en="Our Lord, forgive me, my parents, and the believers on the Day the account is established.", ref="Quran 14:41", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/18%20Forgive%20me%20and%20my%20Parents.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Grant Us Forgiveness", en="Our Lord, forgive us and our brothers who preceded us in faith, and place no resentment in our hearts toward those who believe.", ref="Quran 59:10", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/19%20Grant%20us%20Forgiveness.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Give Us In This World Good", en="Our Lord, give us good in this world and good in the Hereafter, and protect us from the punishment of the Fire.", ref="Quran 2:201", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/20%20Give%20us%20in%20this%20World%20Good.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Save Us From Fire", en="Our Lord, You did not create this aimlessly. Glory be to You; protect us from the punishment of the Fire.", ref="Quran 3:191", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/21%20Save%20us%20from%20Fire.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Place Us Not With Zalimun", en="Our Lord, make us not a trial for the wrongdoing people.", ref="Quran 10:85", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/22%20Place%20us%20not%20with%20Zalimun.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Make Them Enter The Paradise", en="Our Lord, admit them to the Gardens of Eternity You promised them, together with the righteous among their forefathers, spouses, and offspring. You are the Exalted in Might, the Wise.", ref="Quran 40:8", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/23%20Make%20them%20enter%20the%20Paradise.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Bestow Mercy From Yourself", en="Our Lord, grant us mercy from Your presence and guide our affair to what is right.", ref="Quran 18:10", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/24%20Bestow%20Mercy%20from%20Yourself.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="We Believe, Forgive Us", en="Our Lord, we believe, so forgive us and have mercy on us; You are the best of the merciful.", ref="Quran 23:109", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/25%20We%20Believe%2C%20Forgive%20us.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Forgive Us And Our Brethren", en="Our Lord, forgive us and our brothers who preceded us in faith, and place no resentment in our hearts toward those who believe.", ref="Quran 59:10", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/26%20Forgive%20us%20and%20our%20Brethren.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Allah Is Full Of Kindness", en="Our Lord, You are indeed Kind and Merciful.", ref="Quran 59:10", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/27%20Allah%20is%20Full%20of%20Kindness.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Make Us Not A Trail", en="Our Lord, make us not a trial for those who do wrong.", ref="Quran 10:85", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/28%20Make%20us%20not%20a%20Trail.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Accept Our Repentance", en="Our Lord, we have wronged ourselves; if You do not forgive us and have mercy on us, we will surely be among the losers.", ref="Quran 7:23", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/29%20Accesp%20our%20Repentance.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Let Not Our Hearts Deviate", en="Our Lord, let not our hearts deviate after You have guided us, and grant us mercy from Yourself.", ref="Quran 3:8", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/30%20Let%20not%20our%20Hearts%20Deviate.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="We Believe In What You Have Sent", en="Our Lord, we believe in what You revealed and follow the Messenger; write us among the witnesses.", ref="Quran 3:53", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/31%20We%20believe%20in%20what%20You%20have%20sent.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Believe In Allah", en="Our Lord, we have heard a caller inviting us to faith: ‘Believe in your Lord,’ and we have believed.", ref="Quran 3:193", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/32%20Believe%20in%20Allah.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Remit Our Evil Deeds", en="Our Lord, forgive our sins, remove our misdeeds, and cause us to die among the righteous.", ref="Quran 3:193", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/33%20Remit%20our%20Evil%20Deeds.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Forgive Those Who Repent", en="Our Lord, You encompass all things in mercy and knowledge. Forgive those who repent and follow Your way, and protect them from Hellfire.", ref="Quran 40:7", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/34%20Forgive%20those%20who%20Repent.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="We Turn In Repentance", en="Our Lord, upon You we rely; to You we turn in repentance, and to You is the final destination.", ref="Quran 60:4", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/35%20We%20Turn%20in%20Repentance.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Accept Our Service", en="Our Lord, accept this from us. Indeed, You are the All-Hearing, the All-Knowing.", ref="Quran 2:127", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/36%20Accept%20our%20Service.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Give Us Patience", en="Our Lord, pour upon us patience, make our feet firm, and help us against the disbelieving people.", ref="Quran 2:250", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/37%20Give%20us%20Patience.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="To Die As Muslim", en="Our Lord, pour upon us patience and let us die as Muslims in submission to You.", ref="Quran 7:126", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/38%20To%20Die%20as%20Muslim.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Accept My Invocation", en="My Lord, make me an establisher of prayer, and from my descendants as well. Our Lord, accept my supplication.", ref="Quran 14:40", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/39%20Accept%20my%20Invocation.mp3", src=M.SF("Rabbana 40 Supplications")},
+{cat="Rabbana (Quranic Dua)", title="Allah Is Oft-Forgiving", en="Our Lord, perfect our light for us and forgive us. Indeed, You are over all things capable.", ref="Quran 66:8", ar="", ur="", tip="", audio=AIO.."Rabbana-40-Supplications/40%20Allah%20is%20Oft-Forgiving.mp3", src=M.SF("Rabbana 40 Supplications")},
 }
-  end
-  return _lazyCache.dailyDuas
 end
--- v2.7-fix2: agar entry clip hai (d.cacheKey) to usi ek recording ka ek hi
--- offline copy use hoti hai - warna har item ka apna file:
-local function getDuaAudioLocal(d) return duaAudioDir .. "dua_" .. slug(d.cacheKey or d.title) .. ".mp3" end
-
--- NAYA (v2.1): "Poori Quran (Continuous)" - poori Quran EK hi bari file
--- mein (Urdu Shamshad Ali Khan tarjuma ke sath mixed), do reciters mein
--- se choose kar sakte hain. Surah-wise seek nahi hoti (koi timestamp data
--- nahi hai), sirf continuous play + scrub + offline download.
-local fullQuranVoices = {
-  {name="Al-Minshawi (Moratal) + Urdu (Shamshad Ali Khan)", url="https://archive.org/download/FullQuranByALMINSHAWIMORAT356856856835635853xedUrduByShamshadAliKhan64kb/full%20-quran-by-__ALMINSHAWI-MORATAL__mixed_urdu-by-Shamshad-%20Ali-%20Khan-64kb.mp3", file="fullquran_minshawi_urdu.mp3"},
-  {name="Al-Hosary + Urdu (Shamshad Ali Khan)", url="https://archive.org/download/FullQuranByAlhosaryTeacherWithoutKidsMixedUr356858633568353535686535368duByShamshadAliKhan64kb/full%20-quran-by-__alhosary__teacher__without__kids__mixed_urdu-by-Shamshad-%20Ali-%20Khan-64kb.mp3", file="fullquran_alhosary_urdu.mp3"}
-}
-local function getFullQuranLocal(v) return duaAudioDir .. v.file end
-
--- NAYA (v2.1): Hadith - Sahih Bukhari (English), 97 Kitab (Books) ki
--- audio, har Kitab apni file mein (archive.org: sahih-bukhari-english-audio,
--- QNS Academy) - Urdu wala source clean/reliable nahi mila is liye
--- English (jis mein poori 97 Kitab ki saaf list hai) use ki gayi hai.
+return _lazyCache.dailyDuas
+end
+M.getDuaAudioLocal = function(d)
+if d and d.book then return bookAudioDir .. tostring(d.cacheKey or "book") .. ".mp3" end
+return duaAudioDir .. "dua_" .. slug(d.cacheKey or d.title) .. ".mp3"
+end
+local fullQuranVoices = { {name="Al-Minshawi (Moratal) + Urdu (Shamshad Ali Khan)", url="https://archive.org/download/FullQuranByALMINSHAWIMORAT356856856835635853xedUrduByShamshadAliKhan64kb/full%20-quran-by-__ALMINSHAWI-MORATAL__mixed_urdu-by-Shamshad-%20Ali-%20Khan-64kb.mp3", file="fullquran_minshawi_urdu.mp3"}, {name="Al-Hosary + Urdu (Shamshad Ali Khan)", url="https://archive.org/download/FullQuranByAlhosaryTeacherWithoutKidsMixedUr356858633568353535686535368duByShamshadAliKhan64kb/full%20-quran-by-__alhosary__teacher__without__kids__mixed_urdu-by-Shamshad-%20Ali-%20Khan-64kb.mp3", file="fullquran_alhosary_urdu.mp3"} }
+M.getFullQuranLocal = function(v) return duaAudioDir .. v.file end
 local function hadithBooks()
-  if not _lazyCache.hadithBooks then
-    _lazyCache.hadithBooks = {
-  {n=1, title="The Book Of Revelation", range="Hadith 1-7", file="Sahih Bukhari Book 01  The Book Of Revelation  Hadith 1-7 of 7563 English.mp3"},
-  {n=2, title="Belief (Faith)", range="Hadith 8-58", file="Sahih Bukhari Book 02  The Book Of Belief (Faith)  Hadith 8-58 of 7563 English.mp3"},
-  {n=3, title="Knowledge", range="Hadith 59-134", file="Sahih Bukhari Book 03  The Book Of Knowledge  Hadith 59-134 of 7563 English.mp3"},
-  {n=4, title="Ablutions (Wudu)", range="Hadith 135-247", file="Sahih Bukhari Book 04  The Book Of Ablutions (Wudu)  Hadith 135-247 of 7563 English.mp3"},
-  {n=5, title="Bathing (Ghusl)", range="Hadith 248-293", file="Sahih Bukhari Book 05  The Book Of Bathing (Ghusl)  Hadith 248-293 of 7563 English.mp3"},
-  {n=6, title="Menses", range="Hadith 294-333", file="Sahih Bukhari Book 06  The Book Of Menses  Hadith 294-333 of 7563 English.mp3"},
-  {n=7, title="Tayammum", range="Hadith 334-348", file="Sahih Bukhari Book 07  The Book Of Tayammum  Hadith 334-348 of 7563 English.mp3"},
-  {n=8, title="The Prayers (As-Salat)", range="Hadith 349-520", file="Sahih Bukhari Book 08  The Book Of The Prayers (As-Salat) Hadith 349-520 of 7563 English.mp3"},
-  {n=9, title="Times of the prayers & superiority", range="Hadith 521-602", file="Sahih Bukhari Book 09  The Book Of the times of the prayers and it's superiority Hadith 521-602 of 7563 English.mp3"},
-  {n=10, title="Adhan (Call to Prayers)", range="Hadith 603-875", file="Sahih Bukhari Book 10  The Book Of Adhan (Call to Prayers)  Hadith 603-875 of 7563 English.mp3"},
-  {n=11, title="Al-Jumuah (Friday)", range="Hadith 876-941", file="Sahih Bukhari Book 11  The Book Of Al-Jumuah (Friday) I Jumma Prayer  Hadith 876-941 of 7563 English.mp3"},
-  {n=12, title="Fear Prayer", range="Hadith 942-947", file="Sahih Bukhari Book 12  The Book Of Fear Prayer  Hadith 942-947 of 7563 English.mp3"},
-  {n=13, title="The two Eid (Prayers & Festivals)", range="Hadith 948-989", file="Sahih Bukhari Book 13  The Book Of the two Eid (Prayers and Festivals)  Hadith 948-989 of 7563 English.mp3"},
-  {n=14, title="Witr Prayer", range="Hadith 990-1004", file="Sahih Bukhari Book 14  The Book Of Witr Prayer  Hadith 990-1004 of 7563 English.mp3"},
-  {n=15, title="Invoking Allah for Rain (Istisqaa)", range="Hadith 1005-1039", file="Sahih Bukhari Book 15  The Book Of Invoking Allah for Rain (Istisqaa)  Hadith 1005-1039 of 7563 English.mp3"},
-  {n=16, title="Eclipses", range="Hadith 1040-1066", file="Sahih Bukhari Book 16  The Book Of Eclipses  Hadith 1040-1066 of 7563 English.mp3"},
-  {n=17, title="Prostration During Recitation of Quran", range="Hadith 1067-1079", file="Sahih Bukhari Book 17  The Book Of Prostration During The Recitation of the Quran Hadith 1067-1079 of 7563 English.mp3"},
-  {n=18, title="Abridged/shortened prayers (At-Taqsir)", range="Hadith 1080-1119", file="Sahih Bukhari Book 18  The Book Of abridged or shortened prayers (at-taqsir) Hadith 1080-1119 of 7563 English.mp3"},
-  {n=19, title="Night Prayer (Salat-ut-Tahajjud)", range="Hadith 1120-1187", file="Sahih Bukhari Book 19  The Book Of Night Prayer (Salat-ut-Tahajjud)  Hadith 1120-1187 of 7563 English.mp3"},
-  {n=20, title="Prayer at Masjid Makkah/Madinah", range="Hadith 1188-1197", file="Sahih Bukhari Book 20  The Superiority of Offering Prayer in the Sosque of  Makkah and al-Madinah H 1188-1197 of 7563 English.mp3"},
-  {n=21, title="Actions in the Prayer (As-Salat)", range="Hadith 1198-1223", file="Sahih Bukhari Book 21  The Book Of Dealing with Actions in the Prayer  (As-Salat) Hadith 1198-1223 of 7563 English.mp3"},
-  {n=22, title="Forgetfulness in Prayer (As-Sahw)", range="Hadith 1224-1236", file="Sahih Bukhari Book 22  The Book Of  Forgetfulness in Prayer (As-Sahw)  Hadith 1224-1236 of 7563 English.mp3"},
-  {n=23, title="Funerals (Al-Janaaiz)", range="Hadith 1237-1394", file="Sahih Bukhari Book 23  The Book Of Funerals (Al-Janaaiz)  Hadith 1237-1394 of 7563 English.mp3"},
-  {n=24, title="Zakat (Obligatory Charity Tax)", range="Hadith 1395-1512", file="Sahih Bukhari Book 24  The Book Of Zakat (Obligatory Charity Tax)  Hadith 1395-1512 of 7563 English.mp3"},
-  {n=25, title="Hajj (Pilgrimage to Makkah)", range="Hadith 1513-1772", file="Sahih Bukhari Book 25  The Book Of Hajj (Pilgrimage to Makkah)  Hadith 1513-1772 of 7563 English.mp3"},
-  {n=26, title="Al-Umrah (Minor pilgrimage)", range="Hadith 1773-1805", file="Sahih Bukhari Book 26  The Book Of Al-Umrah (Minor pilgrimage)  Hadith 1773-1805 of 7563 English.mp3"},
-  {n=27, title="Al-Muhsar (Pilgrims Prevented)", range="Hadith 1806-1820", file="Sahih Bukhari Book 27  The Book Of Al-Muhsar (Pilgrims Prevented from Completing the Pilgrimage) H 1806-1820 of 7563 English.mp3"},
-  {n=28, title="Penalty for hunting (by a muhrim)", range="Hadith 1821-1866", file="Sahih Bukhari Book 28  The Book Of penalty for hunting (by a muhrim) and similar things Hadith 1821-1866 of 7563 English.mp3"},
-  {n=29, title="Virtues of Madinah", range="Hadith 1867-1890", file="Sahih Bukhari Book 29  The Book Of Virtues of Madinah  Hadith 1867-1890 of 7563 English.mp3"},
-  {n=30, title="The Fasting (As Saum)", range="Hadith 1891-2007", file="Sahih Bukhari Book 30  The Book Of The Fasting (As Saum)  Hadith 1891-2007 of 7563 English.mp3"},
-  {n=31, title="Taraweeh Prayers (Ramadaan)", range="Hadith 2008-2013", file="Sahih Bukhari Book 31  The Book Of Taraweeh Prayers at Night in Ramadaan Hadith 2008-2013 of 7563 English.mp3"},
-  {n=32, title="Superiority of the Night of Qadr", range="Hadith 2014-2024", file="Sahih Bukhari Book 32  The Book Of Superiority of the Night of Qadr  Hadith 2014-2024 of 7563 English.mp3"},
-  {n=33, title="I'tikaf", range="Hadith 2025-2046", file="Sahih Bukhari Book 33  The Book Of Retiring to a Mosque for Remembrance of Allah (Itikaf) Hadith 2025-2046 of 7563 English.mp3"},
-  {n=34, title="Sales (Bargains)", range="Hadith 2047-2238", file="Sahih Bukhari Book 34  The Book Of Sales (Bargains)  Hadith 2047-2238 of 7563 English.mp3"},
-  {n=35, title="As-Salam (Goods Delivered Later)", range="Hadith 2239-2256", file="Sahih Bukhari Book 35  The Sales in Which a Price is Paid for Goods to be Delivered Later(As-Salam) Hadith 2239-2256 of 7563 English.mp3"},
-  {n=36, title="Ash-Shuf'a (Right of First Refusal)", range="Hadith 2257-2259", file="Sahih Bukhari Book 36  The Book Of Right of First Refusal, re-emption (ash-shuf'a) Hadith 2257-2259 of 7563 English.mp3"},
-  {n=37, title="Hiring", range="Hadith 2260-2286", file="Sahih Bukhari Book 37  The Book Of Hiring (Concerning Hiring)  Hadith 2260-2286 of 7563 English.mp3"},
-  {n=38, title="Al-Hawaalat (Transfer of Debt)", range="Hadith 2287-2289", file="Sahih Bukhari Book 38  The Book Of Transferance of a Debt from One Person to Another (Al-Hawaalat) H 2287-2289 of 7563 English.mp3"},
-  {n=39, title="Kafalah", range="Hadith 2290-2298", file="Sahih Bukhari Book 39  The Book Of Kafalah  Hadith 2290-2298 of 7563 English.mp3"},
-  {n=40, title="Representation/Authorization", range="Hadith 2299-2319", file="Sahih Bukhari Book 40  The Book Of Representation (or Authorization)  Hadith 2299-2319 of 7563 English.mp3"},
-  {n=41, title="Cultivation and Agriculture", range="Hadith 2320-2350", file="Sahih Bukhari Book 41  The Book Of Cultivation and Agriculture  Hadith 2320-2350 of 7563 English.mp3"},
-  {n=42, title="Watering (Distribution of Water)", range="Hadith 2351-2384", file="Sahih Bukhari Book 42  The Book Of Watering (Distribution of Water) Hadith 2351-2384 of 7563 English.mp3"},
-  {n=43, title="Loans, Freezing of Property, Bankruptcy", range="Hadith 2385-2409", file="Sahih Bukhari Book 43  The Book Of Loans, payment of loans, Freezing of Property, Bankruptcy Hadith 2385-2409 of 7563.mp3"},
-  {n=44, title="Quarrels, disputes (Khusoomaat)", range="Hadith 2410-2425", file="Sahih Bukhari Book 44  The Book Of quarrels, disputes (Khusoomaat) Hadith 2410-2425 of7563 English.mp3"},
-  {n=45, title="Lost Things (Al-Luqatah)", range="Hadith 2426-2439", file="Sahih Bukhari Book 45  The Book Of Lost Things Picked up by Someone (Al-Luqatah)  Hadith 2426-2439 English.mp3"},
-  {n=46, title="Oppressions, Injustices (Al-Mazalim)", range="Hadith 2440-2482", file="Sahih Bukhari Book 46  The Book Of Oppressions, Injustices (Al-Mazalim)  Hadith 2440-2482 of 7563 English.mp3"},
-  {n=47, title="Partnership", range="Hadith 2483-2507", file="Sahih Bukhari Book 47  The Book Of Partnership  Hadith 2483-2507 of 7563 English.mp3"},
-  {n=48, title="Mortgaging in settled population", range="Hadith 2508-2516", file="Sahih Bukhari Book 48  The Book Of mortgaging in places occupied by settled population Hadith 2508-2516 of 7563 English.mp3"},
-  {n=49, title="Manumission of Slaves", range="Hadith 2517-2559", file="Sahih Bukhari Book 49  The Book Of Manumission of Slaves  Hadith 2517-2559 of 7563 English.mp3"},
-  {n=50, title="Al Mukatab", range="Hadith 2560-2565", file="Sahih Bukhari Book 50  The Book Of Al Mukatab  Hadith 2560-2565 of 7563 English.mp3"},
-  {n=51, title="Gifts & their superiority", range="Hadith 2566-2636", file="Sahih Bukhari Book 51  The Book Of gifts and the superiority of giving gifts  H 2566-2636 of 7563 English.mp3"},
-  {n=52, title="Witnesses, Testimonies", range="Hadith 2637-2689", file="Sahih Bukhari Book 52  The Book Of Witnesses, Testimonies  Hadith 2637-2689 of 7563 English.mp3"},
-  {n=53, title="Peacemaking, Reconciliation", range="Hadith 2690-2710", file="Sahih Bukhari Book 53  The Book Peacemaking, Reconciliation  Hadith 2690-2710 of 7563 English.mp3"},
-  {n=54, title="Conditions", range="Hadith 2711-2737", file="Sahih Bukhari Book 54  The Book Of Conditions  Hadith 2711-2737 of 7563 English.mp3"},
-  {n=55, title="Wills and Testaments (Wasaayaa)", range="Hadith 2738-2781", file="Sahih Bukhari Book 55  The Book Of Wills and Testaments (Wasaayaa) Hadith 2738-2781 of 7563 English.mp3"},
-  {n=56, title="Fighting for the Cause of Allah (Jihad)", range="Hadith 2782-3090", file="Sahih Bukhari Book 56  The Book Of Fighting for the Cause of Allah (Jihad)  Hadith 2782-3090 of 7563 English.mp3"},
-  {n=57, title="Khumus (One-fifth of Booty)", range="Hadith 3091-3155", file="Sahih Bukhari Book 57  The Book Of One-fifth of Booty to the Cause of Allah (Obligations of Khumus) H 3091-3155 of 7563 English.mp3"},
-  {n=58, title="Al-Jizya and Stoppage of War", range="Hadith 3156-3189", file="Sahih Bukhari Book 58  The Book of Al-Jizya and Stoppage of War  Hadith 3156-3189 of 7563 English.mp3"},
-  {n=59, title="The Beginning of Creation", range="Hadith 3190-3325", file="Sahih Bukhari Book 59  The Book of The Beginning of Creation  Hadith 3190-3325 of 7563 English.mp3"},
-  {n=60, title="Stories of the Prophets", range="Hadith 3326-3488", file="Sahih Bukhari Book 60  The Book Of The stories of the Prophets  Hadith  3326-3488 of 7563 English.mp3"},
-  {n=61, title="Virtues of the Prophet & Companions", range="Hadith 3489-3648", file="Sahih Bukhari Book 61  The Book Of Virtues and Merits of the Prophet (pbuh) and his Companions Hadith 3489-3648 of 7563 English.mp3"},
-  {n=62, title="Virtues of the Companions", range="Hadith 3649-3775", file="Sahih Bukhari Book 62  The Book Of The Virtues and merits of the Companions of the Prophet (PBUH) H 3649-3775 of 7563 English.mp3"},
-  {n=63, title="Merits of the Helpers (Al-Ansaar)", range="Hadith 3776-3948", file="Sahih Bukhari Book 63  The Book Of Merits of the Helpers in Madinah (Al-Ansaar)  Hadith 3776-3948 of 7563 English.mp3"},
-  {n=64, title="Holy Battles (Al-Maghaazi)", range="Hadith 3949-4473", file="Sahih Bukhari Book 64  The Book Of Holy Battles (Al-Maghaazi)  Hadith 3949-4473 of 7563 English.mp3"},
-  {n=65, title="Commentary on the Quran (Tafsir)", range="Hadith 4474-4977", file="Sahih Bukhari Book 65  The Book Of Commentary on the Quran ( Tafsir) Hadith 4474-4977 of 7563 English.mp3"},
-  {n=66, title="Virtues of the Quran", range="Hadith 4978-5062", file="Sahih Bukhari Book 66  The Book Of The Virtues of the Quran  Hadith 4978-5062 of 7563 English.mp3"},
-  {n=67, title="The Wedlock, Marriage (Nikaah)", range="Hadith 5063-5250", file="Sahih Bukhari Book 67  The Book Of The Wedlock, Marriage (Nikaah)  Hadith 5063-5250 of7563 English.mp3"},
-  {n=68, title="Divorce", range="Hadith 5251-5350", file="Sahih Bukhari Book 68  The Book Of Divorce  Hadith 5251-5350 of 7563 English.mp3"},
-  {n=69, title="Provision, Expenditures", range="Hadith 5351-5372", file="Sahih Bukhari Book 69  The Book Of Provision, Expenditures (Supporting the Family) Hadith 5351-5372 of 7563 English.mp3"},
-  {n=70, title="Foods, Meals", range="Hadith 5373-5466", file="Sahih Bukhari Book 70  The Book Of Foods, Meals  Hadith 5373-5466 of 7563 English.mp3"},
-  {n=71, title="Sacrifice on Occasion of Birth (Aqiqa)", range="Hadith 5467-5474", file="Sahih Bukhari Book 71  The Book Of Sacrifice on Occasion of Birth (Aqiqa) Hadith 5467-5474 of7563 English.mp3"},
-  {n=72, title="Slaughtering and Hunting", range="Hadith 5475-5544", file="Sahih Bukhari Book 72  The Book Of Slaughtering and Hunting  Hadith 5475-5544 of 7563 English.mp3"},
-  {n=73, title="Sacrifices (Al-Adaahi)", range="Hadith 5545-5574", file="Sahih Bukhari Book 73  The Book Of Sacrifices (Al-Adaahi)  Hadith 5545-5574 of 7563 English.mp3"},
-  {n=74, title="Drinks", range="Hadith 5475-5639", file="Sahih Bukhari Book 74  The Book Of Drinks  Hadith 5475-5639 of 7563 English.mp3"},
-  {n=75, title="Patients", range="Hadith 5640-5677", file="Sahih Bukhari Book 75  The Book Of Patients  Hadith 5640-5677 of 7563 English.mp3"},
-  {n=76, title="Medicine", range="Hadith 5678-5782", file="Sahih Bukhari Book 76  The Book Of Medicine  Hadith 5678-5782 of 7563 English.mp3"},
-  {n=77, title="Dress", range="Hadith 5783-5969", file="Sahih Bukhari Book 77  The Book Of Dress  Hadith 5783-5969 of 7563 English.mp3"},
-  {n=78, title="Good Manners (Al-Adab)", range="Hadith 5970-6226", file="Sahih Bukhari Book 78  The Book Of Good Manners (Al-Adab)  Hadith 5970-6226 of 7563 English.mp3"},
-  {n=79, title="Asking Permission to Enter", range="Hadith 6227-6303", file="Sahih Bukhari Book 79  The Book Of asking permission (to enter somebody else's dwelling place) Hadith 6227-6303 of 7563 English.mp3"},
-  {n=80, title="Invocations (Du'a's)", range="Hadith 6304-6411", file="Sahih Bukhari Book 80  The Book Of Invocations or Dua  (Du'a's)  Hadith 6304-6411 of 7563 English.mp3"},
-  {n=81, title="Softening of the hearts (Ar-Riqaq)", range="Hadith 6412-6593", file="Sahih Bukhari Book 81  The Book Of Softening of the hearts (Ar-Riqaq)  Hadith 6412-6593 of 7563 English.mp3"},
-  {n=82, title="Divine Preordainment (Al-Qadar)", range="Hadith 6594-6620", file="Sahih Bukhari Book 82  The Book Of Divine Preordainment (Al-Qadar)  Hadith 6594-6620 of 7563 English.mp3"},
-  {n=83, title="Oaths and Vows", range="Hadith 6621-6707", file="Sahih Bukhari Book 83  The Book Of Oaths and Vows  Hadith 6621-6707 of 7563 English.mp3"},
-  {n=84, title="Expiation of Unfulfilled Oaths", range="Hadith 6708-6723", file="Sahih Bukhari Book 84  The Book Of Expiation of Unfulfilled Oaths  Hadith 6708-6723 of 7563 English.mp3"},
-  {n=85, title="Laws of Inheritance (Al-Faraaid)", range="Hadith 6724-6771", file="Sahih Bukhari Book 85  The Book Of Laws of Inheritance (Al-Faraaid)  Hadith 6724-6771 of 7563 English.mp3"},
-  {n=86, title="Limits/Punishments (Hudood)", range="Hadith 6772-6860", file="Sahih Bukhari Book 86  The Book Of Limits and Punishments set by Allah (Hudood)  Hadith 6772-6860 of 7563 English.mp3"},
-  {n=87, title="Blood Money (Ad-Diyat)", range="Hadith 6861-6917", file="Sahih Bukhari Book 87  The Book Of Blood Money (Ad-Diyat)  Hadith 6861-6917 of 7563 English.mp3"},
-  {n=88, title="Obliging the Apostates & Repentance", range="Hadith 6918-6939", file="Sahih Bukhari Book 88  The Book Of Obliging the Apostates and Repentance of... Hadith 6918-6939 of 7563 English.mp3"},
-  {n=89, title="Al-Ikrah (Coercion)", range="Hadith 6940-6952", file="Sahih Bukhari Book 89  The Book Of Al-Ikrah (Coercion) (saying some-thing under compulsion) H 6940-6952 of 7563 English.mp3"},
-  {n=90, title="Tricks", range="Hadith 6953-6981", file="Sahih Bukhari Book 90  The Book Of Tricks  Hadith 6953-6981 of 7563 English.mp3"},
-  {n=91, title="Interpretation of Dreams", range="Hadith 6982-7047", file="Sahih Bukhari Book 91  The Book Of the Interpretation of Dreams  Hadith 6982-7047 of 7563 English.mp3"},
-  {n=92, title="Fitan (Trials and afflictions)", range="Hadith 7048-7136", file="Sahih Bukhari Book 92  The Book Of Fitan (Trials and afflictions)  Hadith 7048-7136 of 7563English.mp3"},
-  {n=93, title="Judgments (Al-Ahkaam)", range="Hadith 7137-7225", file="Sahih Bukhari Book 93  The Book Of Judgments (Al-Ahkaam)  Hadith 7137-7225 of 7563 English.mp3"},
-  {n=94, title="Wishes", range="Hadith 7226-7245", file="Sahih Bukhari Book 94  The Book Of Wishes  Hadith 7226-7245 of 7563 English.mp3"},
-  {n=95, title="Information Given by One Person", range="Hadith 7246-7267", file="Sahih Bukhari Book 95  The Book Of The Information Given by one Person  Hadith 7246-7267 of 7563 English.mp3"},
-  {n=96, title="Holding Fast to the Quran & Sunnah", range="Hadith 7268-7370", file="Sahih Bukhari Book 96  The Book Of Holding Fast to the Quran and Sunnah  Hadith 7268-7370 of 7563 English.mp3"},
-  {n=97, title="Islamic Monotheism (Tawhid)", range="Hadith 7371-7563", file="Sahih Bukhari Book 97  The Book Of Islamic Monotheism (Tawhid  Tawheed)  Hadith 7371-7563 of 7563 English.mp3"}
+if not _lazyCache.hadithBooks then
+_lazyCache.hadithBooks = {
+{n=1, title="The Book Of Revelation", range="Hadith 1-7", file="Sahih Bukhari Book 01  The Book Of Revelation  Hadith 1-7 of 7563 English.mp3"},
+{n=2, title="Belief (Faith)", range="Hadith 8-58", file="Sahih Bukhari Book 02  The Book Of Belief (Faith)  Hadith 8-58 of 7563 English.mp3"},
+{n=3, title="Knowledge", range="Hadith 59-134", file="Sahih Bukhari Book 03  The Book Of Knowledge  Hadith 59-134 of 7563 English.mp3"},
+{n=4, title="Ablutions (Wudu)", range="Hadith 135-247", file="Sahih Bukhari Book 04  The Book Of Ablutions (Wudu)  Hadith 135-247 of 7563 English.mp3"},
+{n=5, title="Bathing (Ghusl)", range="Hadith 248-293", file="Sahih Bukhari Book 05  The Book Of Bathing (Ghusl)  Hadith 248-293 of 7563 English.mp3"},
+{n=6, title="Menses", range="Hadith 294-333", file="Sahih Bukhari Book 06  The Book Of Menses  Hadith 294-333 of 7563 English.mp3"},
+{n=7, title="Tayammum", range="Hadith 334-348", file="Sahih Bukhari Book 07  The Book Of Tayammum  Hadith 334-348 of 7563 English.mp3"},
+{n=8, title="The Prayers (As-Salat)", range="Hadith 349-520", file="Sahih Bukhari Book 08  The Book Of The Prayers (As-Salat) Hadith 349-520 of 7563 English.mp3"},
+{n=9, title="Times of the prayers & superiority", range="Hadith 521-602", file="Sahih Bukhari Book 09  The Book Of the times of the prayers and it's superiority Hadith 521-602 of 7563 English.mp3"},
+{n=10, title="Adhan (Call to Prayers)", range="Hadith 603-875", file="Sahih Bukhari Book 10  The Book Of Adhan (Call to Prayers)  Hadith 603-875 of 7563 English.mp3"},
+{n=11, title="Al-Jumuah (Friday)", range="Hadith 876-941", file="Sahih Bukhari Book 11  The Book Of Al-Jumuah (Friday) I Jumma Prayer  Hadith 876-941 of 7563 English.mp3"},
+{n=12, title="Fear Prayer", range="Hadith 942-947", file="Sahih Bukhari Book 12  The Book Of Fear Prayer  Hadith 942-947 of 7563 English.mp3"},
+{n=13, title="The two Eid (Prayers & Festivals)", range="Hadith 948-989", file="Sahih Bukhari Book 13  The Book Of the two Eid (Prayers and Festivals)  Hadith 948-989 of 7563 English.mp3"},
+{n=14, title="Witr Prayer", range="Hadith 990-1004", file="Sahih Bukhari Book 14  The Book Of Witr Prayer  Hadith 990-1004 of 7563 English.mp3"},
+{n=15, title="Invoking Allah for Rain (Istisqaa)", range="Hadith 1005-1039", file="Sahih Bukhari Book 15  The Book Of Invoking Allah for Rain (Istisqaa)  Hadith 1005-1039 of 7563 English.mp3"},
+{n=16, title="Eclipses", range="Hadith 1040-1066", file="Sahih Bukhari Book 16  The Book Of Eclipses  Hadith 1040-1066 of 7563 English.mp3"},
+{n=17, title="Prostration During Recitation of Quran", range="Hadith 1067-1079", file="Sahih Bukhari Book 17  The Book Of Prostration During The Recitation of the Quran Hadith 1067-1079 of 7563 English.mp3"},
+{n=18, title="Abridged/shortened prayers (At-Taqsir)", range="Hadith 1080-1119", file="Sahih Bukhari Book 18  The Book Of abridged or shortened prayers (at-taqsir) Hadith 1080-1119 of 7563 English.mp3"},
+{n=19, title="Night Prayer (Salat-ut-Tahajjud)", range="Hadith 1120-1187", file="Sahih Bukhari Book 19  The Book Of Night Prayer (Salat-ut-Tahajjud)  Hadith 1120-1187 of 7563 English.mp3"},
+{n=20, title="Prayer at Masjid Makkah/Madinah", range="Hadith 1188-1197", file="Sahih Bukhari Book 20  The Superiority of Offering Prayer in the Sosque of  Makkah and al-Madinah H 1188-1197 of 7563 English.mp3"},
+{n=21, title="Actions in the Prayer (As-Salat)", range="Hadith 1198-1223", file="Sahih Bukhari Book 21  The Book Of Dealing with Actions in the Prayer  (As-Salat) Hadith 1198-1223 of 7563 English.mp3"},
+{n=22, title="Forgetfulness in Prayer (As-Sahw)", range="Hadith 1224-1236", file="Sahih Bukhari Book 22  The Book Of  Forgetfulness in Prayer (As-Sahw)  Hadith 1224-1236 of 7563 English.mp3"},
+{n=23, title="Funerals (Al-Janaaiz)", range="Hadith 1237-1394", file="Sahih Bukhari Book 23  The Book Of Funerals (Al-Janaaiz)  Hadith 1237-1394 of 7563 English.mp3"},
+{n=24, title="Zakat (Obligatory Charity Tax)", range="Hadith 1395-1512", file="Sahih Bukhari Book 24  The Book Of Zakat (Obligatory Charity Tax)  Hadith 1395-1512 of 7563 English.mp3"},
+{n=25, title="Hajj (Pilgrimage to Makkah)", range="Hadith 1513-1772", file="Sahih Bukhari Book 25  The Book Of Hajj (Pilgrimage to Makkah)  Hadith 1513-1772 of 7563 English.mp3"},
+{n=26, title="Al-Umrah (Minor pilgrimage)", range="Hadith 1773-1805", file="Sahih Bukhari Book 26  The Book Of Al-Umrah (Minor pilgrimage)  Hadith 1773-1805 of 7563 English.mp3"},
+{n=27, title="Al-Muhsar (Pilgrims Prevented)", range="Hadith 1806-1820", file="Sahih Bukhari Book 27  The Book Of Al-Muhsar (Pilgrims Prevented from Completing the Pilgrimage) H 1806-1820 of 7563 English.mp3"},
+{n=28, title="Penalty for hunting (by a muhrim)", range="Hadith 1821-1866", file="Sahih Bukhari Book 28  The Book Of penalty for hunting (by a muhrim) and similar things Hadith 1821-1866 of 7563 English.mp3"},
+{n=29, title="Virtues of Madinah", range="Hadith 1867-1890", file="Sahih Bukhari Book 29  The Book Of Virtues of Madinah  Hadith 1867-1890 of 7563 English.mp3"},
+{n=30, title="The Fasting (As Saum)", range="Hadith 1891-2007", file="Sahih Bukhari Book 30  The Book Of The Fasting (As Saum)  Hadith 1891-2007 of 7563 English.mp3"},
+{n=31, title="Taraweeh Prayers (Ramadaan)", range="Hadith 2008-2013", file="Sahih Bukhari Book 31  The Book Of Taraweeh Prayers at Night in Ramadaan Hadith 2008-2013 of 7563 English.mp3"},
+{n=32, title="Superiority of the Night of Qadr", range="Hadith 2014-2024", file="Sahih Bukhari Book 32  The Book Of Superiority of the Night of Qadr  Hadith 2014-2024 of 7563 English.mp3"},
+{n=33, title="I'tikaf", range="Hadith 2025-2046", file="Sahih Bukhari Book 33  The Book Of Retiring to a Mosque for Remembrance of Allah (Itikaf) Hadith 2025-2046 of 7563 English.mp3"},
+{n=34, title="Sales (Bargains)", range="Hadith 2047-2238", file="Sahih Bukhari Book 34  The Book Of Sales (Bargains)  Hadith 2047-2238 of 7563 English.mp3"},
+{n=35, title="As-Salam (Goods Delivered Later)", range="Hadith 2239-2256", file="Sahih Bukhari Book 35  The Sales in Which a Price is Paid for Goods to be Delivered Later(As-Salam) Hadith 2239-2256 of 7563 English.mp3"},
+{n=36, title="Ash-Shuf'a (Right of First Refusal)", range="Hadith 2257-2259", file="Sahih Bukhari Book 36  The Book Of Right of First Refusal, re-emption (ash-shuf'a) Hadith 2257-2259 of 7563 English.mp3"},
+{n=37, title="Hiring", range="Hadith 2260-2286", file="Sahih Bukhari Book 37  The Book Of Hiring (Concerning Hiring)  Hadith 2260-2286 of 7563 English.mp3"},
+{n=38, title="Al-Hawaalat (Transfer of Debt)", range="Hadith 2287-2289", file="Sahih Bukhari Book 38  The Book Of Transferance of a Debt from One Person to Another (Al-Hawaalat) H 2287-2289 of 7563 English.mp3"},
+{n=39, title="Kafalah", range="Hadith 2290-2298", file="Sahih Bukhari Book 39  The Book Of Kafalah  Hadith 2290-2298 of 7563 English.mp3"},
+{n=40, title="Representation/Authorization", range="Hadith 2299-2319", file="Sahih Bukhari Book 40  The Book Of Representation (or Authorization)  Hadith 2299-2319 of 7563 English.mp3"},
+{n=41, title="Cultivation and Agriculture", range="Hadith 2320-2350", file="Sahih Bukhari Book 41  The Book Of Cultivation and Agriculture  Hadith 2320-2350 of 7563 English.mp3"},
+{n=42, title="Watering (Distribution of Water)", range="Hadith 2351-2384", file="Sahih Bukhari Book 42  The Book Of Watering (Distribution of Water) Hadith 2351-2384 of 7563 English.mp3"},
+{n=43, title="Loans, Freezing of Property, Bankruptcy", range="Hadith 2385-2409", file="Sahih Bukhari Book 43  The Book Of Loans, payment of loans, Freezing of Property, Bankruptcy Hadith 2385-2409 of 7563.mp3"},
+{n=44, title="Quarrels, disputes (Khusoomaat)", range="Hadith 2410-2425", file="Sahih Bukhari Book 44  The Book Of quarrels, disputes (Khusoomaat) Hadith 2410-2425 of7563 English.mp3"},
+{n=45, title="Lost Things (Al-Luqatah)", range="Hadith 2426-2439", file="Sahih Bukhari Book 45  The Book Of Lost Things Picked up by Someone (Al-Luqatah)  Hadith 2426-2439 English.mp3"},
+{n=46, title="Oppressions, Injustices (Al-Mazalim)", range="Hadith 2440-2482", file="Sahih Bukhari Book 46  The Book Of Oppressions, Injustices (Al-Mazalim)  Hadith 2440-2482 of 7563 English.mp3"},
+{n=47, title="Partnership", range="Hadith 2483-2507", file="Sahih Bukhari Book 47  The Book Of Partnership  Hadith 2483-2507 of 7563 English.mp3"},
+{n=48, title="Mortgaging in settled population", range="Hadith 2508-2516", file="Sahih Bukhari Book 48  The Book Of mortgaging in places occupied by settled population Hadith 2508-2516 of 7563 English.mp3"},
+{n=49, title="Manumission of Slaves", range="Hadith 2517-2559", file="Sahih Bukhari Book 49  The Book Of Manumission of Slaves  Hadith 2517-2559 of 7563 English.mp3"},
+{n=50, title="Al Mukatab", range="Hadith 2560-2565", file="Sahih Bukhari Book 50  The Book Of Al Mukatab  Hadith 2560-2565 of 7563 English.mp3"},
+{n=51, title="Gifts & their superiority", range="Hadith 2566-2636", file="Sahih Bukhari Book 51  The Book Of gifts and the superiority of giving gifts  H 2566-2636 of 7563 English.mp3"},
+{n=52, title="Witnesses, Testimonies", range="Hadith 2637-2689", file="Sahih Bukhari Book 52  The Book Of Witnesses, Testimonies  Hadith 2637-2689 of 7563 English.mp3"},
+{n=53, title="Peacemaking, Reconciliation", range="Hadith 2690-2710", file="Sahih Bukhari Book 53  The Book Peacemaking, Reconciliation  Hadith 2690-2710 of 7563 English.mp3"},
+{n=54, title="Conditions", range="Hadith 2711-2737", file="Sahih Bukhari Book 54  The Book Of Conditions  Hadith 2711-2737 of 7563 English.mp3"},
+{n=55, title="Wills and Testaments (Wasaayaa)", range="Hadith 2738-2781", file="Sahih Bukhari Book 55  The Book Of Wills and Testaments (Wasaayaa) Hadith 2738-2781 of 7563 English.mp3"},
+{n=56, title="Fighting for the Cause of Allah (Jihad)", range="Hadith 2782-3090", file="Sahih Bukhari Book 56  The Book Of Fighting for the Cause of Allah (Jihad)  Hadith 2782-3090 of 7563 English.mp3"},
+{n=57, title="Khumus (One-fifth of Booty)", range="Hadith 3091-3155", file="Sahih Bukhari Book 57  The Book Of One-fifth of Booty to the Cause of Allah (Obligations of Khumus) H 3091-3155 of 7563 English.mp3"},
+{n=58, title="Al-Jizya and Stoppage of War", range="Hadith 3156-3189", file="Sahih Bukhari Book 58  The Book of Al-Jizya and Stoppage of War  Hadith 3156-3189 of 7563 English.mp3"},
+{n=59, title="The Beginning of Creation", range="Hadith 3190-3325", file="Sahih Bukhari Book 59  The Book of The Beginning of Creation  Hadith 3190-3325 of 7563 English.mp3"},
+{n=60, title="Stories of the Prophets", range="Hadith 3326-3488", file="Sahih Bukhari Book 60  The Book Of The stories of the Prophets  Hadith  3326-3488 of 7563 English.mp3"},
+{n=61, title="Virtues of the Prophet & Companions", range="Hadith 3489-3648", file="Sahih Bukhari Book 61  The Book Of Virtues and Merits of the Prophet (pbuh) and his Companions Hadith 3489-3648 of 7563 English.mp3"},
+{n=62, title="Virtues of the Companions", range="Hadith 3649-3775", file="Sahih Bukhari Book 62  The Book Of The Virtues and merits of the Companions of the Prophet (PBUH) H 3649-3775 of 7563 English.mp3"},
+{n=63, title="Merits of the Helpers (Al-Ansaar)", range="Hadith 3776-3948", file="Sahih Bukhari Book 63  The Book Of Merits of the Helpers in Madinah (Al-Ansaar)  Hadith 3776-3948 of 7563 English.mp3"},
+{n=64, title="Holy Battles (Al-Maghaazi)", range="Hadith 3949-4473", file="Sahih Bukhari Book 64  The Book Of Holy Battles (Al-Maghaazi)  Hadith 3949-4473 of 7563 English.mp3"},
+{n=65, title="Commentary on the Quran (Tafsir)", range="Hadith 4474-4977", file="Sahih Bukhari Book 65  The Book Of Commentary on the Quran ( Tafsir) Hadith 4474-4977 of 7563 English.mp3"},
+{n=66, title="Virtues of the Quran", range="Hadith 4978-5062", file="Sahih Bukhari Book 66  The Book Of The Virtues of the Quran  Hadith 4978-5062 of 7563 English.mp3"},
+{n=67, title="The Wedlock, Marriage (Nikaah)", range="Hadith 5063-5250", file="Sahih Bukhari Book 67  The Book Of The Wedlock, Marriage (Nikaah)  Hadith 5063-5250 of7563 English.mp3"},
+{n=68, title="Divorce", range="Hadith 5251-5350", file="Sahih Bukhari Book 68  The Book Of Divorce  Hadith 5251-5350 of 7563 English.mp3"},
+{n=69, title="Provision, Expenditures", range="Hadith 5351-5372", file="Sahih Bukhari Book 69  The Book Of Provision, Expenditures (Supporting the Family) Hadith 5351-5372 of 7563 English.mp3"},
+{n=70, title="Foods, Meals", range="Hadith 5373-5466", file="Sahih Bukhari Book 70  The Book Of Foods, Meals  Hadith 5373-5466 of 7563 English.mp3"},
+{n=71, title="Sacrifice on Occasion of Birth (Aqiqa)", range="Hadith 5467-5474", file="Sahih Bukhari Book 71  The Book Of Sacrifice on Occasion of Birth (Aqiqa) Hadith 5467-5474 of7563 English.mp3"},
+{n=72, title="Slaughtering and Hunting", range="Hadith 5475-5544", file="Sahih Bukhari Book 72  The Book Of Slaughtering and Hunting  Hadith 5475-5544 of 7563 English.mp3"},
+{n=73, title="Sacrifices (Al-Adaahi)", range="Hadith 5545-5574", file="Sahih Bukhari Book 73  The Book Of Sacrifices (Al-Adaahi)  Hadith 5545-5574 of 7563 English.mp3"},
+{n=74, title="Drinks", range="Hadith 5475-5639", file="Sahih Bukhari Book 74  The Book Of Drinks  Hadith 5475-5639 of 7563 English.mp3"},
+{n=75, title="Patients", range="Hadith 5640-5677", file="Sahih Bukhari Book 75  The Book Of Patients  Hadith 5640-5677 of 7563 English.mp3"},
+{n=76, title="Medicine", range="Hadith 5678-5782", file="Sahih Bukhari Book 76  The Book Of Medicine  Hadith 5678-5782 of 7563 English.mp3"},
+{n=77, title="Dress", range="Hadith 5783-5969", file="Sahih Bukhari Book 77  The Book Of Dress  Hadith 5783-5969 of 7563 English.mp3"},
+{n=78, title="Good Manners (Al-Adab)", range="Hadith 5970-6226", file="Sahih Bukhari Book 78  The Book Of Good Manners (Al-Adab)  Hadith 5970-6226 of 7563 English.mp3"},
+{n=79, title="Asking Permission to Enter", range="Hadith 6227-6303", file="Sahih Bukhari Book 79  The Book Of asking permission (to enter somebody else's dwelling place) Hadith 6227-6303 of 7563 English.mp3"},
+{n=80, title="Invocations (Du'a's)", range="Hadith 6304-6411", file="Sahih Bukhari Book 80  The Book Of Invocations or Dua  (Du'a's)  Hadith 6304-6411 of 7563 English.mp3"},
+{n=81, title="Softening of the hearts (Ar-Riqaq)", range="Hadith 6412-6593", file="Sahih Bukhari Book 81  The Book Of Softening of the hearts (Ar-Riqaq)  Hadith 6412-6593 of 7563 English.mp3"},
+{n=82, title="Divine Preordainment (Al-Qadar)", range="Hadith 6594-6620", file="Sahih Bukhari Book 82  The Book Of Divine Preordainment (Al-Qadar)  Hadith 6594-6620 of 7563 English.mp3"},
+{n=83, title="Oaths and Vows", range="Hadith 6621-6707", file="Sahih Bukhari Book 83  The Book Of Oaths and Vows  Hadith 6621-6707 of 7563 English.mp3"},
+{n=84, title="Expiation of Unfulfilled Oaths", range="Hadith 6708-6723", file="Sahih Bukhari Book 84  The Book Of Expiation of Unfulfilled Oaths  Hadith 6708-6723 of 7563 English.mp3"},
+{n=85, title="Laws of Inheritance (Al-Faraaid)", range="Hadith 6724-6771", file="Sahih Bukhari Book 85  The Book Of Laws of Inheritance (Al-Faraaid)  Hadith 6724-6771 of 7563 English.mp3"},
+{n=86, title="Limits/Punishments (Hudood)", range="Hadith 6772-6860", file="Sahih Bukhari Book 86  The Book Of Limits and Punishments set by Allah (Hudood)  Hadith 6772-6860 of 7563 English.mp3"},
+{n=87, title="Blood Money (Ad-Diyat)", range="Hadith 6861-6917", file="Sahih Bukhari Book 87  The Book Of Blood Money (Ad-Diyat)  Hadith 6861-6917 of 7563 English.mp3"},
+{n=88, title="Obliging the Apostates & Repentance", range="Hadith 6918-6939", file="Sahih Bukhari Book 88  The Book Of Obliging the Apostates and Repentance of... Hadith 6918-6939 of 7563 English.mp3"},
+{n=89, title="Al-Ikrah (Coercion)", range="Hadith 6940-6952", file="Sahih Bukhari Book 89  The Book Of Al-Ikrah (Coercion) (saying some-thing under compulsion) H 6940-6952 of 7563 English.mp3"},
+{n=90, title="Tricks", range="Hadith 6953-6981", file="Sahih Bukhari Book 90  The Book Of Tricks  Hadith 6953-6981 of 7563 English.mp3"},
+{n=91, title="Interpretation of Dreams", range="Hadith 6982-7047", file="Sahih Bukhari Book 91  The Book Of the Interpretation of Dreams  Hadith 6982-7047 of 7563 English.mp3"},
+{n=92, title="Fitan (Trials and afflictions)", range="Hadith 7048-7136", file="Sahih Bukhari Book 92  The Book Of Fitan (Trials and afflictions)  Hadith 7048-7136 of 7563English.mp3"},
+{n=93, title="Judgments (Al-Ahkaam)", range="Hadith 7137-7225", file="Sahih Bukhari Book 93  The Book Of Judgments (Al-Ahkaam)  Hadith 7137-7225 of 7563 English.mp3"},
+{n=94, title="Wishes", range="Hadith 7226-7245", file="Sahih Bukhari Book 94  The Book Of Wishes  Hadith 7226-7245 of 7563 English.mp3"},
+{n=95, title="Information Given by One Person", range="Hadith 7246-7267", file="Sahih Bukhari Book 95  The Book Of The Information Given by one Person  Hadith 7246-7267 of 7563 English.mp3"},
+{n=96, title="Holding Fast to the Quran & Sunnah", range="Hadith 7268-7370", file="Sahih Bukhari Book 96  The Book Of Holding Fast to the Quran and Sunnah  Hadith 7268-7370 of 7563 English.mp3"},
+{n=97, title="Islamic Monotheism (Tawhid)", range="Hadith 7371-7563", file="Sahih Bukhari Book 97  The Book Of Islamic Monotheism (Tawhid  Tawheed)  Hadith 7371-7563 of 7563 English.mp3"}
 }
-  end
-  return _lazyCache.hadithBooks
 end
-local function buildHadithUrl(b) return URLBASES.hadith .. urlEncodeBytes(b.file) end
-local function getHadithLocal(b) return duaAudioDir .. "hadith_bukhari_" .. b.n .. ".mp3" end
-
--- NAYA (v2.1): Tafseer-e-Quran (Bayan-ul-Quran) by Dr. Israr Ahmad, Urdu -
--- 115 files (1 Introduction + 114 Surahs), archive.org: tafseer-e-quran-urdu
--- - verified. Filenames formula se nahi bantay (spacing/casing quirks
--- asal source mein), is liye har ek verify kar ke likhi gayi hai.
-local function israrTafseerFiles()
-  if not _lazyCache.israrTafseer then
-    _lazyCache.israrTafseer = {
-  {n=0, title="Introduction (Bayan-ul-Quran)", file="000-Introduction -Bayan-ul-Quran.mp3"},
-  {n=1, title=surahNames[1], file="001-AL-FAATIHAH.mp3"}, {n=2, title=surahNames[2], file="002- AL-BAQARAH.mp3"},
-  {n=3, title=surahNames[3], file="003- ALE-IMRAN.mp3"}, {n=4, title=surahNames[4], file="004- AN-NISAA.mp3"},
-  {n=5, title=surahNames[5], file="005- AL-MAIDAH.mp3"}, {n=6, title=surahNames[6], file="006- AL-AN'AAM.mp3"},
-  {n=7, title=surahNames[7], file="007- AL-A'RAAF.mp3"}, {n=8, title=surahNames[8], file="008- AL-ANFAAL.mp3"},
-  {n=9, title=surahNames[9], file="009- AT-TAUBAH.mp3"}, {n=10, title=surahNames[10], file="010-YOUNUS.mp3"},
-  {n=11, title=surahNames[11], file="011-HUD.MP3"}, {n=12, title=surahNames[12], file="012-YOUSUF.mp3"},
-  {n=13, title=surahNames[13], file="013-AR-RAAD.mp3"}, {n=14, title=surahNames[14], file="014-IBRAHEEM.mp3"},
-  {n=15, title=surahNames[15], file="015-AL-HIJR.mp3"}, {n=16, title=surahNames[16], file="016-AH NAHL.mp3"},
-  {n=17, title=surahNames[17], file="017- BANI-ISRAIL.mp3"}, {n=18, title=surahNames[18], file="018-AL-KAHEF.mp3"},
-  {n=19, title=surahNames[19], file="019-MARYAM.mp3"}, {n=20, title=surahNames[20], file="020-TAA HAA.mp3"},
-  {n=21, title=surahNames[21], file="021-AL-AMBIA.mp3"}, {n=22, title=surahNames[22], file="022-AL-HAJJ.mp3"},
-  {n=23, title=surahNames[23], file="023-AL-MOMINOON.mp3"}, {n=24, title=surahNames[24], file="024-AN-NOOR.mp3"},
-  {n=25, title=surahNames[25], file="025-AL-FURQAN.mp3"}, {n=26, title=surahNames[26], file="026-AS-SHUARAA.mp3"},
-  {n=27, title=surahNames[27], file="027-AN-NAML.mp3"}, {n=28, title=surahNames[28], file="028-AL-QASES.mp3"},
-  {n=29, title=surahNames[29], file="029-AL-ANKABOOT.mp3"}, {n=30, title=surahNames[30], file="030-AR-ROOM.mp3"},
-  {n=31, title=surahNames[31], file="031-LUQMAN.mp3"}, {n=32, title=surahNames[32], file="032-AS-SAJDAH.mp3"},
-  {n=33, title=surahNames[33], file="033-AL-AHZAB.mp3"}, {n=34, title=surahNames[34], file="034-SABA.MP3"},
-  {n=35, title=surahNames[35], file="035-FAATIR.mp3"}, {n=36, title=surahNames[36], file="036-YAA SEEN.mp3"},
-  {n=37, title=surahNames[37], file="037-AS-SAFFAAT.mp3"}, {n=38, title=surahNames[38], file="038-SUAD.MP3"},
-  {n=39, title=surahNames[39], file="039-AZ-ZUMAR.mp3"}, {n=40, title=surahNames[40], file="040-AL-MOMIN.mp3"},
-  {n=41, title=surahNames[41], file="041-HAA MEEM AS-SAJDAH.mp3"}, {n=42, title=surahNames[42], file="042-AS-SHURA.mp3"},
-  {n=43, title=surahNames[43], file="043-AZ-ZUKHRUF.mp3"}, {n=44, title=surahNames[44], file="044-AD-DUKHAN.mp3"},
-  {n=45, title=surahNames[45], file="045-AL-JATHIA.mp3"}, {n=46, title=surahNames[46], file="046-AL-AHQAAF.mp3"},
-  {n=47, title=surahNames[47], file="047-MUHAMMAD.mp3"}, {n=48, title=surahNames[48], file="048-AL-FATH.mp3"},
-  {n=49, title=surahNames[49], file="049-AL-HUJURAAT.mp3"}, {n=50, title=surahNames[50], file="050-QAAF.MP3"},
-  {n=51, title=surahNames[51], file="051-AZ-ZARIYAAT.mp3"}, {n=52, title=surahNames[52], file="052-AT-TOOR.mp3"},
-  {n=53, title=surahNames[53], file="053-AN-NAJM.mp3"}, {n=54, title=surahNames[54], file="054-AL-QAMAR.mp3"},
-  {n=55, title=surahNames[55], file="055-AR-RAHMAN.mp3"}, {n=56, title=surahNames[56], file="056-AL-WAQIAH.mp3"},
-  {n=57, title=surahNames[57], file="057-AL-HADEED.mp3"}, {n=58, title=surahNames[58], file="058-AL-MUJADILAH.mp3"},
-  {n=59, title=surahNames[59], file="059-AL-HASHR.mp3"}, {n=60, title=surahNames[60], file="060-AL-MUMTAHINAH.mp3"},
-  {n=61, title=surahNames[61], file="061-AS-SAFF.mp3"}, {n=62, title=surahNames[62], file="062-AL-JUMUAH.mp3"},
-  {n=63, title=surahNames[63], file="063-AL-MUNAFIQOON.mp3"}, {n=64, title=surahNames[64], file="064-AT-TAGHABUN.mp3"},
-  {n=65, title=surahNames[65], file="065-AT-TALAAQ.mp3"}, {n=66, title=surahNames[66], file="066-AT-TAHREEM.mp3"},
-  {n=67, title=surahNames[67], file="067-AL-MULK.mp3"}, {n=68, title=surahNames[68], file="068-AL-QALAM.mp3"},
-  {n=69, title=surahNames[69], file="069-AL-HAAQ-QAH.mp3"}, {n=70, title=surahNames[70], file="070-AL-MAARIJ.mp3"},
-  {n=71, title=surahNames[71], file="071-NOOH.MP3"}, {n=72, title=surahNames[72], file="072-AL-JINN.mp3"},
-  {n=73, title=surahNames[73], file="073-AL-MUZZAMMIL.mp3"}, {n=74, title=surahNames[74], file="074-AL-MUDDASSIR.mp3"},
-  {n=75, title=surahNames[75], file="075-AL-QIYAAMAH.mp3"}, {n=76, title=surahNames[76], file="076-AD-DAHR.mp3"},
-  {n=77, title=surahNames[77], file="077-AL-MURSALAAT.mp3"}, {n=78, title=surahNames[78], file="078-AN-NABA.mp3"},
-  {n=79, title=surahNames[79], file="079-AN-NAZIAAT.mp3"}, {n=80, title=surahNames[80], file="080-ABAS.MP3"},
-  {n=81, title=surahNames[81], file="081-AT-TAKWEER.mp3"}, {n=82, title=surahNames[82], file="082-AL-INFITAAR.mp3"},
-  {n=83, title=surahNames[83], file="083-AL-MUTTAFFIFEEN.mp3"}, {n=84, title=surahNames[84], file="084-AL-INSHIQAAQ.mp3"},
-  {n=85, title=surahNames[85], file="085-AL-BUROOJ.mp3"}, {n=86, title=surahNames[86], file="086-AT-TARIQ.mp3"},
-  {n=87, title=surahNames[87], file="087-AL-ALAA.mp3"}, {n=88, title=surahNames[88], file="088-AL-GHASHIAH.mp3"},
-  {n=89, title=surahNames[89], file="089-AL-FAJR.mp3"}, {n=90, title=surahNames[90], file="090-AL-BALAD.mp3"},
-  {n=91, title=surahNames[91], file="091-AS-SHAMS.mp3"}, {n=92, title=surahNames[92], file="092-AL-LAIL.mp3"},
-  {n=93, title=surahNames[93], file="093-AZ-ZUHAA.mp3"}, {n=94, title=surahNames[94], file="094-AL-INSHIRAH.mp3"},
-  {n=95, title=surahNames[95], file="095-AT-TEEN.mp3"}, {n=96, title=surahNames[96], file="096-AL-ALAQ.mp3"},
-  {n=97, title=surahNames[97], file="097-Al-QADR.mp3"}, {n=98, title=surahNames[98], file="098-AL-BAYYINAH.mp3"},
-  {n=99, title=surahNames[99], file="099-AZ-ZILZAAL.mp3"}, {n=100, title=surahNames[100], file="100-AL-ADIAAT.mp3"},
-  {n=101, title=surahNames[101], file="101-AL-QAARIAH.mp3"}, {n=102, title=surahNames[102], file="102AT-TAKASUR.mp3"},
-  {n=103, title=surahNames[103], file="103-AL-ASR.mp3"}, {n=104, title=surahNames[104], file="104-AL-HUMAZAH.mp3"},
-  {n=105, title=surahNames[105], file="105-AL-FEEL.mp3"}, {n=106, title=surahNames[106], file="106-QURESH.mp3"},
-  {n=107, title=surahNames[107], file="107-AL-MAAOON.mp3"}, {n=108, title=surahNames[108], file="108-AL-KAUSER.mp3"},
-  {n=109, title=surahNames[109], file="109-AL-KAFIROON.mp3"}, {n=110, title=surahNames[110], file="110-AN-NASR.mp3"},
-  {n=111, title=surahNames[111], file="111-AL-LAHAB.mp3"}, {n=112, title=surahNames[112], file="112-AL-IKHLAAS.mp3"},
-  {n=113, title=surahNames[113], file="113-AL-FALAQ.mp3"}, {n=114, title=surahNames[114], file="114-AN-NAAS.mp3"}
+return _lazyCache.hadithBooks
+end
+M.buildHadithUrl = function(b) return URLBASES.hadith .. urlEncodeBytes(b.file) end
+M.getHadithLocal = function(b) return duaAudioDir .. "hadith_bukhari_" .. b.n .. ".mp3" end
+M.israrTafseerFiles = function()
+if not _lazyCache.israrTafseer then
+_lazyCache.israrTafseer = {
+{n=0, title="Introduction (Bayan-ul-Quran)", file="000-Introduction -Bayan-ul-Quran.mp3"},
+{n=1, title=surahNames[1], file="001-AL-FAATIHAH.mp3"}, {n=2, title=surahNames[2], file="002- AL-BAQARAH.mp3"},
+{n=3, title=surahNames[3], file="003- ALE-IMRAN.mp3"}, {n=4, title=surahNames[4], file="004- AN-NISAA.mp3"},
+{n=5, title=surahNames[5], file="005- AL-MAIDAH.mp3"}, {n=6, title=surahNames[6], file="006- AL-AN'AAM.mp3"},
+{n=7, title=surahNames[7], file="007- AL-A'RAAF.mp3"}, {n=8, title=surahNames[8], file="008- AL-ANFAAL.mp3"},
+{n=9, title=surahNames[9], file="009- AT-TAUBAH.mp3"}, {n=10, title=surahNames[10], file="010-YOUNUS.mp3"},
+{n=11, title=surahNames[11], file="011-HUD.MP3"}, {n=12, title=surahNames[12], file="012-YOUSUF.mp3"},
+{n=13, title=surahNames[13], file="013-AR-RAAD.mp3"}, {n=14, title=surahNames[14], file="014-IBRAHEEM.mp3"},
+{n=15, title=surahNames[15], file="015-AL-HIJR.mp3"}, {n=16, title=surahNames[16], file="016-AH NAHL.mp3"},
+{n=17, title=surahNames[17], file="017- BANI-ISRAIL.mp3"}, {n=18, title=surahNames[18], file="018-AL-KAHEF.mp3"},
+{n=19, title=surahNames[19], file="019-MARYAM.mp3"}, {n=20, title=surahNames[20], file="020-TAA HAA.mp3"},
+{n=21, title=surahNames[21], file="021-AL-AMBIA.mp3"}, {n=22, title=surahNames[22], file="022-AL-HAJJ.mp3"},
+{n=23, title=surahNames[23], file="023-AL-MOMINOON.mp3"}, {n=24, title=surahNames[24], file="024-AN-NOOR.mp3"},
+{n=25, title=surahNames[25], file="025-AL-FURQAN.mp3"}, {n=26, title=surahNames[26], file="026-AS-SHUARAA.mp3"},
+{n=27, title=surahNames[27], file="027-AN-NAML.mp3"}, {n=28, title=surahNames[28], file="028-AL-QASES.mp3"},
+{n=29, title=surahNames[29], file="029-AL-ANKABOOT.mp3"}, {n=30, title=surahNames[30], file="030-AR-ROOM.mp3"},
+{n=31, title=surahNames[31], file="031-LUQMAN.mp3"}, {n=32, title=surahNames[32], file="032-AS-SAJDAH.mp3"},
+{n=33, title=surahNames[33], file="033-AL-AHZAB.mp3"}, {n=34, title=surahNames[34], file="034-SABA.MP3"},
+{n=35, title=surahNames[35], file="035-FAATIR.mp3"}, {n=36, title=surahNames[36], file="036-YAA SEEN.mp3"},
+{n=37, title=surahNames[37], file="037-AS-SAFFAAT.mp3"}, {n=38, title=surahNames[38], file="038-SUAD.MP3"},
+{n=39, title=surahNames[39], file="039-AZ-ZUMAR.mp3"}, {n=40, title=surahNames[40], file="040-AL-MOMIN.mp3"},
+{n=41, title=surahNames[41], file="041-HAA MEEM AS-SAJDAH.mp3"}, {n=42, title=surahNames[42], file="042-AS-SHURA.mp3"},
+{n=43, title=surahNames[43], file="043-AZ-ZUKHRUF.mp3"}, {n=44, title=surahNames[44], file="044-AD-DUKHAN.mp3"},
+{n=45, title=surahNames[45], file="045-AL-JATHIA.mp3"}, {n=46, title=surahNames[46], file="046-AL-AHQAAF.mp3"},
+{n=47, title=surahNames[47], file="047-MUHAMMAD.mp3"}, {n=48, title=surahNames[48], file="048-AL-FATH.mp3"},
+{n=49, title=surahNames[49], file="049-AL-HUJURAAT.mp3"}, {n=50, title=surahNames[50], file="050-QAAF.MP3"},
+{n=51, title=surahNames[51], file="051-AZ-ZARIYAAT.mp3"}, {n=52, title=surahNames[52], file="052-AT-TOOR.mp3"},
+{n=53, title=surahNames[53], file="053-AN-NAJM.mp3"}, {n=54, title=surahNames[54], file="054-AL-QAMAR.mp3"},
+{n=55, title=surahNames[55], file="055-AR-RAHMAN.mp3"}, {n=56, title=surahNames[56], file="056-AL-WAQIAH.mp3"},
+{n=57, title=surahNames[57], file="057-AL-HADEED.mp3"}, {n=58, title=surahNames[58], file="058-AL-MUJADILAH.mp3"},
+{n=59, title=surahNames[59], file="059-AL-HASHR.mp3"}, {n=60, title=surahNames[60], file="060-AL-MUMTAHINAH.mp3"},
+{n=61, title=surahNames[61], file="061-AS-SAFF.mp3"}, {n=62, title=surahNames[62], file="062-AL-JUMUAH.mp3"},
+{n=63, title=surahNames[63], file="063-AL-MUNAFIQOON.mp3"}, {n=64, title=surahNames[64], file="064-AT-TAGHABUN.mp3"},
+{n=65, title=surahNames[65], file="065-AT-TALAAQ.mp3"}, {n=66, title=surahNames[66], file="066-AT-TAHREEM.mp3"},
+{n=67, title=surahNames[67], file="067-AL-MULK.mp3"}, {n=68, title=surahNames[68], file="068-AL-QALAM.mp3"},
+{n=69, title=surahNames[69], file="069-AL-HAAQ-QAH.mp3"}, {n=70, title=surahNames[70], file="070-AL-MAARIJ.mp3"},
+{n=71, title=surahNames[71], file="071-NOOH.MP3"}, {n=72, title=surahNames[72], file="072-AL-JINN.mp3"},
+{n=73, title=surahNames[73], file="073-AL-MUZZAMMIL.mp3"}, {n=74, title=surahNames[74], file="074-AL-MUDDASSIR.mp3"},
+{n=75, title=surahNames[75], file="075-AL-QIYAAMAH.mp3"}, {n=76, title=surahNames[76], file="076-AD-DAHR.mp3"},
+{n=77, title=surahNames[77], file="077-AL-MURSALAAT.mp3"}, {n=78, title=surahNames[78], file="078-AN-NABA.mp3"},
+{n=79, title=surahNames[79], file="079-AN-NAZIAAT.mp3"}, {n=80, title=surahNames[80], file="080-ABAS.MP3"},
+{n=81, title=surahNames[81], file="081-AT-TAKWEER.mp3"}, {n=82, title=surahNames[82], file="082-AL-INFITAAR.mp3"},
+{n=83, title=surahNames[83], file="083-AL-MUTTAFFIFEEN.mp3"}, {n=84, title=surahNames[84], file="084-AL-INSHIQAAQ.mp3"},
+{n=85, title=surahNames[85], file="085-AL-BUROOJ.mp3"}, {n=86, title=surahNames[86], file="086-AT-TARIQ.mp3"},
+{n=87, title=surahNames[87], file="087-AL-ALAA.mp3"}, {n=88, title=surahNames[88], file="088-AL-GHASHIAH.mp3"},
+{n=89, title=surahNames[89], file="089-AL-FAJR.mp3"}, {n=90, title=surahNames[90], file="090-AL-BALAD.mp3"},
+{n=91, title=surahNames[91], file="091-AS-SHAMS.mp3"}, {n=92, title=surahNames[92], file="092-AL-LAIL.mp3"},
+{n=93, title=surahNames[93], file="093-AZ-ZUHAA.mp3"}, {n=94, title=surahNames[94], file="094-AL-INSHIRAH.mp3"},
+{n=95, title=surahNames[95], file="095-AT-TEEN.mp3"}, {n=96, title=surahNames[96], file="096-AL-ALAQ.mp3"},
+{n=97, title=surahNames[97], file="097-Al-QADR.mp3"}, {n=98, title=surahNames[98], file="098-AL-BAYYINAH.mp3"},
+{n=99, title=surahNames[99], file="099-AZ-ZILZAAL.mp3"}, {n=100, title=surahNames[100], file="100-AL-ADIAAT.mp3"},
+{n=101, title=surahNames[101], file="101-AL-QAARIAH.mp3"}, {n=102, title=surahNames[102], file="102AT-TAKASUR.mp3"},
+{n=103, title=surahNames[103], file="103-AL-ASR.mp3"}, {n=104, title=surahNames[104], file="104-AL-HUMAZAH.mp3"},
+{n=105, title=surahNames[105], file="105-AL-FEEL.mp3"}, {n=106, title=surahNames[106], file="106-QURESH.mp3"},
+{n=107, title=surahNames[107], file="107-AL-MAAOON.mp3"}, {n=108, title=surahNames[108], file="108-AL-KAUSER.mp3"},
+{n=109, title=surahNames[109], file="109-AL-KAFIROON.mp3"}, {n=110, title=surahNames[110], file="110-AN-NASR.mp3"},
+{n=111, title=surahNames[111], file="111-AL-LAHAB.mp3"}, {n=112, title=surahNames[112], file="112-AL-IKHLAAS.mp3"},
+{n=113, title=surahNames[113], file="113-AL-FALAQ.mp3"}, {n=114, title=surahNames[114], file="114-AN-NAAS.mp3"}
 }
-  end
-  return _lazyCache.israrTafseer
 end
-local function buildIsrarTafseerUrl(t) return URLBASES.israrTafseer .. urlEncodeBytes(t.file) end
-local function getIsrarTafseerLocal(t) return duaAudioDir .. "tafseer_israr_" .. t.n .. ".mp3" end
-
--- NAYA (v2.1): 40 Hadith Imam An-Nawawi, Arabic - archive.org: 40HadithNawawi
--- - saaf formula-based naming (nawawiNN_64kb.mp3), koi exception nahi
-local function buildNawawiUrl(n) return URLBASES.nawawi .. string.format("nawawi%02d_64kb.mp3", n) end
-local function getNawawiLocal(n) return duaAudioDir .. "nawawi_" .. n .. ".mp3" end
-
---------------------------------------------------
--- BOOKMARKS, PINS, DELETES
---------------------------------------------------
+return _lazyCache.israrTafseer
+end
+M.buildIsrarTafseerUrl = function(t) return URLBASES.israrTafseer .. urlEncodeBytes(t.file) end
+M.getIsrarTafseerLocal = function(t) return duaAudioDir .. "tafseer_israr_" .. t.n .. ".mp3" end
+M.buildNawawiUrl = function(n) return URLBASES.nawawi .. string.format("nawawi%02d_64kb.mp3", n) end
+M.getNawawiLocal = function(n) return duaAudioDir .. "nawawi_" .. n .. ".mp3" end
 local bookmarksStr = prefs.getString("bookmarks", "")
 local bookmarks = {}
 if bookmarksStr ~= "" then for s in string.gmatch(bookmarksStr, "([^,]+)") do table.insert(bookmarks, tonumber(s)) end end
-
 local pinnedStr = prefs.getString("pinnedSurahs", "")
 local pinned = {}
 if pinnedStr ~= "" then for s in string.gmatch(pinnedStr, "([^,]+)") do pinned[tonumber(s)] = true end end
-
 local deletedStr = prefs.getString("deletedSurahs", "")
 local deletedSurahs = {}
 if deletedStr ~= "" then for s in string.gmatch(deletedStr, "([^,]+)") do deletedSurahs[tonumber(s)] = true end end
-
-local function saveBookmarks() prefs.edit().putString("bookmarks", table.concat(bookmarks, ",")).apply() end
-local function savePinned() local arr = {} for k,v in pairs(pinned) do if v then table.insert(arr, k) end end prefs.edit().putString("pinnedSurahs", table.concat(arr, ",")).apply() end
-local function saveDeleted() local arr = {} for k,v in pairs(deletedSurahs) do if v then table.insert(arr, k) end end prefs.edit().putString("deletedSurahs", table.concat(arr, ",")).apply() end
--- Persist reciter by NAME (not index) so a reordered live-list can't scramble it
-local function saveLastPlayed(s_index, r_index)
-  local rName = reciters[r_index] and reciters[r_index].name or ""
-  prefs.edit().putInt("lastSurah", s_index).putString("lastReciterName", rName).apply()
-  lastPlayedSurah = s_index
-  lastPlayedReciter = r_index
+M.saveBookmarks = function() prefs.edit().putString("bookmarks", table.concat(bookmarks, ",")).apply() end
+M.savePinned = function() local arr = {} for k,v in pairs(pinned) do if v then table.insert(arr, k) end end prefs.edit().putString("pinnedSurahs", table.concat(arr, ",")).apply() end
+M.saveDeleted = function() local arr = {} for k,v in pairs(deletedSurahs) do if v then table.insert(arr, k) end end prefs.edit().putString("deletedSurahs", table.concat(arr, ",")).apply() end
+M.saveLastPlayed = function(s_index, r_index)
+local rName = reciters[r_index] and reciters[r_index].name or ""
+prefs.edit().putInt("lastSurah", s_index).putString("lastReciterName", rName).apply()
+lastPlayedSurah = s_index
+lastPlayedReciter = r_index
 end
-local function saveActiveTasbeehState() prefs.edit().putInt("activeCount", tasbeehCount).putInt("activeTarget", tasbeehTarget).putInt("activeWazeefa", currentWazeefaIndex).putBoolean("tasbeehBeep", tasbeehBeepEnabled).putBoolean("tasbeehVibrate", tasbeehVibrateEnabled).apply() end
-
---------------------------------------------------
--- HARDWARE & NOTIFICATION HELPERS
---------------------------------------------------
-local function playBeep() pcall(function() local r=import("android.media.RingtoneManager") local uri=r.getDefaultUri(r.TYPE_NOTIFICATION) r.getRingtone(activity,uri).play() end) end
-local function doVibrate(ms) pcall(function() activity.getSystemService(Context.VIBRATOR_SERVICE).vibrate(ms) end) end
-local function hideKeyboard(view) pcall(function() activity.getSystemService(Context.INPUT_METHOD_SERVICE).hideSoftInputFromWindow(view.getWindowToken(), 0) end) end
-local function showPlaybackNotification(title, text) pcall(function() local nm = activity.getSystemService(Context.NOTIFICATION_SERVICE) if Build.VERSION.SDK_INT >= 26 then nm.createNotificationChannel(NotificationChannel("quran_audio_v2", "Quran Playback", NotificationManager.IMPORTANCE_DEFAULT)) end local builder = Notification.Builder(activity) if Build.VERSION.SDK_INT >= 26 then builder = Notification.Builder(activity, "quran_audio_v2") end
-  local piFlags = PendingIntent.FLAG_UPDATE_CURRENT
-  if Build.VERSION.SDK_INT >= 23 then pcall(function() piFlags = piFlags + PendingIntent.FLAG_IMMUTABLE end) end
-
-  local ciOk, ciErr = pcall(function()
-    local pi = PendingIntent.getActivity(activity, 0, Intent(activity, activity.getClass()), piFlags)
-    builder.setContentIntent(pi)
-  end)
-
-  local isPlayingNow = (mp and mp.isPlaying()) or (duaMp and duaMp.isPlaying())
-  local actOk, actErr = pcall(function()
-    local prevPI = PendingIntent.getBroadcast(activity, 2, Intent("quran_majeed_prev"), piFlags)
-    local playPausePI = PendingIntent.getBroadcast(activity, 1, Intent("quran_majeed_playpause"), piFlags)
-    local nextPI = PendingIntent.getBroadcast(activity, 3, Intent("quran_majeed_next"), piFlags)
-    builder.addAction(android.R.drawable.ic_media_previous, "Previous", prevPI)
-    builder.addAction(isPlayingNow and android.R.drawable.ic_media_pause or android.R.drawable.ic_media_play, isPlayingNow and "Pause" or "Play", playPausePI)
-    builder.addAction(android.R.drawable.ic_media_next, "Next", nextPI)
-  end)
-  if not actOk and not PS.notifActionErrorShown then
-    PS.notifActionErrorShown = true
-    Toast.makeText(activity, "Notification controls add nahi ho sakay - error: " .. tostring(actErr), 1).show()
-  end
-
-  builder.setContentTitle(title).setContentText(text).setSmallIcon(android.R.drawable.ic_media_play).setOngoing(true)
-  nm.notify(1, builder.build()) end) end
-local function cancelNotification() pcall(function() activity.getSystemService(Context.NOTIFICATION_SERVICE).cancel(1) end) end
-
---------------------------------------------------
--- PLAYER LOGIC
---------------------------------------------------
-local function startSleepTimer()
-  targetSleepTime = 0
-  if sleepTimerMinutes > 0 and mp and mp.isPlaying() then
-    targetSleepTime = os.time() + (sleepTimerMinutes * 60)
-  end
+M.saveActiveTasbeehState = function() prefs.edit().putInt("activeCount", tasbeehCount).putInt("activeTarget", tasbeehTarget).putInt("activeWazeefa", currentWazeefaIndex).putBoolean("tasbeehBeep", tasbeehBeepEnabled).putBoolean("tasbeehVibrate", tasbeehVibrateEnabled).apply() end
+M.playBeep = function() pcall(function() local r=import("android.media.RingtoneManager") local uri=r.getDefaultUri(r.TYPE_NOTIFICATION) r.getRingtone(activity,uri).play() end) end
+M.doVibrate = function(ms) pcall(function() activity.getSystemService(Context.VIBRATOR_SERVICE).vibrate(ms) end) end
+M.hideKeyboard = function(view) pcall(function() activity.getSystemService(Context.INPUT_METHOD_SERVICE).hideSoftInputFromWindow(view.getWindowToken(), 0) end) end
+M.showPlaybackNotification = function(title, text) pcall(function() local nm = activity.getSystemService(Context.NOTIFICATION_SERVICE) if Build.VERSION.SDK_INT >= 26 then nm.createNotificationChannel(NotificationChannel("quran_audio_v2", "Quran Playback", NotificationManager.IMPORTANCE_DEFAULT)) end local builder = Notification.Builder(activity) if Build.VERSION.SDK_INT >= 26 then builder = Notification.Builder(activity, "quran_audio_v2") end
+local piFlags = PendingIntent.FLAG_UPDATE_CURRENT
+if Build.VERSION.SDK_INT >= 23 then pcall(function() piFlags = piFlags + PendingIntent.FLAG_IMMUTABLE end) end
+local ciOk, ciErr = pcall(function()
+local pi = PendingIntent.getActivity(activity, 0, Intent(activity, activity.getClass()), piFlags)
+builder.setContentIntent(pi)
+end)
+local isPlayingNow = (mp and mp.isPlaying()) or (duaMp and duaMp.isPlaying())
+local actOk, actErr = pcall(function()
+local prevPI = PendingIntent.getBroadcast(activity, 2, Intent("quran_majeed_prev"), piFlags)
+local playPausePI = PendingIntent.getBroadcast(activity, 1, Intent("quran_majeed_playpause"), piFlags)
+local nextPI = PendingIntent.getBroadcast(activity, 3, Intent("quran_majeed_next"), piFlags)
+builder.addAction(android.R.drawable.ic_media_previous, "Previous", prevPI)
+builder.addAction(isPlayingNow and android.R.drawable.ic_media_pause or android.R.drawable.ic_media_play, isPlayingNow and "Pause" or "Play", playPausePI)
+builder.addAction(android.R.drawable.ic_media_next, "Next", nextPI)
+end)
+if not actOk and not PS.notifActionErrorShown then
+PS.notifActionErrorShown = true
+Toast.makeText(activity, "Notification controls add nahi ho sakay - error: " .. tostring(actErr), 1).show()
 end
-
-local function stopPlayer(onDone)
-  if updateTask then handler.removeCallbacks(updateTask) end
-  targetSleepTime = 0
-  -- FIX: stop()/release() ko UI thread par turant call karna kabhi kabhi
-  -- (khaas kar jab MediaPlayer abhi "preparing" state mein ho, jaise network
-  -- se load ho raha ho) device ko hang/freeze kar sakta hai jo TalkBack tak
-  -- crash kar deta hai. Ab yeh background thread par hota hai taake Back
-  -- button/navigation kabhi block na ho.
-  -- FIX 2: purana player release hone se PEHLE agar naya MediaPlayer bana
-  -- kar prepare kiya jaye (dono ek sath, alag threads par), to native audio
-  -- system par crash ho sakta hai (CSR/TalkBack tak crash kar deta hai) -
-  -- ab onDone callback tabhi chalta hai jab purana player poora release ho
-  -- chuka ho, taake naya player uske baad hi banaya jaye, kabhi ek sath nahi.
-  local oldMp = mp
-  local oldDuaMp = duaMp
-  mp = nil
-  duaMp = nil
-  cancelNotification()
-  if oldMp or oldDuaMp then
-    Thread(Runnable{run=function()
-      if oldMp then pcall(function() oldMp.stop() end) pcall(function() oldMp.release() end) end
-      if oldDuaMp then pcall(function() oldDuaMp.stop() end) pcall(function() oldDuaMp.release() end) end
-      if onDone then handler.post(Runnable{run=function() pcall(onDone) end}) end
-    end}).start()
-  elseif onDone then
-    onDone()
-  end
+builder.setContentTitle(title).setContentText(text).setSmallIcon(android.R.drawable.ic_media_play).setOngoing(true)
+nm.notify(1, builder.build()) end) end
+M.cancelNotification = function() pcall(function() activity.getSystemService(Context.NOTIFICATION_SERVICE).cancel(1) end) end
+M.startSleepTimer = function()
+targetSleepTime = 0
+if sleepTimerMinutes > 0 and mp and mp.isPlaying() then
+targetSleepTime = os.time() + (sleepTimerMinutes * 60)
 end
-
--- FIX: kuch external hosts (archive.org, thesufi.com) is device/Android
--- version par MediaPlayer ke seedhe HTTPS streaming se theek se stream nahi
--- ho rahe the - is wajah se "online play" kaam nahi kar raha tha. Aur pehle
--- download ka DownloadManager notification tap hone par Android khud file ko
--- default app (YouTube Music) mein khol deta tha - isi liye download ke baad
--- bhi hamari app ke andar dobara play nahi ho rahi thi.
--- Ab: pehle seedha stream try karta hai; agar fail ho to background mein
--- CHUPKE se (koi clickable notification nahi, VISIBILITY_HIDDEN) download
--- karta hai aur download hote hi khud-ba-khud local file se play karta hai.
--- Replay hamesha kaam karega kyunke yeh function pehle hamesha local cache
--- file check karta hai.
--- urls: ek single URL string, YA fallback ke liye URLs ki table {url1, url2, ...}
--- ==========================================================================
--- v2.7-fix2 - HANG FIX: playback ab SIRF ONLINE STREAM hai. Asli bug: jab
--- stream fail hoti thi to ye function CHUPKE se poore audio file ka
--- DownloadManager download shuru kar deta tha aur phir 60 second tak ek
--- Thread.sleep poll loop mein intezar karta rehta tha ("background mein
--- download ho raha hai...") - isi se aap ka phone hang ho kar
--- "isn't responding" deta tha. Ab auto-download POORI TARAH BAND hai.
--- Stream fail ho to sirf saaf dialog: Retry online / Download / Cancel.
--- Download sirf aap ke button dabane par hota hai (V25.downloadAudioFile).
--- NAYA: startAt/endAt (clip) - taake ek lambi recording ka ek hissa (jaise
--- ek kalima ya ek lafz) alag track ki tarah play ho sake.
+end
+M.stopPlayer = function(onDone)
+if updateTask then handler.removeCallbacks(updateTask) end
+targetSleepTime = 0
+local oldMp = mp
+local oldDuaMp = duaMp
+mp = nil
+duaMp = nil
+M.cancelNotification()
+if oldMp or oldDuaMp then
+Thread(Runnable{run=function()
+if oldMp then pcall(function() oldMp.stop() end) pcall(function() oldMp.release() end) end
+if oldDuaMp then pcall(function() oldDuaMp.stop() end) pcall(function() oldDuaMp.release() end) end
+if onDone then handler.post(Runnable{run=function() pcall(onDone) end}) end
+end}).start()
+elseif onDone then
+onDone()
+end
+end
 function V25.downloadAudioFile(url, cachePath, label)
-  local ok, err = pcall(function()
-    local req = DownloadManager.Request(Uri.parse(url))
-    req.setTitle(label)
-    req.setDescription("Quran Majeed - manual download")
-    req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-    local root = File(publicDownloadsRoot).getAbsolutePath()
-    local destination = File(cachePath).getAbsolutePath()
-    if destination:sub(1, #root + 1) ~= root .. "/" then
-      req.setDestinationUri(Uri.fromFile(File(cachePath)))
-    else
-      local relative = destination:sub(#root + 2)
-      local parent = File(cachePath).getParentFile()
-      if parent and not parent.exists() then parent.mkdirs() end
-      req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, relative)
-    end
-    activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-  end)
-  if ok then
-    Toast.makeText(activity, "Download shuru - khatam hone par is screen par Play karein (offline chalega).", 1).show()
-  else
-    showErrorDialog("Download Error - " .. tostring(label), err)
-  end
+local ok, err = pcall(function()
+local req = DownloadManager.Request(Uri.parse(url))
+req.setTitle(label)
+req.setDescription("Quran Majeed - manual download")
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+local root = File(publicDownloadsRoot).getAbsolutePath()
+local destination = File(cachePath).getAbsolutePath()
+if destination:sub(1, #root + 1) ~= root .. "/" then
+req.setDestinationUri(Uri.fromFile(File(cachePath)))
+else
+local relative = destination:sub(#root + 2)
+local parent = File(cachePath).getParentFile()
+if parent and not parent.exists() then parent.mkdirs() end
+req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, relative)
 end
-
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if ok then
+Toast.makeText(activity, "Download shuru - khatam hone par is screen par Play karein (offline chalega).", 1).show()
+else
+showErrorDialog("Download Error - " .. tostring(label), err)
+end
+end
 function V25.showStreamFailure(label, url, cachePath, retryFn)
-  local msg = "Online stream nahi chal saki.\n\n" .. tostring(label) .. "\n" .. tostring(url) ..
-    "\n\nv2.7-fix2 mein AUTO-DOWNLOAD band kar diya gaya hai (wahi phone ko hang kar raha tha). Ab aap khud chunein:"
-  local ok = pcall(function()
-    AlertDialog.Builder(activity)
-      .setTitle("⚠ Online stream fail")
-      .setMessage(msg)
-      .setPositiveButton("Retry online", {onClick=function() safeRun("Retry stream", retryFn) end})
-      .setNeutralButton("Download", {onClick=function() safeRun("Download audio", function() V25.downloadAudioFile(url, cachePath, label) end) end})
-      .setNegativeButton("Cancel", nil)
-      .show()
-  end)
-  if not ok then Toast.makeText(activity, "Online stream fail: " .. tostring(label), 1).show() end
+local msg = "Online stream nahi chal saki.\n\n" .. tostring(label) .. "\n" .. tostring(url) ..
+"\n\nv3.0 mein AUTO-DOWNLOAD band kar diya gaya hai (wahi phone ko hang kar raha tha). Ab aap khud chunein:"
+local ok = pcall(function()
+AlertDialog.Builder(activity)
+.setTitle("⚠ Online stream fail")
+.setMessage(msg)
+.setPositiveButton("Retry online", {onClick=function() safeRun("Retry stream", retryFn) end})
+.setNeutralButton("Download", {onClick=function() safeRun("Download audio", function() V25.downloadAudioFile(url, cachePath, label) end) end})
+.setNegativeButton("Cancel", nil)
+.show()
+end)
+if not ok then Toast.makeText(activity, "Online stream fail: " .. tostring(label), 1).show() end
 end
-
-local function playReliable(urls, cachePath, label, refreshFn, onComplete, startAt, endAt)
-  local urlList = (type(urls) == "table") and urls or {urls}
-  local tryStream
-  if updateTask then pcall(function() handler.removeCallbacks(updateTask) end) end
-  if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) end
-
-  local function startClipWatcher(p)
-    if not (endAt and endAt > 0) then return end
-    local endMs = math.floor(endAt * 1000)
-    local startMs = math.floor((startAt or 0) * 1000)
-    V25.clipTask = Runnable({run = function()
-      pcall(function()
-        if p and p.isPlaying() and p.getCurrentPosition() >= endMs then
-          p.pause() p.seekTo(startMs)
-          if onComplete then onComplete() elseif refreshFn then refreshFn() end
-          return
-        end
-      end)
-      handler.postDelayed(V25.clipTask, 800)
-    end})
-    handler.postDelayed(V25.clipTask, 800)
-  end
-
-  stopPlayer(function()
-  local urlIdx = 1
-  tryStream = function()
-    local url = urlList[urlIdx]
-    Toast.makeText(activity, "Loading: " .. label .. "...", 1).show()
-    duaMp = MediaPlayer()
-    pcall(function() duaMp.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
-    -- FIX (v2.2): screen band hone par bhi playback chalti rahe
-    pcall(function() duaMp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
-    local streamFailed = false
-    local dsOk = pcall(function() duaMp.setDataSource(url) end)
-    if not dsOk then
-      showErrorDialog("Audio Error - " .. tostring(label), "Audio source set nahi ho saka (setDataSource fail).\n\nLabel: " .. tostring(label) .. "\nURL: " .. tostring(url))
-      return
-    end
-    duaMp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
-      if streamFailed then return true end
-      streamFailed = true
-      if urlIdx < #urlList then
-        -- agla mirror/link try karo pehle
-        urlIdx = urlIdx + 1
-        pcall(function() duaMp.release() end)
-        tryStream()
-        return true
-      end
-      V25.showStreamFailure(label, url, cachePath, tryStream)
-      return true
-    end})
-    duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
-      local okp, errp = pcall(function()
-        applyPlaybackSpeed(p)
-        if startAt and startAt > 0 then p.seekTo(math.floor(startAt * 1000)) end
-        p.start()
-        startClipWatcher(p)
-      end)
-      if not okp then showErrorDialog("Play Error - " .. tostring(label), errp) end
-      Toast.makeText(activity, "Playing: " .. label, 0).show()
-      if refreshFn then refreshFn() end
-    end})
-    duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) V25.clipTask = nil end if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
-    duaMp.prepareAsync()
-  end
-
-  if File(cachePath).exists() and File(cachePath).length() >= 1000 then
-    local fileSize = File(cachePath).length()
-    local ok = pcall(function()
-      duaMp = MediaPlayer()
-      pcall(function() duaMp.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
-      -- FIX (v2.2): screen band hone par bhi playback chalti rahe
-      pcall(function() duaMp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
-      duaMp.setDataSource(cachePath)
-      duaMp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
-        -- Cached file khud prepare/play hote waqt fail hui (corrupt ho sakti
-        -- hai) - ab yeh dead-end nahi hai, online stream try karta hai
-        Toast.makeText(activity, "Cached file (size: " .. fileSize .. " bytes) kharab nikli, online try kar rahe hain...", 0).show()
-        pcall(function() File(cachePath).delete() end)
-        pcall(function() duaMp.release() end)
-        duaMp = nil
-        tryStream()
-        return true
-      end})
-      duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
-        local okp, errp = pcall(function()
-          applyPlaybackSpeed(p)
-          if startAt and startAt > 0 then p.seekTo(math.floor(startAt * 1000)) end
-          p.start()
-          startClipWatcher(p)
-        end)
-        if not okp then showErrorDialog("Play Error (offline) - " .. tostring(label), errp) end
-        Toast.makeText(activity, "Playing (offline): " .. label, 0).show()
-        if refreshFn then refreshFn() end
-      end})
-      duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) V25.clipTask = nil end if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
-      duaMp.prepareAsync()
-    end)
-    if ok then return end
-    -- setDataSource khud (synchronously) fail hui - cache hata kar stream try karte hain
-    pcall(function() if duaMp then duaMp.release() end end)
-    duaMp = nil
-    pcall(function() File(cachePath).delete() end)
-    Toast.makeText(activity, "Cached file mein masla tha (size: " .. fileSize .. " bytes), dobara try kar rahe hain...", 0).show()
-  end
-
-  tryStream()
-  end)
+M.playReliable = function(urls, cachePath, label, refreshFn, onComplete, startAt, endAt)
+local urlList = (type(urls) == "table") and urls or {urls}
+local tryStream
+if not PS then PS = {} end
+PS.duaWanted = true
+PS.duaState = "loading"
+if updateTask then pcall(function() handler.removeCallbacks(updateTask) end) end
+if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) end
+local function startClipWatcher(p)
+if not (endAt and endAt > 0) then return end
+local endMs = math.floor(endAt * 1000)
+local startMs = math.floor((startAt or 0) * 1000)
+V25.clipTask = Runnable({run = function()
+pcall(function()
+if p and p.isPlaying() and p.getCurrentPosition() >= endMs then
+p.pause() p.seekTo(startMs)
+if onComplete then onComplete() elseif refreshFn then refreshFn() end
+return
 end
-
-local playerReady = false      -- FIX: true sirf jab mp poori tarah "prepared" ho chuka ho
-local playIntentPending = false -- agar user ne prepare hone se PEHLE Play dabaya
+end)
+handler.postDelayed(V25.clipTask, 800)
+end})
+handler.postDelayed(V25.clipTask, 800)
+end
+M.stopPlayer(function()
+local urlIdx = 1
+tryStream = function()
+local url = urlList[urlIdx]
+Toast.makeText(activity, "Loading: " .. label .. "...", 1).show()
+if not PS.duaWanted and PS.duaState ~= "idle" then return end
+PS.duaGen = (PS.duaGen or 0) + 1
+local myGen = PS.duaGen
+duaMp = MediaPlayer()
+pcall(function() duaMp.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
+pcall(function() duaMp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
+local streamFailed = false
+local dsOk = pcall(function() duaMp.setDataSource(url) end)
+if not dsOk then
+showErrorDialog("Audio Error - " .. tostring(label), "Audio source set nahi ho saka (setDataSource fail).\n\nLabel: " .. tostring(label) .. "\nURL: " .. tostring(url))
+return
+end
+duaMp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
+if PS.duaGen ~= myGen then return true end
+if not PS.duaWanted then return true end
+if streamFailed then return true end
+streamFailed = true
+if urlIdx < #urlList then
+urlIdx = urlIdx + 1
+pcall(function() duaMp.release() end)
+tryStream()
+return true
+end
+V25.showStreamFailure(label, url, cachePath, tryStream)
+return true
+end})
+duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
+if PS.duaGen ~= myGen then pcall(function() p.release() end) duaMp = nil return end
+if not PS.duaWanted then pcall(function() p.pause() end) return end
+PS.duaState = "playing"
+local okp, errp = pcall(function()
+applyPlaybackSpeed(p)
+if startAt and startAt > 0 then p.seekTo(math.floor(startAt * 1000)) end
+p.start()
+startClipWatcher(p)
+end)
+if not okp then showErrorDialog("Play Error - " .. tostring(label), errp) end
+Toast.makeText(activity, "Playing: " .. label, 0).show()
+if refreshFn then refreshFn() end
+end})
+duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) V25.clipTask = nil end if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
+duaMp.prepareAsync()
+end
+if File(cachePath).exists() and File(cachePath).length() >= 1000 then
+local fileSize = File(cachePath).length()
+local ok = pcall(function()
+duaMp = MediaPlayer()
+pcall(function() duaMp.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
+pcall(function() duaMp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
+duaMp.setDataSource(cachePath)
+duaMp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
+Toast.makeText(activity, "Cached file (size: " .. fileSize .. " bytes) kharab nikli, online try kar rahe hain...", 0).show()
+pcall(function() File(cachePath).delete() end)
+pcall(function() duaMp.release() end)
+duaMp = nil
+tryStream()
+return true
+end})
+duaMp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
+local okp, errp = pcall(function()
+applyPlaybackSpeed(p)
+if startAt and startAt > 0 then p.seekTo(math.floor(startAt * 1000)) end
+p.start()
+startClipWatcher(p)
+end)
+if not okp then showErrorDialog("Play Error (offline) - " .. tostring(label), errp) end
+Toast.makeText(activity, "Playing (offline): " .. label, 0).show()
+if refreshFn then refreshFn() end
+end})
+duaMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function() if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) V25.clipTask = nil end if onComplete then onComplete() elseif refreshFn then refreshFn() end end})
+duaMp.prepareAsync()
+end)
+if ok then return end
+pcall(function() if duaMp then duaMp.release() end end)
+duaMp = nil
+pcall(function() File(cachePath).delete() end)
+Toast.makeText(activity, "Cached file mein masla tha (size: " .. fileSize .. " bytes), dobara try kar rahe hain...", 0).show()
+end
+tryStream()
+end)
+end
+local playerReady = false
+local playIntentPending = false
 local function togglePlayPause()
-  if PS.externalPlayback then
-    if PS.externalPreparing then
-      PS.externalPausePending=not PS.externalPausePending
-      if btnPlayPause then btnPlayPause.setText("Loading...") end
-      return
-    end
-    if not duaMp then showPlayer(currentIndex); return end
-    pcall(function()
-      if duaMp.isPlaying() then duaMp.pause(); isPaused=true; if btnPlayPause then btnPlayPause.setText("▶ "..tr("Play")) end
-      else
-        if duaMp.getDuration()>0 and duaMp.getCurrentPosition()>=duaMp.getDuration()-500 then duaMp.seekTo(0) end
-        duaMp.start(); isPaused=false; if btnPlayPause then btnPlayPause.setText("⏸ "..tr("Pause")) end
-        startSleepTimer()
-      end
-    end)
-    return
-  end
-  if not mp then return end
-  if not playerReady then
-    -- FIX: "pehli dafa Play na hona" bug - bari (translation wali) files
-    -- load hone mein waqt leti hain. Pehle is haalat mein mp.start() seedha
-    -- bulaya jata tha, jo abhi-prepare-na-hue player par crash kar ke
-    -- chup-chaap (pcall ke andar) fail ho jata tha - button ka text tak
-    -- nahi badalta tha. Ab hum sirf "intent" yaad rakhte hain, aur jaise hi
-    -- prepare mukammal hoti hai (onPrepared) khud-ba-khud start ho jati hai.
-    playIntentPending = true
-    pcall(function() if btnPlayPause then btnPlayPause.setText(tr("Loading...")) end end)
-    return
-  end
-  pcall(function()
-    if mp.isPlaying() then
-      mp.pause() isPaused=true
-      if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end
-      targetSleepTime = 0
-      if surahNames[currentIndex] then showPlaybackNotification(surahNames[currentIndex], "Reciter: " .. (reciters[currentReciter] and reciters[currentReciter].name or "")) end
-    else
-      mp.start() isPaused=false
-      if btnPlayPause then btnPlayPause.setText("⏸ " .. tr("Pause")) end
-      startSleepTimer()
-      if surahNames[currentIndex] then showPlaybackNotification(surahNames[currentIndex], "Reciter: " .. (reciters[currentReciter] and reciters[currentReciter].name or "")) end
-    end
-  end)
+if PS.externalPlayback then
+if PS.externalPreparing then
+PS.externalPausePending=not PS.externalPausePending
+if btnPlayPause then btnPlayPause.setText("Loading...") end
+return
+end
+if not duaMp then showPlayer(currentIndex); return end
+pcall(function()
+if duaMp.isPlaying() then duaMp.pause(); isPaused=true; if btnPlayPause then btnPlayPause.setText("▶ "..tr("Play")) end
+else
+if duaMp.getDuration()>0 and duaMp.getCurrentPosition()>=duaMp.getDuration()-500 then duaMp.seekTo(0) end
+duaMp.start(); isPaused=false; if btnPlayPause then btnPlayPause.setText("⏸ "..tr("Pause")) end
+M.startSleepTimer()
+end
+end)
+return
+end
+if not mp then return end
+if not playerReady then
+playIntentPending = true
+pcall(function() if btnPlayPause then btnPlayPause.setText(tr("Loading...")) end end)
+return
+end
+pcall(function()
+if mp.isPlaying() then
+mp.pause() isPaused=true
+if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end
+targetSleepTime = 0
+if surahNames[currentIndex] then M.showPlaybackNotification(surahNames[currentIndex], "Reciter: " .. (reciters[currentReciter] and reciters[currentReciter].name or "")) end
+else
+mp.start() isPaused=false
+if btnPlayPause then btnPlayPause.setText("⏸ " .. tr("Pause")) end
+M.startSleepTimer()
+if surahNames[currentIndex] then M.showPlaybackNotification(surahNames[currentIndex], "Reciter: " .. (reciters[currentReciter] and reciters[currentReciter].name or "")) end
+end
+end)
 end
 local function seekForward()
-  local p=(PS.externalPlayback and duaMp) or mp
-  if p then pcall(function() local n=p.getCurrentPosition()+(seekSeconds*1000); if n>p.getDuration() then n=p.getDuration() end; p.seekTo(n); Toast.makeText(activity,"Forward "..seekSeconds.."s",0).show() end) end
+local p=(PS.externalPlayback and duaMp) or mp
+if p then pcall(function() local n=p.getCurrentPosition()+(seekSeconds*1000); if n>p.getDuration() then n=p.getDuration() end; p.seekTo(n); Toast.makeText(activity,"Forward "..seekSeconds.."s",0).show() end) end
 end
 local function seekRewind()
-  local p=(PS.externalPlayback and duaMp) or mp
-  if p then pcall(function() local n=p.getCurrentPosition()-(seekSeconds*1000); if n<0 then n=0 end; p.seekTo(n); Toast.makeText(activity,"Rewind "..seekSeconds.."s",0).show() end) end
+local p=(PS.externalPlayback and duaMp) or mp
+if p then pcall(function() local n=p.getCurrentPosition()-(seekSeconds*1000); if n<0 then n=0 end; p.seekTo(n); Toast.makeText(activity,"Rewind "..seekSeconds.."s",0).show() end) end
 end
-
 local showHome, showSettings, showAbout, showFeedback, showSurahList, showPlayer, showTasbeeh, showBookmarksScreen, showNamesOfAllah, showReadingMode, showDailyDuas, showPara, showParaSurahs, playNextSurah, playPrevSurah, downloadSurah, confirmDelete, showAzan
-
---------------------------------------------------
--- UI IMPLEMENTATIONS
---------------------------------------------------
-
--- Bottom tab bar (Home / Quran / Duas / More) - jaise system nav bar mein hota hai
-local function bottomTabs(activeTab)
-  local function tabColor(tab) return (activeTab == tab) and appColorStr or "#00000000" end
-  local function tabTextColor(tab) return (activeTab == tab) and -1 or -12303292 end
-  return {LinearLayout, orientation=0, layout_width=-1, backgroundColor="#1A000000",
-    {Button, text="Home", textSize="13sp", layout_weight=1, backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Home tab", onClick=function() safeRun("showHome", showHome) end},
-    {Button, text="Quran", textSize="13sp", layout_weight=1, backgroundColor=tabColor("quran"), textColor=tabTextColor("quran"), contentDescription="Quran tab", onClick=function() safeRun("showSurahList", showSurahList) end},
-    {Button, text="Duas", textSize="13sp", layout_weight=1, backgroundColor=tabColor("duas"), textColor=tabTextColor("duas"), contentDescription="Duas tab", onClick=function() safeRun("showDailyDuas", showDailyDuas) end},
-    {Button, text="More", textSize="13sp", layout_weight=1, backgroundColor=tabColor("more"), textColor=tabTextColor("more"), contentDescription="More tab", onClick=function() safeRun("showMore", showMore) end}
-  }
+M.bottomTabs = function(activeTab)
+local function tabColor(tab) return (activeTab == tab) and appColorStr or "#00000000" end
+local function tabTextColor(tab) return (activeTab == tab) and -1 or -12303292 end
+return {LinearLayout, orientation=0, layout_width=-1, backgroundColor="#1A000000",
+{Button, text="Home", textSize="13sp", layout_weight=1, backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Home tab", onClick=function() safeRun("showHome", showHome) end},
+{Button, text="Quran", textSize="13sp", layout_weight=1, backgroundColor=tabColor("quran"), textColor=tabTextColor("quran"), contentDescription="Quran tab", onClick=function() safeRun("showSurahList", showSurahList) end},
+{Button, text="Duas", textSize="13sp", layout_weight=1, backgroundColor=tabColor("duas"), textColor=tabTextColor("duas"), contentDescription="Duas tab", onClick=function() safeRun("showDailyDuas", showDailyDuas) end},
+{Button, text="More", textSize="13sp", layout_weight=1, backgroundColor=tabColor("more"), textColor=tabTextColor("more"), contentDescription="More tab", onClick=function() safeRun("showMore", showMore) end}
+}
 end
-
--- More section ke andar (More aur uske sub-screens) alag tabs dikhte hain -
--- purani Home/Quran/Duas/More tabs yahan hide ho jati hain, jaisa maanga gaya
-local function moreSubTabs(activeTab)
-  local function tabColor(tab) return (activeTab == tab) and appColorStr or "#00000000" end
-  local function tabTextColor(tab) return (activeTab == tab) and -1 or -12303292 end
-  -- FIX (v2.1): pehle sirf 5 items yahan the (baaki More screen mein bade
-  -- button ke tor par alag se thay) - ab har cheez jo More mein hai wo
-  -- yahan bhi tab ke tor par hai, taake har jagah se ek hi tap mein
-  -- switch ho sake. Zyada items fit karne ke liye horizontally scroll hoti hai.
-  return {HorizontalScrollView, layout_width=-1, backgroundColor="#1A000000",
-    {LinearLayout, orientation=0, layout_width="wrap_content",
-      {Button, text="Para", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("para"), textColor=tabTextColor("para"), contentDescription="30 Para tab", onClick=function() safeRun("showPara", showPara) end},
-      {Button, text="Tasbeeh", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("tasbeeh"), textColor=tabTextColor("tasbeeh"), contentDescription="Digital Tasbeeh tab", onClick=function() safeRun("showTasbeeh", showTasbeeh) end},
-      {Button, text="Bookmarks", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("bookmarks"), textColor=tabTextColor("bookmarks"), contentDescription="Bookmarks tab", onClick=function() safeRun("showBookmarksScreen", showBookmarksScreen) end},
-      {Button, text="Names", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("names"), textColor=tabTextColor("names"), contentDescription="99 Names tab", onClick=function() safeRun("showNamesOfAllah", showNamesOfAllah) end},
-      {Button, text="Prophet Names", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("asmanabi"), textColor=tabTextColor("asmanabi"), contentDescription="Blessed Names tab", onClick=function() safeRun("showAsmaNabi", showAsmaNabi) end},
-      {Button, text="Full Quran", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("fullquran"), textColor=tabTextColor("fullquran"), contentDescription="Poori Quran Continuous tab", onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end},
-      {Button, text="Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("hadith"), textColor=tabTextColor("hadith"), contentDescription="Hadith tab", onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
-      {Button, text="Tafseer 2", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("israr"), textColor=tabTextColor("israr"), contentDescription="Tafseer Israr Ahmad tab", onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
-      {Button, text="40 Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("nawawi"), textColor=tabTextColor("nawawi"), contentDescription="40 Hadith Nawawi tab", onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
-      {Button, text="Adhan", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("azan"), textColor=tabTextColor("azan"), contentDescription="Adhan audio tab", onClick=function() safeRun("showAzan", showAzan) end},
-      {Button, text="Menu", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("menu"), textColor=tabTextColor("menu"), contentDescription="Menu tab", onClick=function() safeRun("showSettings", showSettings) end},
-      {Button, text="Home", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Back to Home tab", onClick=function() safeRun("showHome", showHome) end}
-    }
-  }
+M.moreSubTabs = function(activeTab)
+local function tabColor(tab) return (activeTab == tab) and appColorStr or "#00000000" end
+local function tabTextColor(tab) return (activeTab == tab) and -1 or -12303292 end
+return {HorizontalScrollView, layout_width=-1, backgroundColor="#1A000000",
+{LinearLayout, orientation=0, layout_width="wrap_content",
+{Button, text="Para", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("para"), textColor=tabTextColor("para"), contentDescription="30 Para tab", onClick=function() safeRun("showPara", showPara) end},
+{Button, text="Tasbeeh", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("tasbeeh"), textColor=tabTextColor("tasbeeh"), contentDescription="Digital Tasbeeh tab", onClick=function() safeRun("showTasbeeh", showTasbeeh) end},
+{Button, text="Bookmarks", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("bookmarks"), textColor=tabTextColor("bookmarks"), contentDescription="Bookmarks tab", onClick=function() safeRun("showBookmarksScreen", showBookmarksScreen) end},
+{Button, text="Names", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("names"), textColor=tabTextColor("names"), contentDescription="99 Names tab", onClick=function() safeRun("showNamesOfAllah", showNamesOfAllah) end},
+{Button, text="Prophet Names", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("asmanabi"), textColor=tabTextColor("asmanabi"), contentDescription="Blessed Names tab", onClick=function() safeRun("showAsmaNabi", showAsmaNabi) end},
+{Button, text="Full Quran", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("fullquran"), textColor=tabTextColor("fullquran"), contentDescription="Poori Quran Continuous tab", onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end},
+{Button, text="Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("hadith"), textColor=tabTextColor("hadith"), contentDescription="Hadith tab", onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
+{Button, text="Tafseer 2", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("israr"), textColor=tabTextColor("israr"), contentDescription="Tafseer Israr Ahmad tab", onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
+{Button, text="40 Hadith", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("nawawi"), textColor=tabTextColor("nawawi"), contentDescription="40 Hadith Nawawi tab", onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
+{Button, text="Adhan", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("azan"), textColor=tabTextColor("azan"), contentDescription="Adhan audio tab", onClick=function() safeRun("showAzan", showAzan) end},
+{Button, text="Menu", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("menu"), textColor=tabTextColor("menu"), contentDescription="Menu tab", onClick=function() safeRun("showSettings", showSettings) end},
+{Button, text="Home", textSize="12sp", layout_width="72dp", backgroundColor=tabColor("home"), textColor=tabTextColor("home"), contentDescription="Back to Home tab", onClick=function() safeRun("showHome", showHome) end}
+}
+}
 end
-
 local duaPlayerIndex = 1
 local audioDuasCache = {}
-local function buildAudioDuasList()
-  audioDuasCache = {}
-  for _, d in ipairs(dailyDuas()) do if d.audio ~= "" then table.insert(audioDuasCache,d) end end
-  return audioDuasCache
+M.buildAudioDuasList = function()
+audioDuasCache = {}
+for _, d in ipairs(dailyDuas()) do if d.audio ~= "" then table.insert(audioDuasCache,d) end end
+return audioDuasCache
 end
-
--- Universal search index (Surahs + Reciters + Duas) - jaise Advance Media
--- Player mein live search bar hota hai, waisa hi Home par ek hi search bar
-local function buildSearchIndex()
-  local idx = {}
-  for i, name in ipairs(surahNames) do
-    -- FIX (v2.1): pehle sirf "Play Surah" hota tha - ab tap karne par
-    -- Play/Ayat-ba-Ayat/Ruku/Word-by-Word mein se choose kar sakte hain
-    table.insert(idx, {label="Surah: " .. name, action=function()
-      AlertDialog.Builder(activity).setTitle(name).setItems({"Play Surah", "Ayat-ba-Ayat Mode", "Ruku Mode", "Word-by-Word (Hifz)"}, {onClick=function(d, w)
-        if w == 0 then showPlayer(i)
-        elseif w == 1 then showAyahByAyah(i)
-        elseif w == 2 then showRukuMode(i)
-        elseif w == 3 then showWbwStartDialog(i) end
-      end}).show()
-    end})
-  end
-  -- NAYA (v2.1): 30 Para bhi search mein - tap karne par turant play hota hai
-  for i, n in ipairs(paraNames) do
-    table.insert(idx, {label="Para " .. i .. ": " .. n, action=function()
-      showParaSurahs(i)
-    end})
-  end
-  -- NAYA (v2.1): Tarjuma (translation) bhi search se select ho sakta hai
-  for _, lang in ipairs({"Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi", "English (Mishary)", "Bengali", "French", "Pashto", "Farsi", "Urdu (Waheed Zafar)", "Urdu (Shakir Qasmi)"}) do
-    table.insert(idx, {label="Tarjuma: " .. lang, searchText=lang, action=function()
-      saveTranslationMode(lang)
-      Toast.makeText(activity, "Tarjuma set to " .. lang, 1).show()
-      showSurahList()
-    end})
-  end
-  for i, r in ipairs(reciters) do
-    local rName = r.name
-    table.insert(idx, {label="Reciter: " .. rName, searchText=rName, action=function()
-      currentReciter = i
-      Toast.makeText(activity, "Reciter set to " .. rName .. " - ab Surah select karein", 1).show()
-      showSurahList()
-    end})
-  end
-  for _, d in ipairs(dailyDuas()) do
-    if d.audio ~= "" then
-      table.insert(idx, {label="Dua (Audio): " .. d.title, searchText=(d.title.." "..tostring(d.en or "").." "..tostring(d.ur or "").." "..tostring(d.ar or "")), action=function()
-        buildAudioDuasList()
-        for ai, ad in ipairs(audioDuasCache) do if ad == d then showDuaPlayer(ai) return end end
-      end})
-    else
-      table.insert(idx, {label="Dua (Text): " .. d.title, searchText=(d.title.." "..tostring(d.en or "").." "..tostring(d.ur or "").." "..tostring(d.ar or "")), action=function()
-        local dlgBody = d.ar .. "\n\n" .. d.ur .. ((d.link and d.link ~= "") and ("\n\n" .. d.link) or "")
-        local dlg = AlertDialog.Builder(activity).setTitle(d.title).setMessage(dlgBody)
-        if d.link and d.link ~= "" then dlg.setNeutralButton("▶️ Online sunnein", {onClick=function() safeRun("Open source page", openLinkAndClose, d.link) end}) end
-        dlg.setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(dlgBody) end})
-        dlg.setNegativeButton("Cancel", nil).show()
-      end})
-    end
-  end
-  return idx
+M.buildSearchIndex = function()
+local idx = {}
+for i, name in ipairs(surahNames) do
+table.insert(idx, {label="Surah: " .. name, action=function()
+AlertDialog.Builder(activity).setTitle(name).setItems({"Play Surah", "Ayat-ba-Ayat Mode", "Ruku Mode", "Word-by-Word (Hifz)"}, {onClick=function(d, w)
+if w == 0 then showPlayer(i)
+elseif w == 1 then showAyahByAyah(i)
+elseif w == 2 then showRukuMode(i)
+elseif w == 3 then showWbwStartDialog(i) end
+end}).show()
+end})
 end
-
--- NAYA (v2.1): "Surah-name Ayat-number" ya "Surah-number Ayat-number" jaisi
--- query (e.g. "Baqarah 255", "2 255") ko pehchan kar seedha us Ayat par le
--- jaane wala search result banata hai
-local function buildAyahSearchResult(query)
-  local numPart = query:match("(%d+)%s*$")
-  if not numPart then return nil end
-  local ayahNum = tonumber(numPart)
-  local beforeNum = query:sub(1, #query - #numPart):gsub("%s+$", "")
-  if beforeNum == "" then return nil end
-  local surahIdx = tonumber(beforeNum)
-  if not surahIdx then
-    for i, name in ipairs(surahNames) do
-      if name:lower():find(beforeNum, 1, true) then surahIdx = i break end
-    end
-  end
-  if not surahIdx or not surahNames[surahIdx] then return nil end
-  local mx = surahAyahCounts[surahIdx] or 1
-  if ayahNum < 1 or ayahNum > mx then return nil end
-  return {label="Play: " .. surahNames[surahIdx] .. " - Ayat " .. ayahNum, action=function()
-    showAyahByAyah(surahIdx, ayahNum)
-  end}
+for i, n in ipairs(paraNames) do
+table.insert(idx, {label="Para " .. i .. ": " .. n, action=function()
+showParaSurahs(i)
+end})
 end
-
-
--- 1. HOME
+for _, lang in ipairs({"Off", "Urdu", "Hindi", "Punjabi", "English", "Sindhi", "English (Mishary)", "Bengali", "French", "Pashto", "Farsi", "Urdu (Waheed Zafar)", "Urdu (Shakir Qasmi)"}) do
+table.insert(idx, {label="Tarjuma: " .. lang, searchText=lang, action=function()
+M.saveTranslationMode(lang)
+Toast.makeText(activity, "Tarjuma set to " .. lang, 1).show()
+showSurahList()
+end})
+end
+for i, r in ipairs(reciters) do
+local rName = r.name
+table.insert(idx, {label="Reciter: " .. rName, searchText=rName, action=function()
+currentReciter = i
+Toast.makeText(activity, "Reciter set to " .. rName .. " - ab Surah select karein", 1).show()
+showSurahList()
+end})
+end
+for _, d in ipairs(dailyDuas()) do
+if d.audio ~= "" then
+table.insert(idx, {label="Dua (Audio): " .. d.title, searchText=(d.title.." "..tostring(d.en or "").." "..tostring(d.ur or "").." "..tostring(d.ar or "")), action=function()
+M.buildAudioDuasList()
+for ai, ad in ipairs(audioDuasCache) do if ad == d then showDuaPlayer(ai) return end end
+end})
+else
+table.insert(idx, {label="Dua (Text): " .. d.title, searchText=(d.title.." "..tostring(d.en or "").." "..tostring(d.ur or "").." "..tostring(d.ar or "")), action=function()
+local dlgBody = d.ar .. "\n\n" .. d.ur .. ((d.link and d.link ~= "") and ("\n\n" .. d.link) or "")
+local dlg = AlertDialog.Builder(activity).setTitle(d.title).setMessage(dlgBody)
+if d.link and d.link ~= "" then dlg.setNeutralButton("▶️ Online sunnein", {onClick=function() safeRun("Open source page", M.openLinkAndClose, d.link) end}) end
+dlg.setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(dlgBody) end})
+dlg.setNegativeButton("Cancel", nil).show()
+end})
+end
+end
+return idx
+end
+M.buildAyahSearchResult = function(query)
+local numPart = query:match("(%d+)%s*$")
+if not numPart then return nil end
+local ayahNum = tonumber(numPart)
+local beforeNum = query:sub(1, #query - #numPart):gsub("%s+$", "")
+if beforeNum == "" then return nil end
+local surahIdx = tonumber(beforeNum)
+if not surahIdx then
+for i, name in ipairs(surahNames) do
+if name:lower():find(beforeNum, 1, true) then surahIdx = i break end
+end
+end
+if not surahIdx or not surahNames[surahIdx] then return nil end
+local mx = surahAyahCounts[surahIdx] or 1
+if ayahNum < 1 or ayahNum > mx then return nil end
+return {label="Play: " .. surahNames[surahIdx] .. " - Ayat " .. ayahNum, action=function()
+showAyahByAyah(surahIdx, ayahNum)
+end}
+end
 function showHome()
-  screen = "home"
-  stopPlayer()
-  activity.getWindow().clearFlags(128)
-  local bgColor, textColor = getThemeColors()
-  local spot = pickSpotlight()
-  local searchIndex = nil -- built lazily on first keystroke
-
-  -- FIX (v2.1): agar aakhri prayer-time fetch AAJ ki tareekh ki nahi hai
-  -- (matlab purana din, ya kabhi fetch hi nahi hui), to khud-ba-khud
-  -- background mein dobara fetch ho jati hai - bina button dabaye
-  -- v2.7: Islamic date ab 100% offline (V25.getIslamicDate) hai - purana API
-  -- wala Hijri cache/hijriFix block hata diya gaya hai. Prayer times ka daily
-  -- auto-refresh neeche bilkul pehle jaisa hi chalta hai.
-  if lastPrayerFetchDate ~= todayDateString() and savedCity ~= "" and savedCountry ~= "" then
-    fetchPrayerTimes(savedCity, savedCountry, function(ok)
-      if ok and screen == "home" then showHome() end
-    end)
-  end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor, focusable=true, focusableInTouchMode=true,
-    {TextView, text="Quran Majeed v2.7", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 2 point 7"},
-    {LinearLayout, orientation=0, layout_width=-1, padding="10dp", gravity="center_vertical",
-      {EditText, id="etHomeSearch", hint="Search Surah, Reciter, Dua (Arabic/Urdu/English)...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888", contentDescription="Search Quran, duas and translations"},
-      {Button, id="btnHomeSearch", text="Search", textSize="12sp", layout_marginLeft="4dp", backgroundColor=appColorStr, textColor=-1, contentDescription="Search"},
-      {Button, id="btnVoiceSearch", text="🎙", textSize="16sp", layout_marginLeft="4dp", backgroundColor="#1565C0", textColor=-1, contentDescription="Start voice search"}
-    },
-    {Spinner, id="homeSearchFilter", layout_width=-1, layout_marginLeft="10dp", layout_marginRight="10dp", contentDescription="Filter search results by type"},
-    {TextView, id="txtHomeSearchStatus", text="", textSize="11sp", textColor="#777777", padding="4dp"},
-    {ListView, id="homeSearchResults", layout_width=-1, layout_height="260dp"},
-    {ScrollView, id="homeScroll", layout_width=-1, layout_height=0, layout_weight=1,
-    {LinearLayout, orientation=1, gravity="center_horizontal", padding="20dp", layout_width=-1, layout_height=-2,
-
-      {LinearLayout, orientation=1, layout_width=-1, padding="15dp", layout_marginBottom="15dp", backgroundColor="#1A000000",
-        -- NAYA (v2.1): Aaj ki Gregorian date + Islamic (Hijri) date + Battery
-        {LinearLayout, orientation=0, layout_width=-1, gravity="center_vertical", layout_marginBottom="6dp",
-          {TextView, text=os.date("%d %B %Y (%A)"), textSize="12sp", textColor=textColor, layout_weight=1},
-          {TextView, text="🔋 " .. (currentBatteryPercent() >= 0 and (currentBatteryPercent() .. "%") or "?"), textSize="12sp", textColor=textColor}
-        },
-        -- v2.7-fix2: اسلامی تاریخ - bilkul Punjabi date ki tarah LIVE, sirf
-        -- screen par nazar aati hai. Koi manual entry / "tap to adjust" nahi
-        -- (wo kaam nahi kar raha tha, is liye hata diya). Aadhi raat par
-        -- khud update hoti hai.
-        {TextView, id="txtIslamicDate", text=V25.islamicDateLine(), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="2dp", gravity="center", contentDescription="Islamic date - live, daily auto updated"},
-        {TextView, text=(function() local pd, pm, py = getPunjabiDate() return "Punjabi: " .. pd .. " " .. pm .. ", " .. py .. " Samat" end)(), textSize="12sp", textColor=textColor, layout_marginBottom="10dp", gravity="center"},
-        (spot.kind=="ayah") and {LinearLayout, orientation=1,
-          {TextView, text=tr("Ayat of the Day"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
-          {TextView, text=spot.data.ar, textSize="22sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="right", layout_marginBottom="5dp"},
-          {TextView, text=spot.data.ur, textSize="16sp", textColor=textColor, gravity="right", layout_marginBottom="5dp"},
-          {TextView, text=spot.data.ref, textSize="12sp", textColor="#777777", gravity="left"}
-        } or (spot.kind=="allahname") and {LinearLayout, orientation=1,
-          {TextView, text="Name of Allah", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
-          {TextView, text=spot.data.ar, textSize="26sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="center", layout_marginBottom="5dp"},
-          {TextView, text=spot.data.ro .. " - " .. spot.data.ur, textSize="14sp", textColor=textColor, gravity="center"}
-        } or (spot.kind=="nabiname") and {LinearLayout, orientation=1,
-          {TextView, text="Blessed Name of Prophet", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
-          {TextView, text=spot.data.ar, textSize="26sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="center", layout_marginBottom="5dp"},
-          {TextView, text=spot.data.ro .. " - " .. spot.data.ur, textSize="14sp", textColor=textColor, gravity="center"}
-        } or {LinearLayout, orientation=1,
-          {TextView, text="Surah Spotlight", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
-          {TextView, text="Surah " .. spot.data, textSize="22sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="center"}
-        }
-      },
-
-      {LinearLayout, orientation=1, layout_width=-1, padding="15dp", layout_marginBottom="20dp", backgroundColor="#1A000000",
-        {LinearLayout, orientation=0, layout_width=-1, gravity="center_vertical", layout_marginBottom="10dp",
-          {TextView, text=tr("Prayer Times") .. " ("..savedCity..")", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_weight=1},
-
-          {Button, text=tr("Update Location"), textSize="12sp", backgroundColor="#1976D2", textColor=-1, onClick=function()
-            local inputCity = EditText(activity) inputCity.setHint("City (e.g. Lahore, Dubai)") inputCity.setText(savedCity)
-            local inputCountry = EditText(activity) inputCountry.setHint("Country (e.g. Pakistan)") inputCountry.setText(savedCountry)
-            local dLayout = LinearLayout(activity) dLayout.setOrientation(LinearLayout.VERTICAL) dLayout.setPadding(30,20,30,20) dLayout.addView(inputCity) dLayout.addView(inputCountry)
-
-            AlertDialog.Builder(activity).setTitle(tr("Update Location")).setView(dLayout).setPositiveButton("Fetch Times", {onClick=function()
-              local c = inputCity.getText().toString()
-              local cntry = inputCountry.getText().toString()
-              if c ~= "" and cntry ~= "" then
-                Toast.makeText(activity, "Fetching exact times...", 1).show()
-                fetchPrayerTimes(c, cntry, function(ok)
-                  if ok then
-                    showHome() Toast.makeText(activity, "Updated successfully!", 0).show()
-                  else
-                    Toast.makeText(activity, "City not found ya network error.", 0).show()
-                  end
-                end)
-              end
-            end}).setNegativeButton("Cancel", nil).show()
-          end}
-        },
-        -- FIX (v2.3): 24-hour ("16:30") se 12-hour ("4:30 PM") format mein
-        -- badal diya (to12Hour) - internal storage/Tahajjud calculation
-        -- ab bhi 24-hour hi hai, sirf display badla hai.
-        -- NAYA (v2.3): Tulu-e-Aftab (Sunrise) row bhi add ki - taake pata
-        -- chale Fajr ka waqt kab khatam hota hai. 6-column ek row mein
-        -- kaafi tight hoti, is liye do rows (3+3) mein rakha hai.
-        {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="6dp",
-          {TextView, text="Fajr\n"..to12Hour(prayerFajr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
-          {TextView, text="Sunrise\n"..to12Hour(prayerSunrise), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
-          {TextView, text="Dhuhr\n"..to12Hour(prayerDhuhr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"}
-        },
-        {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
-          {TextView, text="Asr\n"..to12Hour(prayerAsr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
-          {TextView, text="Maghrib\n"..to12Hour(prayerMaghrib), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
-          {TextView, text="Isha\n"..to12Hour(prayerIsha), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"}
-        },
-        {TextView, text="Tahajjud Time: " .. calcTahajjud(prayerMaghrib, prayerFajr), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor="#8E24AA", gravity="center"}
-      }
-    }},
-    bottomTabs("home")
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  etHomeSearch.clearFocus()
-  pcall(function() mainLayout.requestFocus() end)
-  hideKeyboard(etHomeSearch)
-  handler.postDelayed(function()
-    pcall(function() etHomeSearch.clearFocus() mainLayout.requestFocus() hideKeyboard(etHomeSearch) end)
-  end, 200)
-
-  local function runHomeSearch()
-    local q = tostring(etHomeSearch.getText()):lower()
-    if q == "" then
-      homeSearchResults.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, {}))
-      pcall(function() txtHomeSearchStatus.setText("") end)
-    else
-      if not searchIndex then searchIndex = buildSearchIndex() end
-      local matches = {}
-      local labels = {}
-      -- NAYA (v2.1): "Surah Ayat-number" jaisi query ho to seedha us Ayat
-      -- ka result sab se upar dikhta hai
-      local ayahResult = buildAyahSearchResult(q)
-      if ayahResult then
-        table.insert(matches, ayahResult)
-        table.insert(labels, ayahResult.label)
-      end
-      local function fuzzyMatch(hay, needle)
-        hay=tostring(hay or ""):lower()
-        needle=tostring(needle or ""):lower()
-        if needle=="" then return true end
-        if hay:find(needle,1,true) then return true end
-        -- Fuzzy subsequence fallback catches minor spacing/typing omissions.
-        local j=1
-        for i=1,#hay do
-          if hay:sub(i,i)==needle:sub(j,j) then
-            j=j+1
-            if j>#needle then return true end
-          end
-        end
-        return false
-      end
-      local filterNames={"All","Surahs","Reciters","Translations","Duas"}
-      local filter=filterNames[(homeSearchFilter.getSelectedItemPosition() or 0)+1] or "All"
-      for _, item in ipairs(searchIndex) do
-        local label=item.label or ""
-        local allowed=(filter=="All") or
-          (filter=="Surahs" and (label:find("^Surah:") or label:find("^Play:"))) or
-          (filter=="Reciters" and label:find("^Reciter:")) or
-          (filter=="Translations" and label:find("^Tarjuma:")) or
-          (filter=="Duas" and label:find("^Dua "))
-        if allowed and fuzzyMatch(item.searchText or label,q) then
-          table.insert(matches,item) table.insert(labels,label)
-          if #matches>=100 then break end
-        end
-      end
-      pcall(function() txtHomeSearchStatus.setText(#matches .. " result(s) - tap one to play/select it") end)
-      homeSearchResults.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
-      homeSearchResults.onItemClick = function(l, v, p, i)
-        hideKeyboard(etHomeSearch)
-        if matches[i+1] then matches[i+1].action() end
-      end
-    end
-  end
-
-  local searchFilters={"All", "Surahs", "Reciters", "Translations", "Duas"}
-  homeSearchFilter.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, searchFilters))
-  homeSearchFilter.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function() runHomeSearch() end})
-  etHomeSearch.addTextChangedListener(TextWatcher{onTextChanged=function(c) runHomeSearch() end})
-  btnHomeSearch.onClick = function() hideKeyboard(etHomeSearch) runHomeSearch() end
-  btnVoiceSearch.onClick = function()
-    local ok, err = pcall(function()
-      local i=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-      i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-      i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak a Surah, dua, reciter, or translation")
-      activity.startActivityForResult(i, 2606)
-    end)
-    if not ok then Toast.makeText(activity,"Speech recognition service is not available on this device.",1).show() end
-  end
+screen = "home"
+M.stopPlayer()
+activity.getWindow().clearFlags(128)
+local bgColor, textColor = M.getThemeColors()
+local spot = M.pickSpotlight()
+local searchIndex = nil
+if lastPrayerFetchDate ~= M.todayDateString() and savedCity ~= "" and savedCountry ~= "" then
+M.fetchPrayerTimes(savedCity, savedCountry, function(ok)
+if ok and screen == "home" then showHome() end
+end)
 end
-
-
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor, focusable=true, focusableInTouchMode=true,
+{TextView, text="Quran Majeed v3.0", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, gravity="center", padding="10dp", textColor=appColorStr, contentDescription="Quran Majeed, version 3.0"},
+{LinearLayout, orientation=0, layout_width=-1, padding="10dp", gravity="center_vertical",
+{EditText, id="etHomeSearch", hint="Search Surah, Reciter, Dua (Arabic/Urdu/English)...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888", contentDescription="Search Quran, duas and translations"},
+{Button, id="btnHomeSearch", text="Search", textSize="12sp", layout_marginLeft="4dp", backgroundColor=appColorStr, textColor=-1, contentDescription="Search"},
+{Button, id="btnVoiceSearch", text="🎙", textSize="16sp", layout_marginLeft="4dp", backgroundColor="#1565C0", textColor=-1, contentDescription="Start voice search"}
+},
+{Spinner, id="homeSearchFilter", layout_width=-1, layout_marginLeft="10dp", layout_marginRight="10dp", contentDescription="Filter search results by type"},
+{TextView, id="txtHomeSearchStatus", text="", textSize="11sp", textColor="#777777", padding="4dp"},
+{ListView, id="homeSearchResults", layout_width=-1, layout_height="260dp"},
+{ScrollView, id="homeScroll", layout_width=-1, layout_height=0, layout_weight=1,
+{LinearLayout, orientation=1, gravity="center_horizontal", padding="20dp", layout_width=-1, layout_height=-2,
+{LinearLayout, orientation=1, layout_width=-1, padding="15dp", layout_marginBottom="15dp", backgroundColor="#1A000000",
+{LinearLayout, orientation=0, layout_width=-1, gravity="center_vertical", layout_marginBottom="6dp",
+{TextView, text=os.date("%d %B %Y (%A)"), textSize="12sp", textColor=textColor, layout_weight=1},
+{TextView, text="🔋 " .. (M.currentBatteryPercent() >= 0 and (M.currentBatteryPercent() .. "%") or "?"), textSize="12sp", textColor=textColor}
+},
+{LinearLayout, orientation=1, layout_width=-1, gravity="center_horizontal", layout_marginBottom="10dp",
+{TextView, id="txtIslamicDateUrdu", text=(function() local ok, r = pcall(V25.islamicLineUrdu) if ok and r then return r end return "" end)(), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="center", layout_marginBottom="2dp"},
+{TextView, id="txtIslamicDate", text=(function() local ok, r = pcall(V25.islamicLineRoman) if ok and r then return r end return "Islamic Calendar" end)(), textSize="12sp", textColor=textColor, gravity="center", layout_marginBottom="2dp"},
+{TextView, text=(function() local ok, pd, pm, py = pcall(M.getPunjabiDate) if ok and pd then return "Punjabi: " .. tostring(pd) .. " " .. tostring(pm) .. ", " .. tostring(py) .. " Samat" end return "Punjabi" end)(), textSize="12sp", textColor=textColor, gravity="center"}
+},
+(spot.kind=="ayah") and {LinearLayout, orientation=1,
+{TextView, text=tr("Ayat of the Day"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
+{TextView, text=spot.data.ar, textSize="22sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="right", layout_marginBottom="5dp"},
+{TextView, text=spot.data.ur, textSize="16sp", textColor=textColor, gravity="right", layout_marginBottom="5dp"},
+{TextView, text=spot.data.ref, textSize="12sp", textColor="#777777", gravity="left"}
+} or (spot.kind=="allahname") and {LinearLayout, orientation=1,
+{TextView, text="Name of Allah", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
+{TextView, text=spot.data.ar, textSize="26sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="center", layout_marginBottom="5dp"},
+{TextView, text=spot.data.ro .. " - " .. spot.data.ur, textSize="14sp", textColor=textColor, gravity="center"}
+} or (spot.kind=="nabiname") and {LinearLayout, orientation=1,
+{TextView, text="Blessed Name of Prophet", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
+{TextView, text=spot.data.ar, textSize="26sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="center", layout_marginBottom="5dp"},
+{TextView, text=spot.data.ro .. " - " .. spot.data.ur, textSize="14sp", textColor=textColor, gravity="center"}
+} or {LinearLayout, orientation=1,
+{TextView, text="Surah Spotlight", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="5dp"},
+{TextView, text="Surah " .. spot.data, textSize="22sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="center"}
+}
+},
+{LinearLayout, orientation=1, layout_width=-1, padding="15dp", layout_marginBottom="20dp", backgroundColor="#1A000000",
+{LinearLayout, orientation=0, layout_width=-1, gravity="center_vertical", layout_marginBottom="10dp",
+{TextView, text=tr("Prayer Times") .. " ("..savedCity..")", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_weight=1},
+{Button, text=tr("Update Location"), textSize="12sp", backgroundColor="#1976D2", textColor=-1, onClick=function()
+local inputCity = EditText(activity) inputCity.setHint("City (e.g. Lahore, Dubai)") inputCity.setText(savedCity)
+local inputCountry = EditText(activity) inputCountry.setHint("Country (e.g. Pakistan)") inputCountry.setText(savedCountry)
+local dLayout = LinearLayout(activity) dLayout.setOrientation(LinearLayout.VERTICAL) dLayout.setPadding(30,20,30,20) dLayout.addView(inputCity) dLayout.addView(inputCountry)
+AlertDialog.Builder(activity).setTitle(tr("Update Location")).setView(dLayout).setPositiveButton("Fetch Times", {onClick=function()
+local c = inputCity.getText().toString()
+local cntry = inputCountry.getText().toString()
+if c ~= "" and cntry ~= "" then
+Toast.makeText(activity, "Fetching exact times...", 1).show()
+M.fetchPrayerTimes(c, cntry, function(ok)
+if ok then
+showHome() Toast.makeText(activity, "Updated successfully!", 0).show()
+else
+Toast.makeText(activity, "City not found ya network error.", 0).show()
+end
+end)
+end
+end}).setNegativeButton("Cancel", nil).show()
+end}
+},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="6dp",
+{TextView, text="Fajr\n"..to12Hour(prayerFajr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
+{TextView, text="Sunrise\n"..to12Hour(prayerSunrise), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
+{TextView, text="Dhuhr\n"..to12Hour(prayerDhuhr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"}
+},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
+{TextView, text="Asr\n"..to12Hour(prayerAsr), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
+{TextView, text="Maghrib\n"..to12Hour(prayerMaghrib), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"},
+{TextView, text="Isha\n"..to12Hour(prayerIsha), textSize="13sp", textColor=textColor, layout_weight=1, gravity="center"}
+},
+{TextView, text="Tahajjud Time: " .. calcTahajjud(prayerMaghrib, prayerFajr), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor="#8E24AA", gravity="center"}
+}
+}},
+M.bottomTabs("home")
+})
+M.applyWallpaper(mainLayout, bgColor)
+pcall(function()
+if etHomeSearch then
+pcall(function() etHomeSearch.setHint("Search: Surah, Dua, Kalma, Kitaab, Episode...") end)
+pcall(function() etHomeSearch.setOnLongClickListener(function() safeRun("showAdvancedSearch", showAdvancedSearch) return true end) end)
+pcall(function()
+local par = etHomeSearch.getParent()
+if par then
+local ab = Button(activity)
+ab.setText("Advanced")
+ab.setTextSize(12)
+local tc = V25.safeTextColor(textColor)
+if tc then pcall(function() ab.setTextColor(tc) end) end
+par.addView(ab)
+ab.setOnClickListener(function() safeRun("showAdvancedSearch", showAdvancedSearch) end)
+end
+end)
+end
+end)
+etHomeSearch.clearFocus()
+pcall(function() mainLayout.requestFocus() end)
+M.hideKeyboard(etHomeSearch)
+handler.postDelayed(function()
+pcall(function() etHomeSearch.clearFocus() mainLayout.requestFocus() M.hideKeyboard(etHomeSearch) end)
+end, 200)
+local function runHomeSearch()
+local q = tostring(etHomeSearch.getText()):lower()
+if q == "" then
+homeSearchResults.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, {}))
+pcall(function() txtHomeSearchStatus.setText("") end)
+else
+if not searchIndex then searchIndex = M.buildSearchIndex() end
+local matches = {}
+local labels = {}
+local ayahResult = M.buildAyahSearchResult(q)
+if ayahResult then
+table.insert(matches, ayahResult)
+table.insert(labels, ayahResult.label)
+end
+local function fuzzyMatch(hay, needle)
+hay=tostring(hay or ""):lower()
+needle=tostring(needle or ""):lower()
+if needle=="" then return true end
+if hay:find(needle,1,true) then return true end
+local j=1
+for i=1,#hay do
+if hay:sub(i,i)==needle:sub(j,j) then
+j=j+1
+if j>#needle then return true end
+end
+end
+return false
+end
+local filterNames={"All","Surahs","Reciters","Translations","Duas"}
+local filter=filterNames[(homeSearchFilter.getSelectedItemPosition() or 0)+1] or "All"
+for _, item in ipairs(searchIndex) do
+local label=item.label or ""
+local allowed=(filter=="All") or
+(filter=="Surahs" and (label:find("^Surah:") or label:find("^Play:"))) or
+(filter=="Reciters" and label:find("^Reciter:")) or
+(filter=="Translations" and label:find("^Tarjuma:")) or
+(filter=="Duas" and label:find("^Dua "))
+if allowed and fuzzyMatch(item.searchText or label,q) then
+table.insert(matches,item) table.insert(labels,label)
+if #matches>=100 then break end
+end
+end
+pcall(function() txtHomeSearchStatus.setText(#matches .. " result(s) - tap one to play/select it") end)
+homeSearchResults.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
+homeSearchResults.onItemClick = function(l, v, p, i)
+M.hideKeyboard(etHomeSearch)
+if matches[i+1] then matches[i+1].action() end
+end
+end
+end
+local searchFilters={"All", "Surahs", "Reciters", "Translations", "Duas"}
+homeSearchFilter.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, searchFilters))
+homeSearchFilter.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function() runHomeSearch() end})
+etHomeSearch.addTextChangedListener(TextWatcher{onTextChanged=function(c) runHomeSearch() end})
+btnHomeSearch.onClick = function() M.hideKeyboard(etHomeSearch) runHomeSearch() end
+btnVoiceSearch.onClick = function()
+local ok, err = pcall(function()
+local i=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak a Surah, dua, reciter, or translation")
+activity.startActivityForResult(i, 2606)
+end)
+if not ok then Toast.makeText(activity,"Speech recognition service is not available on this device.",1).show() end
+end
+V25.startDateTick()
+end
 function showAzanPlayer(trackIndex)
-  if trackIndex<1 or trackIndex>#AZAN_TRACKS then return end
-  screen="azanplayer"
-  stopPlayer()
-  local track=AZAN_TRACKS[trackIndex]
-  local path=getAzanLocalPath(trackIndex)
-  local downloaded=File(path).exists() and File(path).length()>1000
-  local bgColor,textColor=getThemeColors()
-  activity.setContentView(loadlayout{
-    LinearLayout,id="mainLayout",orientation=1,padding="18dp",layout_width=-1,layout_height=-1,gravity="center",backgroundColor=bgColor,
-    {LinearLayout,orientation=0,layout_width=-1,gravity="center_vertical",
-      {Button,text="Back",contentDescription="Back to Adhan audio list",onClick=function() safeRun("showAzan", showAzan) end},
-      {TextView,text="Adhan Player",textSize="20sp",typeface=Typeface.DEFAULT_BOLD,textColor=appColorStr,layout_marginLeft="10dp"}
-    },
-    {TextView,id="azanPlayerState",text=downloaded and "Offline playback" or "Online streaming",textSize="13sp",textColor=appColorStr,layout_marginTop="14dp",gravity="center"},
-    {TextView,text=track.name,textSize="22sp",typeface=Typeface.DEFAULT_BOLD,textColor=appColorStr,layout_marginTop="8dp",gravity="center"},
-    {TextView,text=savedCity..", "..savedCountry,textSize="13sp",textColor=textColor,layout_marginTop="4dp",gravity="center"},
-    {SeekBar,id="azanSeekBar",layout_width=-1,layout_marginTop="20dp"},
-    {LinearLayout,orientation=0,layout_width=-1,gravity="center",layout_marginBottom="8dp",
-      {TextView,id="azanCurrentTime",text="00:00",layout_weight=1,gravity="center",textColor=textColor},
-      {TextView,id="azanTotalTime",text="00:00",layout_weight=1,gravity="center",textColor=textColor}
-    },
-    {LinearLayout,orientation=0,layout_width=-1,gravity="center",
-      {Button,text="⏮",layout_weight=1,contentDescription="Previous Adhan",onClick=function() if trackIndex>1 then showAzanPlayer(trackIndex-1) end end},
-      {Button,text="⏪ "..seekSeconds.."s",layout_weight=1.3,contentDescription="Rewind Adhan",onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()-seekSeconds*1000 duaMp.seekTo(math.max(0,n)) end) end end},
-      {Button,id="btnAzanPlay",text="▶ Play",layout_weight=1.5,contentDescription="Play or pause Adhan",onClick=function()
-        if duaMp then pcall(function() if duaMp.isPlaying() then duaMp.pause() btnAzanPlay.setText("▶ Play") else duaMp.start() btnAzanPlay.setText("⏸ Pause") end end)
-        else
-          btnAzanPlay.setText("Loading...")
-          local u=track.url
-          playReliable(u,path,track.name,nil,function() pcall(function() if btnAzanPlay then btnAzanPlay.setText("▶ Play") end end) end)
-        end
-      end},
-      {Button,text=seekSeconds.."s ⏩",layout_weight=1.3,contentDescription="Fast forward Adhan",onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()+seekSeconds*1000 duaMp.seekTo(math.min(n,duaMp.getDuration())) end) end end},
-      {Button,text="⏭",layout_weight=1,contentDescription="Next Adhan",onClick=function() if trackIndex<#AZAN_TRACKS then showAzanPlayer(trackIndex+1) end end}
-    },
-    {Button,id="btnAzanDownload",text=downloaded and "Delete Offline Copy" or "Download Adhan",layout_width=-1,layout_marginTop="16dp",backgroundColor=downloaded and "#C62828" or "#1976D2",textColor=-1,contentDescription=downloaded and "Delete downloaded Adhan" or "Download Adhan for offline"},
-    {Button,text="Set as city Adhan",layout_width=-1,layout_marginTop="8dp",backgroundColor="#00695C",textColor=-1,contentDescription="Set this Adhan as the selected city prayer-call audio",onClick=function()
-      prefs.edit().putInt("azanDefaultTrack",trackIndex).apply()
-      Toast.makeText(activity,"Selected for city prayer schedule.",1).show()
-      showAzanSchedule()
-    end},
-    {Button,text="Prayer Schedule",layout_width=-1,layout_marginTop="6dp",onClick=function() safeRun("showAzanSchedule", showAzanSchedule) end}
-  })
-  applyWallpaper(mainLayout,bgColor)
-  btnAzanDownload.onClick=function()
-    if File(path).exists() then
-      confirmDelete(path,function() showAzanPlayer(trackIndex) end)
-    else
-      local ok,err=pcall(function()
-        local req=DownloadManager.Request(Uri.parse(track.url))
-        req.setTitle(track.name) req.setDescription("Adhan audio for offline use")
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,"Azan_Audio/"..File(path).getName())
-        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-      end)
-      if ok then Toast.makeText(activity,"Adhan download started; file is saved to Downloads/Azan_Audio.",1).show()
-      else showErrorDialog("Adhan Download Error",err) end
-    end
-  end
-  updateTask=Runnable({run=function()
-    if screen=="azanplayer" and duaMp then pcall(function()
-      local dur=duaMp.getDuration(); local pos=duaMp.getCurrentPosition()
-      if dur>0 then azanSeekBar.setMax(dur); azanSeekBar.setProgress(pos) end
-      local function tm(ms) local t=math.floor(ms/1000); return string.format("%02d:%02d",math.floor(t/60),t%60) end
-      azanCurrentTime.setText(tm(pos)); azanTotalTime.setText(tm(dur))
-      if duaMp.isPlaying() then btnAzanPlay.setText("⏸ Pause") end
-    end) end
-    if screen=="azanplayer" then handler.postDelayed(updateTask,1000) end
-  end})
-  handler.post(updateTask)
-  azanSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(b,pos,fromUser) if fromUser and duaMp then pcall(function() duaMp.seekTo(pos) end) end end})
+if trackIndex<1 or trackIndex>#AZAN_TRACKS then return end
+screen="azanplayer"
+M.stopPlayer()
+local track=AZAN_TRACKS[trackIndex]
+local path=M.getAzanLocalPath(trackIndex)
+local downloaded=File(path).exists() and File(path).length()>1000
+local bgColor,textColor=M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout,id="mainLayout",orientation=1,padding="18dp",layout_width=-1,layout_height=-1,gravity="center",backgroundColor=bgColor,
+{LinearLayout,orientation=0,layout_width=-1,gravity="center_vertical",
+{Button,text="Back",contentDescription="Back to Adhan audio list",onClick=function() safeRun("showAzan", showAzan) end},
+{TextView,text="Adhan Player",textSize="20sp",typeface=Typeface.DEFAULT_BOLD,textColor=appColorStr,layout_marginLeft="10dp"}
+},
+{TextView,id="azanPlayerState",text=downloaded and "Offline playback" or "Online streaming",textSize="13sp",textColor=appColorStr,layout_marginTop="14dp",gravity="center"},
+{TextView,text=track.name,textSize="22sp",typeface=Typeface.DEFAULT_BOLD,textColor=appColorStr,layout_marginTop="8dp",gravity="center"},
+{TextView,text=savedCity..", "..savedCountry,textSize="13sp",textColor=textColor,layout_marginTop="4dp",gravity="center"},
+{SeekBar,id="azanSeekBar",layout_width=-1,layout_marginTop="20dp"},
+{LinearLayout,orientation=0,layout_width=-1,gravity="center",layout_marginBottom="8dp",
+{TextView,id="azanCurrentTime",text="00:00",layout_weight=1,gravity="center",textColor=textColor},
+{TextView,id="azanTotalTime",text="00:00",layout_weight=1,gravity="center",textColor=textColor}
+},
+{LinearLayout,orientation=0,layout_width=-1,gravity="center",
+{Button,text="⏮",layout_weight=1,contentDescription="Previous Adhan",onClick=function() if trackIndex>1 then showAzanPlayer(trackIndex-1) end end},
+{Button,text="⏪ "..seekSeconds.."s",layout_weight=1.3,contentDescription="Rewind Adhan",onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()-seekSeconds*1000 duaMp.seekTo(math.max(0,n)) end) end end},
+{Button,id="btnAzanPlay",text="▶ Play",layout_weight=1.5,contentDescription="Play or pause Adhan",onClick=function()
+if duaMp then pcall(function() if duaMp.isPlaying() then duaMp.pause() btnAzanPlay.setText("▶ Play") else duaMp.start() btnAzanPlay.setText("⏸ Pause") end end)
+else
+btnAzanPlay.setText("Loading...")
+local u=track.url
+M.playReliable(u,path,track.name,nil,function() pcall(function() if btnAzanPlay then btnAzanPlay.setText("▶ Play") end end) end)
 end
-
-
+end},
+{Button,text=seekSeconds.."s ⏩",layout_weight=1.3,contentDescription="Fast forward Adhan",onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()+seekSeconds*1000 duaMp.seekTo(math.min(n,duaMp.getDuration())) end) end end},
+{Button,text="⏭",layout_weight=1,contentDescription="Next Adhan",onClick=function() if trackIndex<#AZAN_TRACKS then showAzanPlayer(trackIndex+1) end end}
+},
+{Button,id="btnAzanDownload",text=downloaded and "Delete Offline Copy" or "Download Adhan",layout_width=-1,layout_marginTop="16dp",backgroundColor=downloaded and "#C62828" or "#1976D2",textColor=-1,contentDescription=downloaded and "Delete downloaded Adhan" or "Download Adhan for offline"},
+{Button,text="Set as city Adhan",layout_width=-1,layout_marginTop="8dp",backgroundColor="#00695C",textColor=-1,contentDescription="Set this Adhan as the selected city prayer-call audio",onClick=function()
+prefs.edit().putInt("azanDefaultTrack",trackIndex).apply()
+Toast.makeText(activity,"Selected for city prayer schedule.",1).show()
+showAzanSchedule()
+end},
+{Button,text="Prayer Schedule",layout_width=-1,layout_marginTop="6dp",onClick=function() safeRun("showAzanSchedule", showAzanSchedule) end}
+})
+M.applyWallpaper(mainLayout,bgColor)
+btnAzanDownload.onClick=function()
+if File(path).exists() then
+confirmDelete(path,function() showAzanPlayer(trackIndex) end)
+else
+local ok,err=pcall(function()
+local req=DownloadManager.Request(Uri.parse(track.url))
+req.setTitle(track.name) req.setDescription("Adhan audio for offline use")
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,"Azan_Audio/"..File(path).getName())
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if ok then Toast.makeText(activity,"Adhan download started; file is saved to Downloads/Azan_Audio.",1).show()
+else showErrorDialog("Adhan Download Error",err) end
+end
+end
+updateTask=Runnable({run=function()
+if screen=="azanplayer" and duaMp then pcall(function()
+local dur=duaMp.getDuration(); local pos=duaMp.getCurrentPosition()
+if dur>0 then azanSeekBar.setMax(dur); azanSeekBar.setProgress(pos) end
+local function tm(ms) local t=math.floor(ms/1000); return string.format("%02d:%02d",math.floor(t/60),t%60) end
+azanCurrentTime.setText(tm(pos)); azanTotalTime.setText(tm(dur))
+if duaMp.isPlaying() then btnAzanPlay.setText("⏸ Pause") end
+end) end
+if screen=="azanplayer" then handler.postDelayed(updateTask,1000) end
+end})
+handler.post(updateTask)
+azanSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(b,pos,fromUser) if fromUser and duaMp then pcall(function() duaMp.seekTo(pos) end) end end})
+end
 local AZAN_PRAYERS={{key="Fajr",label="Fajr",timeKey="pFajr"},{key="Dhuhr",label="Dhuhr",timeKey="pDhuhr"},{key="Asr",label="Asr",timeKey="pAsr"},{key="Maghrib",label="Maghrib",timeKey="pMaghrib"},{key="Isha",label="Isha",timeKey="pIsha"}}
 local azanReceiverRegistered={}
-local function azanAction(key) return "quran_majeed_city_azan_"..key end
-local function registerCityAzanReceiver(key)
-  local action=azanAction(key)
-  if azanReceiverRegistered[action] then return end
-  local ok=pcall(function() activity.registerReceiver(IntentFilter(action)) end)
-  if ok then azanReceiverRegistered[action]=true end
+M.azanAction = function(key) return "quran_majeed_city_azan_"..key end
+M.registerCityAzanReceiver = function(key)
+local action=M.azanAction(key)
+if azanReceiverRegistered[action] then return end
+local ok=pcall(function() activity.registerReceiver(IntentFilter(action)) end)
+if ok then azanReceiverRegistered[action]=true end
 end
 function scheduleCityAzans()
-  local am=activity.getSystemService(Context.ALARM_SERVICE)
-  local now=os.time()
-  local flags=PendingIntent.FLAG_UPDATE_CURRENT
-  if Build.VERSION.SDK_INT>=23 then pcall(function() flags=flags+PendingIntent.FLAG_IMMUTABLE end) end
-  for n,item in ipairs(AZAN_PRAYERS) do
-    local action=azanAction(item.key)
-    registerCityAzanReceiver(item.key)
-    local intent=Intent(action)
-    intent.putExtra("prayer_name",item.label)
-    intent.putExtra("city_name",savedCity)
-    local pi=PendingIntent.getBroadcast(activity,7300+n,intent,flags)
-    pcall(function() am.cancel(pi) end)
-    if prefs.getBoolean("cityAzanOn_"..item.key,false) then
-      local clock=prefs.getString(item.timeKey,"00:00")
-      local hh,mm=clock:match("(%d+):(%d+)")
-      if hh and mm then
-        local cal=Calendar.getInstance(TimeZone.getTimeZone(savedPrayerTimezone))
-        cal.setTimeInMillis(now*1000)
-        cal.set(Calendar.HOUR_OF_DAY,tonumber(hh))
-        cal.set(Calendar.MINUTE,tonumber(mm))
-        cal.set(Calendar.SECOND,0)
-        cal.set(Calendar.MILLISECOND,0)
-        if cal.getTimeInMillis()<=now*1000 then cal.add(Calendar.DAY_OF_MONTH,1) end
-        local alarm=cal.getTimeInMillis()
-        local scheduled=false
-        if Build.VERSION.SDK_INT>=23 then
-          scheduled=pcall(function() am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP,alarm,pi) end)
-          if not scheduled then pcall(function() am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP,alarm,pi) end) end
-        else
-          pcall(function() am.set(AlarmManager.RTC_WAKEUP,alarm,pi) end)
-        end
-      end
-    end
-  end
+local am=activity.getSystemService(Context.ALARM_SERVICE)
+local now=os.time()
+local flags=PendingIntent.FLAG_UPDATE_CURRENT
+if Build.VERSION.SDK_INT>=23 then pcall(function() flags=flags+PendingIntent.FLAG_IMMUTABLE end) end
+for n,item in ipairs(AZAN_PRAYERS) do
+local action=M.azanAction(item.key)
+M.registerCityAzanReceiver(item.key)
+local intent=Intent(action)
+intent.putExtra("prayer_name",item.label)
+intent.putExtra("city_name",savedCity)
+local pi=PendingIntent.getBroadcast(activity,7300+n,intent,flags)
+pcall(function() am.cancel(pi) end)
+if prefs.getBoolean("cityAzanOn_"..item.key,false) then
+local clock=prefs.getString(item.timeKey,"00:00")
+local hh,mm=clock:match("(%d+):(%d+)")
+if hh and mm then
+local cal=Calendar.getInstance(TimeZone.getTimeZone(savedPrayerTimezone))
+cal.setTimeInMillis(now*1000)
+cal.set(Calendar.HOUR_OF_DAY,tonumber(hh))
+cal.set(Calendar.MINUTE,tonumber(mm))
+cal.set(Calendar.SECOND,0)
+cal.set(Calendar.MILLISECOND,0)
+if cal.getTimeInMillis()<=now*1000 then cal.add(Calendar.DAY_OF_MONTH,1) end
+local alarm=cal.getTimeInMillis()
+local scheduled=false
+if Build.VERSION.SDK_INT>=23 then
+scheduled=pcall(function() am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP,alarm,pi) end)
+if not scheduled then pcall(function() am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP,alarm,pi) end) end
+else
+pcall(function() am.set(AlarmManager.RTC_WAKEUP,alarm,pi) end)
 end
-
+end
+end
+end
+end
 function showAzanSchedule()
-  screen="azanschedule"
-  local bgColor,textColor=getThemeColors()
-  local root=LinearLayout(activity); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(18,12,18,12); root.setBackgroundColor(Color.parseColor(bgColor))
-  local scroll=ScrollView(activity); local body=LinearLayout(activity); body.setOrientation(LinearLayout.VERTICAL); body.setPadding(10,10,10,10)
-  local head=TextView(activity); head.setText("City prayer Azan schedule"); head.setTextSize(21); head.setTypeface(Typeface.DEFAULT_BOLD); head.setTextColor(Color.parseColor(appColorStr)); body.addView(head)
-  local city=TextView(activity); city.setText("Location: "..savedCity..", "..savedCountry.." ("..savedPrayerTimezone..")   |   Times from prayer-time settings"); city.setTextSize(13); city.setTextColor(Color.parseColor(textColor)); body.addView(city)
-  local controls={}; local names={}
-  for i,t in ipairs(AZAN_TRACKS) do names[i]=t.name end
-  for _,pr in ipairs(AZAN_PRAYERS) do
-    local row=LinearLayout(activity); row.setOrientation(LinearLayout.VERTICAL); row.setPadding(8,10,8,10)
-    local cb=CheckBox(activity); cb.setText(pr.label.."  ("..to12Hour(prefs.getString(pr.timeKey,"00:00"))..")"); cb.setTextColor(Color.parseColor(textColor)); cb.setChecked(prefs.getBoolean("cityAzanOn_"..pr.key,false)); row.addView(cb)
-    local sp=Spinner(activity); sp.setAdapter(ArrayAdapter(activity,android.R.layout.simple_spinner_dropdown_item,names))
-    local selected=prefs.getInt("cityAzanTrack_"..pr.key,prefs.getInt("azanDefaultTrack",1)); sp.setSelection(math.max(0,math.min(#names,selected)-1)); row.addView(sp)
-    local rule=View(activity); rule.setBackgroundColor(0x22000000); local lp=LinearLayout.LayoutParams(-1,1); row.addView(rule,lp)
-    body.addView(row); controls[pr.key]={check=cb,spinner=sp,timeKey=pr.timeKey}
-  end
-  local note=TextView(activity); note.setText("Enable Alarms & reminders for precise alarms. If exact-alarm access is unavailable, Android may deliver an inexact alarm. This in-script schedule requires the host app to keep its registered receiver available; force-stop/reboot persistence depends on the host project manifest and boot receiver."); note.setTextSize(12); note.setTextColor(0xFF9E3A00); note.setPadding(4,12,4,12); body.addView(note)
-  scroll.addView(body); root.addView(scroll)
-  local notify=Button(activity); notify.setText("Allow notifications"); notify.setContentDescription("Grant notification permission for scheduled Azan alerts"); root.addView(notify)
-  local exact=Button(activity); exact.setText("Open exact alarm access settings"); exact.setContentDescription("Open Android Alarms and reminders access"); root.addView(exact)
-  local save=Button(activity); save.setText("Save and schedule next prayers"); save.setContentDescription("Save city prayer settings and schedule Azan notifications"); root.addView(save)
-  local play=Button(activity); play.setText("Open Adhan audio player"); root.addView(play)
-  local back=Button(activity); back.setText("Back"); root.addView(back)
-  activity.setContentView(root)
-  notify.setOnClickListener(View.OnClickListener{onClick=function()
-    pcall(function()
-      if Build.VERSION.SDK_INT>=33 and activity.checkSelfPermission("android.permission.POST_NOTIFICATIONS")~=0 then
-        local perms=luajava.newArray("java.lang.String",1); perms[0]="android.permission.POST_NOTIFICATIONS"; activity.requestPermissions(perms,2607)
-      else Toast.makeText(activity,"Notifications are already allowed (or not runtime-gated on this Android version).",1).show() end
-    end)
-  end})
-  exact.setOnClickListener(View.OnClickListener{onClick=function()
-    pcall(function()
-      local i=Intent("android.settings.REQUEST_SCHEDULE_EXACT_ALARM")
-      i.setData(Uri.parse("package:"..activity.getPackageName()))
-      activity.startActivity(i)
-    end)
-  end})
-  save.setOnClickListener(View.OnClickListener{onClick=function()
-    local ed=prefs.edit()
-    for _,pr in ipairs(AZAN_PRAYERS) do local c=controls[pr.key]; ed.putBoolean("cityAzanOn_"..pr.key,c.check.isChecked()); ed.putInt("cityAzanTrack_"..pr.key,c.spinner.getSelectedItemPosition()+1) end
-    ed.apply(); scheduleCityAzans()
-    Toast.makeText(activity,"City-wise Azan schedule saved for "..savedCity..".",1).show()
-  end})
-  play.setOnClickListener(View.OnClickListener{onClick=function() safeRun("showAzan", showAzan) end})
-  back.setOnClickListener(View.OnClickListener{onClick=function() safeRun("showAzan", showAzan) end})
+screen="azanschedule"
+local bgColor,textColor=M.getThemeColors()
+local root=LinearLayout(activity); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(18,12,18,12); root.setBackgroundColor(Color.parseColor(bgColor))
+local scroll=ScrollView(activity); local body=LinearLayout(activity); body.setOrientation(LinearLayout.VERTICAL); body.setPadding(10,10,10,10)
+local head=TextView(activity); head.setText("City prayer Azan schedule"); head.setTextSize(21); head.setTypeface(Typeface.DEFAULT_BOLD); head.setTextColor(Color.parseColor(appColorStr)); body.addView(head)
+local city=TextView(activity); city.setText("Location: "..savedCity..", "..savedCountry.." ("..savedPrayerTimezone..")   |   Times from prayer-time settings"); city.setTextSize(13); city.setTextColor(Color.parseColor(textColor)); body.addView(city)
+local controls={}; local names={}
+for i,t in ipairs(AZAN_TRACKS) do names[i]=t.name end
+for _,pr in ipairs(AZAN_PRAYERS) do
+local row=LinearLayout(activity); row.setOrientation(LinearLayout.VERTICAL); row.setPadding(8,10,8,10)
+local cb=CheckBox(activity); cb.setText(pr.label.."  ("..to12Hour(prefs.getString(pr.timeKey,"00:00"))..")"); cb.setTextColor(Color.parseColor(textColor)); cb.setChecked(prefs.getBoolean("cityAzanOn_"..pr.key,false)); row.addView(cb)
+local sp=Spinner(activity); sp.setAdapter(ArrayAdapter(activity,android.R.layout.simple_spinner_dropdown_item,names))
+local selected=prefs.getInt("cityAzanTrack_"..pr.key,prefs.getInt("azanDefaultTrack",1)); sp.setSelection(math.max(0,math.min(#names,selected)-1)); row.addView(sp)
+local rule=View(activity); rule.setBackgroundColor(0x22000000); local lp=LinearLayout.LayoutParams(-1,1); row.addView(rule,lp)
+body.addView(row); controls[pr.key]={check=cb,spinner=sp,timeKey=pr.timeKey}
 end
-
-
+local note=TextView(activity); note.setText("Enable Alarms & reminders for precise alarms. If exact-alarm access is unavailable, Android may deliver an inexact alarm. This in-script schedule requires the host app to keep its registered receiver available; force-stop/reboot persistence depends on the host project manifest and boot receiver."); note.setTextSize(12); note.setTextColor(0xFF9E3A00); note.setPadding(4,12,4,12); body.addView(note)
+scroll.addView(body); root.addView(scroll)
+local notify=Button(activity); notify.setText("Allow notifications"); notify.setContentDescription("Grant notification permission for scheduled Azan alerts"); root.addView(notify)
+local exact=Button(activity); exact.setText("Open exact alarm access settings"); exact.setContentDescription("Open Android Alarms and reminders access"); root.addView(exact)
+local save=Button(activity); save.setText("Save and schedule next prayers"); save.setContentDescription("Save city prayer settings and schedule Azan notifications"); root.addView(save)
+local play=Button(activity); play.setText("Open Adhan audio player"); root.addView(play)
+local back=Button(activity); back.setText("Back"); root.addView(back)
+activity.setContentView(root)
+notify.setOnClickListener(View.OnClickListener{onClick=function()
+pcall(function()
+if Build.VERSION.SDK_INT>=33 and activity.checkSelfPermission("android.permission.POST_NOTIFICATIONS")~=0 then
+local perms=luajava.newArray("java.lang.String",1); perms[0]="android.permission.POST_NOTIFICATIONS"; activity.requestPermissions(perms,2607)
+else Toast.makeText(activity,"Notifications are already allowed (or not runtime-gated on this Android version).",1).show() end
+end)
+end})
+exact.setOnClickListener(View.OnClickListener{onClick=function()
+pcall(function()
+local i=Intent("android.settings.REQUEST_SCHEDULE_EXACT_ALARM")
+i.setData(Uri.parse("package:"..activity.getPackageName()))
+activity.startActivity(i)
+end)
+end})
+save.setOnClickListener(View.OnClickListener{onClick=function()
+local ed=prefs.edit()
+for _,pr in ipairs(AZAN_PRAYERS) do local c=controls[pr.key]; ed.putBoolean("cityAzanOn_"..pr.key,c.check.isChecked()); ed.putInt("cityAzanTrack_"..pr.key,c.spinner.getSelectedItemPosition()+1) end
+ed.apply(); scheduleCityAzans()
+Toast.makeText(activity,"City-wise Azan schedule saved for "..savedCity..".",1).show()
+end})
+play.setOnClickListener(View.OnClickListener{onClick=function() safeRun("showAzan", showAzan) end})
+back.setOnClickListener(View.OnClickListener{onClick=function() safeRun("showAzan", showAzan) end})
+end
 showAzan = function()
-  screen = "azan"
-  stopPlayer()
-  local bgColor, textColor = getThemeColors()
-  local labels = {}
-  for i, track in ipairs(AZAN_TRACKS) do
-    local downloaded = File(getAzanLocalPath(i)).exists()
-    labels[i] = track.name .. (downloaded and "  [Offline]" or "  [Download available]")
-  end
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text="Back", contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="Adhan Audio", textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, text="City: "..savedCity..", "..savedCountry..". Tap a recording to open the Quran-style player.", textSize="12sp", textColor=textColor, padding="10dp"},
-    {Button,text="Set city prayer schedule",layout_width=-1,layout_margin="8dp",backgroundColor="#1976D2",textColor=-1,contentDescription="Set automatic city-wise prayer Azan schedule",onClick=function() safeRun("showAzanSchedule", showAzanSchedule) end},
-    {ListView, id="azanList", layout_width=-1, layout_height=0, layout_weight=1},
-    {Button, text="Back to More", layout_width=-1, contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end}
-  })
-  applyWallpaper(mainLayout, bgColor)
-  azanList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
-  azanList.onItemClick = function(l, v, p, pos)
-    local i = pos + 1
-    local track = AZAN_TRACKS[i]
-    local path = getAzanLocalPath(i)
-    showAzanPlayer(i)
-  end
+screen = "azan"
+M.stopPlayer()
+local bgColor, textColor = M.getThemeColors()
+local labels = {}
+for i, track in ipairs(AZAN_TRACKS) do
+local downloaded = File(M.getAzanLocalPath(i)).exists()
+labels[i] = track.name .. (downloaded and "  [Offline]" or "  [Download available]")
 end
-
-
--- DAILY MASNOON DUAS SCREEN (Audio Duas alag, Text Duas alag - TalkBack labels ke saath)
-local function playDuaAtIndex(idx, refreshFn)
-  local list = audioDuasCache
-  if idx < 1 or idx > #list then return end
-  duaPlayerIndex = idx
-  local d = list[idx]
-  playReliable(d.audio, getDuaAudioLocal(d), d.title, refreshFn, function()
-    if idx < #list then playDuaAtIndex(idx+1, refreshFn) elseif refreshFn then refreshFn() end
-  end)
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+{Button, text="Back", contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="Adhan Audio", textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="City: "..savedCity..", "..savedCountry..". Tap a recording to open the Quran-style player.", textSize="12sp", textColor=textColor, padding="10dp"},
+{Button,text="Set city prayer schedule",layout_width=-1,layout_margin="8dp",backgroundColor="#1976D2",textColor=-1,contentDescription="Set automatic city-wise prayer Azan schedule",onClick=function() safeRun("showAzanSchedule", showAzanSchedule) end},
+{ListView, id="azanList", layout_width=-1, layout_height=0, layout_weight=1},
+{Button, text="Back to More", layout_width=-1, contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end}
+})
+M.applyWallpaper(mainLayout, bgColor)
+azanList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
+azanList.onItemClick = function(l, v, p, pos)
+local i = pos + 1
+local track = AZAN_TRACKS[i]
+local path = M.getAzanLocalPath(i)
+showAzanPlayer(i)
 end
-
--- DUA PLAYER (Surah player jaisa poora screen: Prev/Rewind/Play-Pause/Forward/Next/Download/Back)
+end
+M.playDuaAtIndex = function(idx, refreshFn)
+local list = duaListOverride or audioDuasCache
+if idx < 1 or idx > #list then return end
+duaPlayerIndex = idx
+local d = list[idx]
+M.playReliable(d.audio, M.getDuaAudioLocal(d), d.title, refreshFn, function()
+if idx < #list then M.playDuaAtIndex(idx+1, refreshFn) elseif refreshFn then refreshFn() end
+end)
+end
 function showDuaPlayer(idx)
-  screen = "duaplayer"
-  local list = audioDuasCache
-  if idx < 1 or idx > #list then return end
-  duaPlayerIndex = idx
-  local d = list[idx]
-  local localPath = getDuaAudioLocal(d)
-  local isDownloaded = File(localPath).exists()
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
-    {TextView, text=(isDownloaded and "Offline Mode" or "Online Stream") .. " - " .. idx .. "/" .. #list, textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text=d.title, textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="8dp", textColor=appColorStr, gravity="center", contentDescription=d.title},
-    {TextView, text=(d.ar and d.ar ~= "" and d.ar or ""), textSize="18sp", layout_marginBottom="6dp", textColor=appColorStr, gravity="center"},
-    {TextView, text=d.ur or "", textSize="15sp", layout_marginBottom="8dp", textColor=textColor, gravity="center"},
-    {TextView, text=d.en or "", textSize="14sp", layout_marginBottom="8dp", textColor=textColor, gravity="center", contentDescription="English dua meaning or audio description"},
-    {TextView, text=d.en or "", textSize="14sp", layout_marginBottom="8dp", textColor=textColor, gravity="center", contentDescription="English meaning or audio description"},
-    {TextView, text=(d.tip and d.tip ~= "" and ("💡 " .. d.tip) or (d.cat and ("Category: " .. d.cat) or "")), textSize="12sp", textColor="#777777", layout_marginBottom="12dp", gravity="center"},
-
-    {SeekBar, id="skBar", layout_width=-1, layout_marginBottom="8dp"},
-    -- NAYA (v2.5): Dua player bhi Quran player jaisa - Speed control
-    {LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, layout_marginBottom="10dp",
-      {TextView, text="Speed:", textSize="13sp", textColor=textColor, layout_marginRight="8dp"},
-      {Spinner, id="duaSpeedSpinner", layout_width=0, layout_weight=1}
-    },
-    {LinearLayout, orientation=0, gravity="center", layout_width=-1,
-      {Button, text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous", onClick=function() if duaPlayerIndex>1 then showDuaPlayer(duaPlayerIndex-1) end end},
-      {Button, text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp", contentDescription="Rewind", onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()-(seekSeconds*1000) if n<0 then n=0 end duaMp.seekTo(n) end) end end},
-      {Button, id="btnDuaPlayPause", text="⏸ " .. tr("Pause"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", contentDescription="Play or Pause", onClick=function()
-        if duaMp then pcall(function() if duaMp.isPlaying() then duaMp.pause() btnDuaPlayPause.setText("▶ " .. tr("Play")) else duaMp.start() btnDuaPlayPause.setText("⏸ " .. tr("Pause")) end end) end
-      end},
-      {Button, text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp", contentDescription="Fast Forward", onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()+(seekSeconds*1000) duaMp.seekTo(n) end) end end},
-      {Button, text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp", contentDescription="Next", onClick=function() if duaPlayerIndex<#list then showDuaPlayer(duaPlayerIndex+1) end end}
-    },
-    {Button, id="btnDuaDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1, contentDescription=isDownloaded and "Delete Offline Copy" or "Download"},
-    {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text=tr("Back"), layout_weight=1, layout_marginRight="10dp", contentDescription="Back to duas list", onClick=function() safeRun("showDailyDuas", showDailyDuas) end},
-      {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  do
-    local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"}
-    local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
-    local speedIndex = 1
-    for i,v in ipairs(speedValues) do if math.abs(v - PS.speed) < 0.01 then speedIndex = i - 1 break end end
-    duaSpeedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels))
-    duaSpeedSpinner.setSelection(speedIndex)
-    duaSpeedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
-      savePlaybackSpeed(speedValues[pos+1])
-      if duaMp then applyPlaybackSpeed(duaMp) end
-    end})
-  end
-
-  btnDuaDownload.onClick = function()
-    if File(localPath).exists() then
-      confirmDelete(localPath, function() showDuaPlayer(duaPlayerIndex) end)
-    else
-      -- FIX: pehle pcall ka result check hi nahi hota tha, is liye agar
-      -- DownloadManager fail hota (VISIBILITY_HIDDEN wala wahi SecurityException
-      -- jo Surah download mein tha - yahan bhi tha), to error chup-chaap
-      -- nikal jata tha aur "Download shuru..." Toast phir bhi dikh jata
-      -- tha, phir 60 second tak kuch na hone par "hang" jaisa lagta tha.
-      local ok, err = pcall(function()
-        local req = DownloadManager.Request(Uri.parse(d.audio))
-        req.setTitle(d.title)
-        req.setDescription("Downloading dua audio...")
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationUri(Uri.fromFile(File(localPath)))
-        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-      end)
-      if not ok then
-        showErrorDialog("Dua Download Error", err)
-        return
-      end
-      -- v2.7-fix2: yahan pehle ek 60-second Thread.sleep poll loop tha jo
-      -- download mukammal hone ka intezar karta rehta tha - wahi resource load
-      -- phone ko hang kar deta tha. Ab koi poll loop nahi: download chalta
-      -- rahega, aap khud Play dabayein (offline file milte hi apne aap use
-      -- ho jati hai kyunke playReliable pehle cache file check karta hai).
-      Toast.makeText(activity, "Download shuru - kuch dair baad Play dabayein (offline chalega).", 1).show()
-    end
-  end
-
-  playReliable(d.audio, localPath, d.title, nil, function()
-    if btnDuaPlayPause then btnDuaPlayPause.setText("▶ " .. tr("Play")) end
-    if duaPlayerIndex < #list then showDuaPlayer(duaPlayerIndex+1) end
-  end, d.startAt, d.endAt)
-  updateTask = Runnable({run = function()
-    if duaMp then pcall(function() if duaMp.isPlaying() then skBar.setMax(duaMp.getDuration()) skBar.setProgress(duaMp.getCurrentPosition()) end end) end
-    handler.postDelayed(updateTask, 1000)
-  end})
-  handler.post(updateTask)
-  skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+screen = "duaplayer"
+local list = duaListOverride or audioDuasCache
+if idx < 1 or idx > #list then return end
+duaPlayerIndex = idx
+local d = list[idx]
+local localPath = M.getDuaAudioLocal(d)
+local isDownloaded = File(localPath).exists()
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
+{TextView, text=(isDownloaded and "Offline Mode" or "Online Stream") .. " - " .. idx .. "/" .. #list, textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
+{TextView, text=d.title, textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="8dp", textColor=appColorStr, gravity="center", contentDescription=d.title},
+{TextView, text=(d.ar and d.ar ~= "" and d.ar or ""), textSize="18sp", layout_marginBottom="6dp", textColor=appColorStr, gravity="center"},
+{TextView, text=d.ur or "", textSize="15sp", layout_marginBottom="8dp", textColor=textColor, gravity="center"},
+{TextView, text=d.en or "", textSize="14sp", layout_marginBottom="8dp", textColor=textColor, gravity="center", contentDescription="English dua meaning or audio description"},
+{TextView, text=d.en or "", textSize="14sp", layout_marginBottom="8dp", textColor=textColor, gravity="center", contentDescription="English meaning or audio description"},
+{TextView, text=(d.tip and d.tip ~= "" and ("💡 " .. d.tip) or (d.cat and ("Category: " .. d.cat) or "")), textSize="12sp", textColor="#777777", layout_marginBottom="12dp", gravity="center"},
+{SeekBar, id="skBar", layout_width=-1, layout_marginBottom="8dp"},
+{LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, layout_marginBottom="10dp",
+{TextView, text="Speed:", textSize="13sp", textColor=textColor, layout_marginRight="8dp"},
+{Spinner, id="duaSpeedSpinner", layout_width=0, layout_weight=1}
+},
+{LinearLayout, orientation=0, gravity="center", layout_width=-1,
+{Button, text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous", onClick=function() if duaPlayerIndex>1 then showDuaPlayer(duaPlayerIndex-1) end end},
+{Button, text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp", contentDescription="Rewind", onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()-(seekSeconds*1000) if n<0 then n=0 end duaMp.seekTo(n) end) end end},
+{Button, id="btnDuaPlayPause", text="⏸ " .. tr("Pause"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", contentDescription="Play or Pause", onClick=function()
+safeRun("toggleDuaPlayPause", function()
+local now = os.time()
+if now - (PS.duaLastToggle or 0) < 1 then return end
+PS.duaLastToggle = now
+local playing = false
+pcall(function() if duaMp then playing = duaMp.isPlaying() end end)
+if playing then
+PS.duaWanted = false PS.duaState = "paused"
+PS.duaGen = (PS.duaGen or 0) + 1
+pcall(function() duaMp.pause() end)
+pcall(function() duaMp.setWakeMode(activity, 0) end)
+if V25.clipTask then pcall(function() handler.removeCallbacks(V25.clipTask) end) end
+if btnDuaPlayPause then btnDuaPlayPause.setText("▶ " .. tr("Play")) end
+elseif PS.duaWanted == true and duaMp ~= nil then
+PS.duaWanted = false PS.duaState = "idle"
+PS.duaGen = (PS.duaGen or 0) + 1
+pcall(function() duaMp.reset() duaMp.release() end) duaMp = nil
+if btnDuaPlayPause then btnDuaPlayPause.setText("▶ " .. tr("Play")) end
+Toast.makeText(activity, "Streaming cancel ho gayi.", 0).show()
+elseif PS.duaState == "paused" and duaMp ~= nil then
+PS.duaWanted = true PS.duaState = "playing"
+pcall(function() duaMp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
+pcall(function() duaMp.start() end)
+if btnDuaPlayPause then btnDuaPlayPause.setText("⏸ " .. tr("Pause")) end
+else
+PS.duaWanted = true PS.duaState = "loading"
+if btnDuaPlayPause then btnDuaPlayPause.setText("⏸ " .. tr("Pause")) end
+M.playReliable(d.audio, localPath, d.title, nil, function()
+if btnDuaPlayPause then btnDuaPlayPause.setText("▶ " .. tr("Play")) end
+if duaPlayerIndex < #list then showDuaPlayer(duaPlayerIndex+1) end
+end, d.startAt, d.endAt)
 end
-
+end)
+end},
+{Button, text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp", contentDescription="Fast Forward", onClick=function() if duaMp then pcall(function() local n=duaMp.getCurrentPosition()+(seekSeconds*1000) duaMp.seekTo(n) end) end end},
+{Button, text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp", contentDescription="Next", onClick=function() if duaPlayerIndex<#list then showDuaPlayer(duaPlayerIndex+1) end end}
+},
+{Button, id="btnDuaDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1, contentDescription=isDownloaded and "Delete Offline Copy" or "Download"},
+{LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
+{Button, text=tr("Back"), layout_weight=1, layout_marginRight="10dp", contentDescription="Back", onClick=function() safeRun("duaBack", (V25.duaBackFn or showDailyDuas)) end},
+{Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() safeRun("exitApp", function() M.stopPlayer(function() pcall(function() if duaMp then duaMp.stop() duaMp.release() end end) duaMp = nil activity.finish() end) end) end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+do
+local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"}
+local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
+local speedIndex = 1
+for i,v in ipairs(speedValues) do if math.abs(v - PS.speed) < 0.01 then speedIndex = i - 1 break end end
+duaSpeedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels))
+duaSpeedSpinner.setSelection(speedIndex)
+duaSpeedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
+savePlaybackSpeed(speedValues[pos+1])
+if duaMp then applyPlaybackSpeed(duaMp) end
+end})
+end
+btnDuaDownload.onClick = function()
+if File(localPath).exists() then
+confirmDelete(localPath, function() showDuaPlayer(duaPlayerIndex) end)
+else
+local ok, err = pcall(function()
+local req = DownloadManager.Request(Uri.parse(d.audio))
+req.setTitle(d.title)
+req.setDescription("Downloading dua audio...")
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+req.setDestinationUri(Uri.fromFile(File(localPath)))
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if not ok then
+showErrorDialog("Dua Download Error", err)
+return
+end
+Toast.makeText(activity, "Download shuru - kuch dair baad Play dabayein (offline chalega).", 1).show()
+end
+end
+M.playReliable(d.audio, localPath, d.title, nil, function()
+if btnDuaPlayPause then btnDuaPlayPause.setText("▶ " .. tr("Play")) end
+if duaPlayerIndex < #list then showDuaPlayer(duaPlayerIndex+1) end
+end, d.startAt, d.endAt)
+updateTask = Runnable({run = function()
+if duaMp then pcall(function() if duaMp.isPlaying() then skBar.setMax(duaMp.getDuration()) skBar.setProgress(duaMp.getCurrentPosition()) end end) end
+handler.postDelayed(updateTask, 1000)
+end})
+handler.post(updateTask)
+skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+end
 function showDailyDuas()
-  screen = "dailyduas"
-  stopPlayer()
-  local bgColor, textColor = getThemeColors()
-  local list = buildAudioDuasList()
-
-  local textDuas = {}
-  for _, d in ipairs(dailyDuas()) do if d.audio == "" then table.insert(textDuas, d) end end
-
-  -- ===== AUDIO DUAS rows (Quran Majeed ki surah-list jaisi - sirf tap karein), category-wise grouped =====
-  local audioRows = {}
-  table.insert(audioRows, {TextView, text="🔊 Audio Duas (" .. #list .. ") - tap any dua to open", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, textColor=-1, backgroundColor="#00897B", padding="8dp", contentDescription="Audio Duas category, " .. #list .. " duas. Tap a dua to open the full player"})
-  local audioCats = {} local audioCatItems = {}
-  for i, d in ipairs(list) do
-    if not audioCatItems[d.cat] then table.insert(audioCats, d.cat) audioCatItems[d.cat] = {} end
-    table.insert(audioCatItems[d.cat], i)
-  end
-  for _, cat in ipairs(audioCats) do
-    table.insert(audioRows, {TextView, text=cat .. " (" .. #audioCatItems[cat] .. ")", textSize="13sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="6dp", contentDescription=cat .. " category, " .. #audioCatItems[cat] .. " audio duas"})
-    for _, i in ipairs(audioCatItems[cat]) do
-      local d = list[i]
-      table.insert(audioRows, {
-        Button, text=d.title, textSize="13sp", layout_width=-1, gravity="left|center_vertical", padding="12dp", layout_marginBottom="2dp", backgroundColor="#12000000", textColor=textColor, contentDescription="Audio dua: " .. d.title .. ". Tap to open player", onClick=function() showDuaPlayer(i) end
-      })
-    end
-  end
-
-  -- ===== TEXT-ONLY DUAS rows (alag category, sirf text, audio nahi) =====
-  local textRows = {}
-  table.insert(textRows, {TextView, text="📝 Text Only Duas (" .. #textDuas .. ")", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, textColor=-1, backgroundColor="#607D8B", padding="8dp", layout_marginTop="10dp", contentDescription="Text only duas category, " .. #textDuas .. " duas, no audio available"})
-  local cats = {} local catItems = {}
-  for _, d in ipairs(textDuas) do
-    if not catItems[d.cat] then table.insert(cats, d.cat) catItems[d.cat] = {} end
-    table.insert(catItems[d.cat], d)
-  end
-  for _, cat in ipairs(cats) do
-    table.insert(textRows, {TextView, text=cat, textSize="13sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="6dp", contentDescription=cat .. " category"})
-    for _, d in ipairs(catItems[cat]) do
-      table.insert(textRows, {
-        LinearLayout, orientation=1, layout_width=-1, padding="12dp", layout_marginBottom="2dp", backgroundColor="#12000000",
-        {TextView, text=d.title, textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, contentDescription="Text dua: " .. d.title .. ", no audio available"},
-        {TextView, text=d.ar, textSize="18sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="right", layout_marginTop="4dp"},
-        {TextView, text=d.ur, textSize="14sp", textColor=textColor, gravity="right", layout_marginTop="2dp"},
-        {TextView, text=d.en or "", textSize="14sp", textColor=textColor, gravity="left", layout_marginTop="5dp", contentDescription="English translation or description"},
-        {TextView, text="💡 " .. d.tip, textSize="11sp", textColor="#777777", layout_marginTop="4dp"},
-        (d.link and d.link ~= "" and {Button, text="▶️ Online sunnein (source page)", textSize="12sp", layout_width=-1, layout_marginTop="6dp", backgroundColor="#00897B", textColor=-1, contentDescription="Online audio source page for " .. d.title, onClick=function() safeRun("Dua source page", openLinkAndClose, d.link) end} or {TextView, text="", textSize="1sp"})
-      })
-    end
-  end
-
-  local content = {LinearLayout, orientation=1, layout_width=-1, layout_height=-2}
-  for _, r in ipairs(audioRows) do table.insert(content, r) end
-  for _, r in ipairs(textRows) do table.insert(content, r) end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showHome", showHome) end},
-      {TextView, text=tr("Daily Masnoon Duas"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {LinearLayout, orientation=0, layout_width=-1, padding="8dp",
-      {Button, text="▶️ Full Audio (Vol 1: Hisnul Muslim CD1)", textSize="11sp", layout_weight=1, layout_marginRight="4dp", backgroundColor="#00897B", textColor=-1, contentDescription="Play full Hisnul Muslim recording, volume 1", onClick=function()
-        playReliable("https://archive.org/download/HisnulMuslimAudio/CD%201.mp3", duaAudioDir .. "hisnul_muslim_vol1.mp3", "Hisnul Muslim Vol 1", nil, nil)
-      end},
-      {Button, text="▶️ Full Audio (Vol 2: Hisnul Muslim CD2)", textSize="11sp", layout_weight=1, backgroundColor="#00897B", textColor=-1, contentDescription="Play full Hisnul Muslim recording, volume 2", onClick=function()
-        playReliable("https://archive.org/download/HisnulMuslimAudio/CD%202.mp3", duaAudioDir .. "hisnul_muslim_vol2.mp3", "Hisnul Muslim Vol 2", nil, nil)
-      end}
-    },
-    {TextView, text="⚠️ Vol 1/Vol 2 mein KAUN SI dua kis waqt aati hai iski official track-list kahin published nahi hai (yeh sirf 2 lambi recordings hain, alag-alag tracks nahi) - is liye neeche 'Audio Duas' list mein har dua alag se individually verified hai, wahi use karein agar specific dua sunni ho.", textSize="10sp", textColor="#C62828", padding="8dp"},
-    {ScrollView, layout_width=-1, layout_height=0, layout_weight=1, content},
-    bottomTabs("duas")
-  })
-  applyWallpaper(mainLayout, bgColor)
+screen = "dailyduas"
+M.stopPlayer()
+duaListOverride = nil
+V25.duaBackFn = nil
+local bgColor, textColor = M.getThemeColors()
+local list = M.buildAudioDuasList()
+local textDuas = {}
+for _, d in ipairs(dailyDuas()) do if d.audio == "" then table.insert(textDuas, d) end end
+local audioRows = {}
+table.insert(audioRows, {TextView, text="🔊 Audio Duas (" .. #list .. ") - tap any dua to open", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, textColor=-1, backgroundColor="#00897B", padding="8dp", contentDescription="Audio Duas category, " .. #list .. " duas. Tap a dua to open the full player"})
+local audioCats = {} local audioCatItems = {}
+for i, d in ipairs(list) do
+if not audioCatItems[d.cat] then table.insert(audioCats, d.cat) audioCatItems[d.cat] = {} end
+table.insert(audioCatItems[d.cat], i)
 end
-
---------------------------------------------------
--- NAYA (v2.7-fix): 6 Kalme / Iman-e-Mufassal / Iman-e-Mujmal / Namaz ka Sabaq /
--- Namaz-e-Janaza. FIX: pehle ye screen ScrollView ke andar Button rows par
--- bani thi - kuch devices/accessibility setups par woh click nahi leti thi
--- aur error de deti thi. Ab bilkul wahi ListView + onItemClick pattern use
--- hua hai jo Poora Quran / Para list / Search results mein pehle se theek
--- chal raha hai. Poori screen aur har click safeRun ke andar hai.
---------------------------------------------------
+for _, cat in ipairs(audioCats) do
+table.insert(audioRows, {TextView, text=cat .. " (" .. #audioCatItems[cat] .. ")", textSize="13sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="6dp", contentDescription=cat .. " category, " .. #audioCatItems[cat] .. " audio duas"})
+for _, i in ipairs(audioCatItems[cat]) do
+local d = list[i]
+table.insert(audioRows, {
+Button, text=d.title, textSize="13sp", layout_width=-1, gravity="left|center_vertical", padding="12dp", layout_marginBottom="2dp", backgroundColor="#12000000", textColor=textColor, contentDescription="Audio dua: " .. d.title .. ". Tap to open player", onClick=function() showDuaPlayer(i) end
+})
+end
+end
+local textRows = {}
+table.insert(textRows, {TextView, text="📝 Text Only Duas (" .. #textDuas .. ")", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, textColor=-1, backgroundColor="#607D8B", padding="8dp", layout_marginTop="10dp", contentDescription="Text only duas category, " .. #textDuas .. " duas, no audio available"})
+local cats = {} local catItems = {}
+for _, d in ipairs(textDuas) do
+if not catItems[d.cat] then table.insert(cats, d.cat) catItems[d.cat] = {} end
+table.insert(catItems[d.cat], d)
+end
+for _, cat in ipairs(cats) do
+table.insert(textRows, {TextView, text=cat, textSize="13sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="6dp", contentDescription=cat .. " category"})
+for _, d in ipairs(catItems[cat]) do
+table.insert(textRows, {
+LinearLayout, orientation=1, layout_width=-1, padding="12dp", layout_marginBottom="2dp", backgroundColor="#12000000",
+{TextView, text=d.title, textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, contentDescription="Text dua: " .. d.title .. ", no audio available"},
+{TextView, text=d.ar, textSize="18sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, gravity="right", layout_marginTop="4dp"},
+{TextView, text=d.ur, textSize="14sp", textColor=textColor, gravity="right", layout_marginTop="2dp"},
+{TextView, text=d.en or "", textSize="14sp", textColor=textColor, gravity="left", layout_marginTop="5dp", contentDescription="English translation or description"},
+{TextView, text="💡 " .. d.tip, textSize="11sp", textColor="#777777", layout_marginTop="4dp"},
+(d.link and d.link ~= "" and {Button, text="▶️ Online sunnein (source page)", textSize="12sp", layout_width=-1, layout_marginTop="6dp", backgroundColor="#00897B", textColor=-1, contentDescription="Online audio source page for " .. d.title, onClick=function() safeRun("Dua source page", M.openLinkAndClose, d.link) end} or {TextView, text="", textSize="1sp"})
+})
+end
+end
+local content = {LinearLayout, orientation=1, layout_width=-1, layout_height=-2}
+for _, r in ipairs(audioRows) do table.insert(content, r) end
+for _, r in ipairs(textRows) do table.insert(content, r) end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showHome", showHome) end},
+{TextView, text=tr("Daily Masnoon Duas"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{LinearLayout, orientation=0, layout_width=-1, padding="8dp",
+{Button, text="▶️ Full Audio (Vol 1: Hisnul Muslim CD1)", textSize="11sp", layout_weight=1, layout_marginRight="4dp", backgroundColor="#00897B", textColor=-1, contentDescription="Play full Hisnul Muslim recording, volume 1", onClick=function()
+M.playReliable("https://archive.org/download/HisnulMuslimAudio/CD%201.mp3", duaAudioDir .. "hisnul_muslim_vol1.mp3", "Hisnul Muslim Vol 1", nil, nil)
+end},
+{Button, text="▶️ Full Audio (Vol 2: Hisnul Muslim CD2)", textSize="11sp", layout_weight=1, backgroundColor="#00897B", textColor=-1, contentDescription="Play full Hisnul Muslim recording, volume 2", onClick=function()
+M.playReliable("https://archive.org/download/HisnulMuslimAudio/CD%202.mp3", duaAudioDir .. "hisnul_muslim_vol2.mp3", "Hisnul Muslim Vol 2", nil, nil)
+end}
+},
+{TextView, text="⚠️ Vol 1/Vol 2 mein KAUN SI dua kis waqt aati hai iski official track-list kahin published nahi hai (yeh sirf 2 lambi recordings hain, alag-alag tracks nahi) - is liye neeche 'Audio Duas' list mein har dua alag se individually verified hai, wahi use karein agar specific dua sunni ho.", textSize="10sp", textColor="#C62828", padding="8dp"},
+{ScrollView, layout_width=-1, layout_height=0, layout_weight=1, content},
+M.bottomTabs("duas")
+})
+M.applyWallpaper(mainLayout, bgColor)
+end
 function V25.kalimaHasAudio(d) return (d ~= nil and d.audio ~= nil and tostring(d.audio) ~= "") end
-
 function V25.kalimaItems()
-  local out = {}
-  local ok, err = pcall(function()
-    for _, d in ipairs(dailyDuas()) do
-      if tostring(d.cat or "") == "6 Kalme / Iman / Namaz" then table.insert(out, d) end
-    end
-  end)
-  if not ok then showErrorDialog("6 Kalme list", err) end
-  return out
+local out = {}
+local ok, err = pcall(function()
+for _, d in ipairs(dailyDuas()) do
+if tostring(d.cat or "") == "6 Kalme / Iman / Namaz" then table.insert(out, d) end
 end
-
--- v2.7-fix2: har item ke apne naqsh-daar naam (parts) - sab alag alag play
--- hote hain, ek hi lambi recording ke andar chhupe nahi rehte.
+end)
+if not ok then showErrorDialog("6 Kalme list", err) end
+return out
+end
 function V25.kalimaPartTitle(d)
-  if not d then return "" end
-  local t = tostring(d.title)
-  if d.startAt and d.startAt > 0 then
-    return t .. "   [clip " .. math.floor(d.startAt/60) .. "m se]"
-  end
-  return t
+if not d then return "" end
+local t = tostring(d.title)
+if d.startAt and d.startAt > 0 then
+return t .. "   [clip " .. math.floor(d.startAt/60) .. "m se]"
 end
-
+return t
+end
 function V25.openKalimaItem(d)
-  if not d then return end
-  if V25.kalimaHasAudio(d) then
-    buildAudioDuasList()
-    for ai, ad in ipairs(audioDuasCache) do
-      if ad == d then showDuaPlayer(ai) return end
-    end
-    playReliable(d.audio, getDuaAudioLocal(d), tostring(d.title), nil, nil, d.startAt, d.endAt)
-    return
-  end
-  local body = ""
-  if d.ar and d.ar ~= "" then body = body .. d.ar .. "\n\n" end
-  if d.ur and d.ur ~= "" then body = body .. d.ur .. "\n\n" end
-  if d.en and d.en ~= "" then body = body .. d.en end
-  if d.tip and d.tip ~= "" then body = body .. "\n\n" .. d.tip end
-  local bld = AlertDialog.Builder(activity).setTitle(tostring(d.title)).setMessage(body)
-  if d.link and d.link ~= "" then
-    bld.setNeutralButton("Online sunnein", {onClick=function() safeRun("Open source page", openLinkAndClose, d.link) end})
-  end
-  bld.setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(body) end})
-  bld.setNegativeButton("Cancel", nil)
-  bld.show()
+if not d then return end
+if V25.kalimaHasAudio(d) then
+M.buildAudioDuasList()
+for ai, ad in ipairs(audioDuasCache) do
+if ad == d then showDuaPlayer(ai) return end
 end
-
+M.playReliable(d.audio, M.getDuaAudioLocal(d), tostring(d.title), nil, nil, d.startAt, d.endAt)
+return
+end
+local body = ""
+if d.ar and d.ar ~= "" then body = body .. d.ar .. "\n\n" end
+if d.ur and d.ur ~= "" then body = body .. d.ur .. "\n\n" end
+if d.en and d.en ~= "" then body = body .. d.en end
+if d.tip and d.tip ~= "" then body = body .. "\n\n" .. d.tip end
+local bld = AlertDialog.Builder(activity).setTitle(tostring(d.title)).setMessage(body)
+if d.link and d.link ~= "" then
+bld.setNeutralButton("Online sunnein", {onClick=function() safeRun("Open source page", M.openLinkAndClose, d.link) end})
+end
+bld.setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(body) end})
+bld.setNegativeButton("Cancel", nil)
+bld.show()
+end
 function showKalimaImanScreen()
-  screen = "kalima"
-  safeRun("Stop previous player", stopPlayer)
-  local bgColor, textColor = getThemeColors()
-  local items = V25.kalimaItems()
-  local labels = {}
-  for _, d in ipairs(items) do
-    if V25.kalimaHasAudio(d) then
-      local tag = "   (online stream"
-      if d.startAt and d.startAt > 0 then tag = tag .. " - alag clip" end
-      table.insert(labels, "🔊 " .. tostring(d.title) .. tag .. ")")
-    else
-      table.insert(labels, "📝 " .. tostring(d.title) .. "   (text + online link)")
-    end
-  end
-  if #labels == 0 then table.insert(labels, "Koi item nahi mila - app dobara kholein") end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), contentDescription="Back to More menu", onClick=function() safeRun("Back to More", showMore) end},
-      {TextView, text="6 Kalme / Iman / Namaz", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, text="🔊 wale items Quran jaisa player kholte hain (online + download + offline). 📝 wale items ka verified direct MP3 nahi mila, is liye unka mukammal text + online source link diya gaya hai.", textSize="11sp", textColor="#777777", padding="8dp"},
-    {TextView, text="Neeche list mein se koi bhi item tap karein:", textSize="12sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="8dp"},
-    {ListView, id="kalimaList", layout_width=-1, layout_height=-1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-  kalimaList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
-  kalimaList.onItemClick = function(l, v, p, i)
-    local d = items[i+1]
-    safeRun("6 Kalme item: " .. tostring(labels[i+1]), V25.openKalimaItem, d)
-  end
+screen = "kalima"
+safeRun("Stop previous player", M.stopPlayer)
+local bgColor, textColor = M.getThemeColors()
+local items = V25.kalimaItems()
+local labels = {}
+for _, d in ipairs(items) do
+if V25.kalimaHasAudio(d) then
+local tag = "   (online stream"
+if d.startAt and d.startAt > 0 then tag = tag .. " - alag clip" end
+table.insert(labels, "🔊 " .. tostring(d.title) .. tag .. ")")
+else
+table.insert(labels, "📝 " .. tostring(d.title) .. "   (text + online link)")
 end
-
--- 30 PARA SCREEN
+end
+if #labels == 0 then table.insert(labels, "Koi item nahi mila - app dobara kholein") end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), contentDescription="Back to More menu", onClick=function() safeRun("Back to More", showMore) end},
+{TextView, text="6 Kalme / Iman / Namaz", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="🔊 wale items Quran jaisa player kholte hain (online + download + offline). 📝 wale items ka verified direct MP3 nahi mila, is liye unka mukammal text + online source link diya gaya hai.", textSize="11sp", textColor="#777777", padding="8dp"},
+{TextView, text="Neeche list mein se koi bhi item tap karein:", textSize="12sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="8dp"},
+{ListView, id="kalimaList", layout_width=-1, layout_height=-1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+kalimaList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
+kalimaList.onItemClick = function(l, v, p, i)
+local d = items[i+1]
+safeRun("6 Kalme item: " .. tostring(labels[i+1]), V25.openKalimaItem, d)
+end
+end
 function showPara()
-  screen = "para"
-  stopPlayer()
-  local bgColor, textColor = getThemeColors()
-  local items = {}
-  for i, n in ipairs(paraNames) do table.insert(items, n) end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#2E7D32", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), backgroundColor="#1B5E20", textColor=-1, onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="30 Para (Juz-wise)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, text="Har Para tap karein - us Juz ki Surahon ki list khulegi (play/download).", textSize="11sp", padding="8dp", textColor=textColor},
-    {ListView, id="paraList", layout_width=-1, layout_height=-1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-  paraList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, items))
-  paraList.onItemClick = function(l, v, p, i) showParaSurahs(i+1) end
+screen = "para"
+M.stopPlayer()
+local bgColor, textColor = M.getThemeColors()
+local items = {}
+for i, n in ipairs(paraNames) do table.insert(items, n) end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#2E7D32", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), backgroundColor="#1B5E20", textColor=-1, onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="30 Para (Juz-wise)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="Har Para tap karein - us Juz ki Surahon ki list khulegi (play/download).", textSize="11sp", padding="8dp", textColor=textColor},
+{ListView, id="paraList", layout_width=-1, layout_height=-1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+paraList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, items))
+paraList.onItemClick = function(l, v, p, i) showParaSurahs(i+1) end
 end
-
 function showParaSurahs(paraNum)
-  screen = "parasurahs"
-  local bgColor, textColor = getThemeColors()
-  local startS = paraSurahStart[paraNum]
-  local endS = (paraNum < 30) and paraSurahStart[paraNum+1] or 114
-  local list = {}
-  for s = startS, endS do table.insert(list, s) end
-  if #list == 0 then list = {startS} end
-
-  -- FIX (v2.1): pehle sirf Surah ka naam dikhta tha - agar ek lambi Surah
-  -- (jaise Al-Baqarah) do/teen Paron mein bikhri ho, to wahi naam alag
-  -- Paron mein baar baar, bina kisi Ayat-range ke, dikhta tha - is se log
-  -- confuse hote thay (lagta tha ghalti hai). Ab har entry ke sath sahi
-  -- "Ayat X-Y" range dikhta hai jab wo Para us Surah ka sirf HISSA cover
-  -- karta hai, aur tap karne par seedha usi Ayat se shuru hota hai.
-  local nextParaFirstSurah = (paraNum < 30) and paraSurahStart[paraNum+1] or 115
-  local nextParaFirstAyah = (paraNum < 30) and (paraFirstAyah[paraNum+1] or 1) or 1
-  local startAyahs = {}
-  local endAyahs = {}
-  local names = {}
-  for idx, s in ipairs(list) do
-    local sAyah = (idx == 1) and (paraFirstAyah[paraNum] or 1) or 1
-    local eAyah
-    if idx == #list and s == nextParaFirstSurah then
-      eAyah = nextParaFirstAyah - 1
-    else
-      eAyah = surahAyahCounts[s] or 1
-    end
-    startAyahs[idx] = sAyah
-    endAyahs[idx] = eAyah
-    if sAyah == 1 and eAyah == (surahAyahCounts[s] or 1) then
-      table.insert(names, surahNames[s])
-    else
-      table.insert(names, surahNames[s] .. " (Ayat " .. sAyah .. "-" .. eAyah .. ")")
-    end
-  end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#2E7D32", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), backgroundColor="#1B5E20", textColor=-1, onClick=function() safeRun("showPara", showPara) end},
-      {TextView, text="Para " .. paraNum, textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {ListView, id="psList", layout_width=-1, layout_height=-1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-  psList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
-  psList.onItemClick = function(l, v, p, i)
-    local idx = i + 1
-    if startAyahs[idx] > 1 then
-      showAyahByAyah(list[idx], startAyahs[idx])
-    else
-      showPlayer(list[idx])
-    end
-  end
+screen = "parasurahs"
+local bgColor, textColor = M.getThemeColors()
+local startS = paraSurahStart[paraNum]
+local endS = (paraNum < 30) and paraSurahStart[paraNum+1] or 114
+local list = {}
+for s = startS, endS do table.insert(list, s) end
+if #list == 0 then list = {startS} end
+local nextParaFirstSurah = (paraNum < 30) and paraSurahStart[paraNum+1] or 115
+local nextParaFirstAyah = (paraNum < 30) and (paraFirstAyah[paraNum+1] or 1) or 1
+local startAyahs = {}
+local endAyahs = {}
+local names = {}
+for idx, s in ipairs(list) do
+local sAyah = (idx == 1) and (paraFirstAyah[paraNum] or 1) or 1
+local eAyah
+if idx == #list and s == nextParaFirstSurah then
+eAyah = nextParaFirstAyah - 1
+else
+eAyah = surahAyahCounts[s] or 1
 end
-
--- 99 NAMES OF ALLAH
+startAyahs[idx] = sAyah
+endAyahs[idx] = eAyah
+if sAyah == 1 and eAyah == (surahAyahCounts[s] or 1) then
+table.insert(names, surahNames[s])
+else
+table.insert(names, surahNames[s] .. " (Ayat " .. sAyah .. "-" .. eAyah .. ")")
+end
+end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#2E7D32", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), backgroundColor="#1B5E20", textColor=-1, onClick=function() safeRun("showPara", showPara) end},
+{TextView, text="Para " .. paraNum, textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{ListView, id="psList", layout_width=-1, layout_height=-1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+psList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
+psList.onItemClick = function(l, v, p, i)
+local idx = i + 1
+if startAyahs[idx] > 1 then
+showAyahByAyah(list[idx], startAyahs[idx])
+else
+showPlayer(list[idx])
+end
+end
+end
 function showNamesOfAllah()
-  screen = "names"
-  local bgColor, textColor = getThemeColors()
-
-  local listLayout = {LinearLayout, orientation=1, layout_width=-1, layout_height=-2, padding="15dp"}
-
-  for i, name in ipairs(asmaUlHusna) do
-    table.insert(listLayout, {
-      LinearLayout, orientation=1, layout_width=-1, layout_marginBottom="15dp", padding="15dp", backgroundColor="#1A000000",
-      {TextView, text=tostring(i) .. ". " .. name.ar, textSize="28sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="right"},
-      {TextView, text=name.ro, textSize="18sp", textColor=textColor, gravity="center_horizontal", layout_marginTop="5dp"},
-      {TextView, text=name.ur, textSize="16sp", textColor=textColor, gravity="right", layout_marginTop="5dp"}
-    })
-  end
-
-  local namesAudioUrls = {
-    "https://archive.org/download/99-names-of-allah-asma-ul-husna/99%20names%20of%20Allah%20%20Asma%20Ul%20husna.mp3",
-    "https://archive.org/download/AsmaulHusnaMP3/Asmaul%20Husna%20dan%20Artinya%20Asmaul%20Husna%20Mp3%20Asmaul%20Husna%20Beserta%20Artinya%2099%20Asmaul%20Husna%20Asma%20Ul%20Husna%2099%20Nama%20Allah%20TVRI%20Nasional%20Asma%20Ul%20Husna%20TV3%20Dzikir%20Ary%20Ginanjar%20Agustian%20Names%20of%20Allah%20sifat-sifat%20Allah%20pengertian%20asmaul%20husna.mp3",
-    "https://archive.org/download/asma-ul-husna-99-names-of-allah/Asma_ul_Husna.mp3"
-  }
-  local namesLocalPath = duaAudioDir .. "asma_ul_husna_full.mp3"
-  local namesDownloaded = File(namesLocalPath).exists()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text=tr("99 Names of Allah"), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {LinearLayout, orientation=0, layout_width=-1, layout_margin="10dp",
-      -- FIX: pehle yeh sirf ek "Play" button tha, dobara click karne par
-      -- audio hamesha shuru se dobara chalti thi (Pause kabhi hota hi
-      -- nahi tha). Ab showDuaPlayer jaisa hi asal Play/Pause toggle hai.
-      {Button, id="btnNamesPlayPause", text="▶️ Play Full Audio", textSize="13sp", layout_weight=1, layout_marginRight="4dp", backgroundColor="#8E24AA", textColor=-1},
-      -- NAYA: ab offline ke liye download bhi ho sakta hai
-      {Button, id="btnNamesDownload", text=namesDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="13sp", layout_weight=1, backgroundColor=namesDownloaded and "#C62828" or "#1976D2", textColor=-1}
-    },
-    {ScrollView, layout_width=-1, layout_height=-1,
-      listLayout
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  btnNamesPlayPause.onClick = function()
-    if duaMp then
-      pcall(function()
-        if duaMp.isPlaying() then
-          duaMp.pause()
-          btnNamesPlayPause.setText("▶️ Play Full Audio")
-        else
-          duaMp.start()
-          btnNamesPlayPause.setText("⏸ Pause")
-        end
-      end)
-    else
-      pcall(function() btnNamesPlayPause.setText("⏸ Pause") end)
-      playReliable(namesAudioUrls, namesLocalPath, "99 Names of Allah - Full Audio", nil, function()
-        pcall(function() btnNamesPlayPause.setText("▶️ Play Full Audio") end)
-      end)
-    end
-  end
-
-  btnNamesDownload.onClick = function()
-    if File(namesLocalPath).exists() then
-      confirmDelete(namesLocalPath, function() showNamesOfAllah() end)
-    else
-      local ok, err = pcall(function()
-        local req = DownloadManager.Request(Uri.parse(namesAudioUrls[1]))
-        req.setTitle("99 Names of Allah - Full Audio")
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationUri(Uri.fromFile(File(namesLocalPath)))
-        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-      end)
-      if ok then
-        Toast.makeText(activity, "Download shuru ho gaya... khatam hote hi is screen par wapis aakar offline sunein.", 1).show()
-      else
-        showErrorDialog("99 Names Download Error", err)
-      end
-    end
-  end
+screen = "names"
+local bgColor, textColor = M.getThemeColors()
+local listLayout = {LinearLayout, orientation=1, layout_width=-1, layout_height=-2, padding="15dp"}
+for i, name in ipairs(asmaUlHusna) do
+table.insert(listLayout, {
+LinearLayout, orientation=1, layout_width=-1, layout_marginBottom="15dp", padding="15dp", backgroundColor="#1A000000",
+{TextView, text=tostring(i) .. ". " .. name.ar, textSize="28sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="right"},
+{TextView, text=name.ro, textSize="18sp", textColor=textColor, gravity="center_horizontal", layout_marginTop="5dp"},
+{TextView, text=name.ur, textSize="16sp", textColor=textColor, gravity="right", layout_marginTop="5dp"}
+})
 end
-
--- BLESSED NAMES OF PROPHET MUHAMMAD (PEACE BE UPON HIM)
+local namesAudioUrls = { "https://archive.org/download/99-names-of-allah-asma-ul-husna/99%20names%20of%20Allah%20%20Asma%20Ul%20husna.mp3", "https://archive.org/download/AsmaulHusnaMP3/Asmaul%20Husna%20dan%20Artinya%20Asmaul%20Husna%20Mp3%20Asmaul%20Husna%20Beserta%20Artinya%2099%20Asmaul%20Husna%20Asma%20Ul%20Husna%2099%20Nama%20Allah%20TVRI%20Nasional%20Asma%20Ul%20Husna%20TV3%20Dzikir%20Ary%20Ginanjar%20Agustian%20Names%20of%20Allah%20sifat-sifat%20Allah%20pengertian%20asmaul%20husna.mp3", "https://archive.org/download/asma-ul-husna-99-names-of-allah/Asma_ul_Husna.mp3" }
+local namesLocalPath = duaAudioDir .. "asma_ul_husna_full.mp3"
+local namesDownloaded = File(namesLocalPath).exists()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{TextView, text=tr("99 Names of Allah"), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{LinearLayout, orientation=0, layout_width=-1, layout_margin="10dp",
+{Button, id="btnNamesPlayPause", text="▶️ Play Full Audio", textSize="13sp", layout_weight=1, layout_marginRight="4dp", backgroundColor="#8E24AA", textColor=-1},
+{Button, id="btnNamesDownload", text=namesDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="13sp", layout_weight=1, backgroundColor=namesDownloaded and "#C62828" or "#1976D2", textColor=-1}
+},
+{ScrollView, layout_width=-1, layout_height=-1,
+listLayout
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+btnNamesPlayPause.onClick = function()
+if duaMp then
+pcall(function()
+if duaMp.isPlaying() then
+duaMp.pause()
+btnNamesPlayPause.setText("▶️ Play Full Audio")
+else
+duaMp.start()
+btnNamesPlayPause.setText("⏸ Pause")
+end
+end)
+else
+pcall(function() btnNamesPlayPause.setText("⏸ Pause") end)
+M.playReliable(namesAudioUrls, namesLocalPath, "99 Names of Allah - Full Audio", nil, function()
+pcall(function() btnNamesPlayPause.setText("▶️ Play Full Audio") end)
+end)
+end
+end
+btnNamesDownload.onClick = function()
+if File(namesLocalPath).exists() then
+confirmDelete(namesLocalPath, function() showNamesOfAllah() end)
+else
+local ok, err = pcall(function()
+local req = DownloadManager.Request(Uri.parse(namesAudioUrls[1]))
+req.setTitle("99 Names of Allah - Full Audio")
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+req.setDestinationUri(Uri.fromFile(File(namesLocalPath)))
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if ok then
+Toast.makeText(activity, "Download shuru ho gaya... khatam hote hi is screen par wapis aakar offline sunein.", 1).show()
+else
+showErrorDialog("99 Names Download Error", err)
+end
+end
+end
+end
 function showAsmaNabi()
-  screen = "asmanabi"
-  local bgColor, textColor = getThemeColors()
-
-  local listLayout2 = {LinearLayout, orientation=1, layout_width=-1, layout_height=-2, padding="15dp"}
-
-  for i, name in ipairs(asmaNabi) do
-    table.insert(listLayout2, {
-      LinearLayout, orientation=1, layout_width=-1, layout_marginBottom="15dp", padding="15dp", backgroundColor="#1A000000",
-      {TextView, text=tostring(i) .. ". " .. name.ar, textSize="28sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="right", contentDescription="Name number " .. i},
-      {TextView, text=name.ro, textSize="18sp", textColor=textColor, gravity="center_horizontal", layout_marginTop="5dp"},
-      {TextView, text=name.ur, textSize="16sp", textColor=textColor, gravity="right", layout_marginTop="5dp"}
-    })
-  end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="Blessed Names of Prophet Muhammad", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {ScrollView, layout_width=-1, layout_height=-1,
-      listLayout2
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
+screen = "asmanabi"
+local bgColor, textColor = M.getThemeColors()
+local listLayout2 = {LinearLayout, orientation=1, layout_width=-1, layout_height=-2, padding="15dp"}
+for i, name in ipairs(asmaNabi) do
+table.insert(listLayout2, {
+LinearLayout, orientation=1, layout_width=-1, layout_marginBottom="15dp", padding="15dp", backgroundColor="#1A000000",
+{TextView, text=tostring(i) .. ". " .. name.ar, textSize="28sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="right", contentDescription="Name number " .. i},
+{TextView, text=name.ro, textSize="18sp", textColor=textColor, gravity="center_horizontal", layout_marginTop="5dp"},
+{TextView, text=name.ur, textSize="16sp", textColor=textColor, gravity="right", layout_marginTop="5dp"}
+})
 end
-
--- MORE (hub screen for everything not in Home/Quran/Duas tabs)
--- PROGRESS TRACKER (jo Surah pura sun li, aur Ayat-ba-Ayat mein kahan tak
--- pahunche - qari sahab ke liye bachon ki progress dekhna asaan)
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), contentDescription="Back to More", onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="Blessed Names of Prophet Muhammad", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{ScrollView, layout_width=-1, layout_height=-1,
+listLayout2
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+end
 function showProgressTracker()
-  screen = "progresstracker"
-  local bgColor, textColor = getThemeColors()
-
-  local rows = {}
-  local completedCount = 0
-  for i, name in ipairs(surahNames) do
-    local status = "Not started"
-    local statusColor = "#999999"
-    if completedSurahs[i] then
-      status = "Completed (full Surah listened)"
-      statusColor = "#2E7D32"
-      completedCount = completedCount + 1
-    elseif lastAyahProgress[i] then
-      status = "In progress - Ayat " .. lastAyahProgress[i] .. " / " .. (surahAyahCounts[i] or "?")
-      statusColor = "#FF8F00"
-    elseif lastRukuProgress[i] then
-      status = "In progress - Ruku " .. lastRukuProgress[i]
-      statusColor = "#FF8F00"
-    end
-    if status ~= "Not started" then
-      table.insert(rows, {
-        LinearLayout, orientation=1, layout_width=-1, padding="10dp", layout_marginBottom="2dp", backgroundColor="#12000000",
-        {TextView, text=i .. ". " .. name, textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr},
-        {TextView, text=status, textSize="12sp", textColor=statusColor}
-      })
-    end
-  end
-
-  local content = {LinearLayout, orientation=1, layout_width=-1, layout_height=-2}
-  if #rows == 0 then
-    table.insert(content, {TextView, text="Koi Surah abhi shuru nahi ki. Kisi Surah, Ayat-ba-Ayat, ya Ruku mode ko use karein, progress yahan dikhegi.", textSize="13sp", textColor=textColor, padding="15dp"})
-  else
-    for _, r in ipairs(rows) do table.insert(content, r) end
-  end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="Progress Tracker", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, text=completedCount .. " / 114 Surah completed", textSize="13sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, padding="10dp"},
-    {ScrollView, layout_width=-1, layout_height=-1, content}
-  })
-  applyWallpaper(mainLayout, bgColor)
+screen = "progresstracker"
+local bgColor, textColor = M.getThemeColors()
+local rows = {}
+local completedCount = 0
+for i, name in ipairs(surahNames) do
+local status = "Not started"
+local statusColor = "#999999"
+if completedSurahs[i] then
+status = "Completed (full Surah listened)"
+statusColor = "#2E7D32"
+completedCount = completedCount + 1
+elseif lastAyahProgress[i] then
+status = "In progress - Ayat " .. lastAyahProgress[i] .. " / " .. (surahAyahCounts[i] or "?")
+statusColor = "#FF8F00"
+elseif lastRukuProgress[i] then
+status = "In progress - Ruku " .. lastRukuProgress[i]
+statusColor = "#FF8F00"
 end
-
--- STORAGE MANAGER (kitni MB downloads ho chuki hain, aur sab clear karne ka option)
+if status ~= "Not started" then
+table.insert(rows, {
+LinearLayout, orientation=1, layout_width=-1, padding="10dp", layout_marginBottom="2dp", backgroundColor="#12000000",
+{TextView, text=i .. ". " .. name, textSize="14sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr},
+{TextView, text=status, textSize="12sp", textColor=statusColor}
+})
+end
+end
+local content = {LinearLayout, orientation=1, layout_width=-1, layout_height=-2}
+if #rows == 0 then
+table.insert(content, {TextView, text="Koi Surah abhi shuru nahi ki. Kisi Surah, Ayat-ba-Ayat, ya Ruku mode ko use karein, progress yahan dikhegi.", textSize="13sp", textColor=textColor, padding="15dp"})
+else
+for _, r in ipairs(rows) do table.insert(content, r) end
+end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="Progress Tracker", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text=completedCount .. " / 114 Surah completed", textSize="13sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor, padding="10dp"},
+{ScrollView, layout_width=-1, layout_height=-1, content}
+})
+M.applyWallpaper(mainLayout, bgColor)
+end
 function showStorageManager()
-  screen = "storagemanager"
-  local bgColor, textColor = getThemeColors()
-
-  local function dirSizeAndCount(dir)
-    local total = 0
-    local count = 0
-    pcall(function()
-      local f = File(dir)
-      if f.exists() and f.isDirectory() then
-        local files = f.listFiles()
-        if files then
-          for i=0, files.length-1 do
-            total = total + files[i].length()
-            count = count + 1
-          end
-        end
-      end
-    end)
-    return total, count
-  end
-
-  local surahBytes, surahCount = dirSizeAndCount(downloadDir)
-  local ayahBytes, ayahCount = dirSizeAndCount(ayahAudioDir)
-  local duaBytes, duaCount = dirSizeAndCount(duaAudioDir)
-  local totalMB = string.format("%.1f", (surahBytes + ayahBytes + duaBytes) / (1024*1024))
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="Storage Manager", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {LinearLayout, orientation=1, padding="15dp",
-      {TextView, text="Total downloaded: " .. totalMB .. " MB", textSize="18sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="15dp"},
-      {TextView, text="Surahs (whole-Surah downloads): " .. string.format("%.1f", surahBytes/(1024*1024)) .. " MB (" .. surahCount .. " files)", textSize="14sp", textColor=textColor, layout_marginBottom="8dp"},
-      {TextView, text="Ayat-ba-Ayat / Ruku audio: " .. string.format("%.1f", ayahBytes/(1024*1024)) .. " MB (" .. ayahCount .. " files)", textSize="14sp", textColor=textColor, layout_marginBottom="8dp"},
-      {TextView, text="Duas audio: " .. string.format("%.1f", duaBytes/(1024*1024)) .. " MB (" .. duaCount .. " files)", textSize="14sp", textColor=textColor, layout_marginBottom="20dp"},
-      {Button, text="Clear All Downloads", textSize="14sp", backgroundColor="#C62828", textColor=-1, onClick=function()
-        AlertDialog.Builder(activity).setTitle("Clear All Downloads").setMessage("Yeh Surahs, Ayat-ba-Ayat/Ruku audio, aur Duas audio - sab downloaded files delete kar dega. Yaqeen hai?").setPositiveButton("Yes, Delete All", {onClick=function()
-          local function clearDir(dir)
-            pcall(function()
-              local f = File(dir)
-              if f.exists() and f.isDirectory() then
-                local files = f.listFiles()
-                if files then for i=0, files.length-1 do pcall(function() files[i].delete() end) end end
-              end
-            end)
-          end
-          clearDir(downloadDir) clearDir(ayahAudioDir) clearDir(duaAudioDir)
-          Toast.makeText(activity, "Saari downloads delete ho gayin.", 1).show()
-          showStorageManager()
-        end}).setNegativeButton("Cancel", nil).show()
-      end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
+screen = "storagemanager"
+local bgColor, textColor = M.getThemeColors()
+local function dirSizeAndCount(dir)
+local total = 0
+local count = 0
+pcall(function()
+local f = File(dir)
+if f.exists() and f.isDirectory() then
+local files = f.listFiles()
+if files then
+for i=0, files.length-1 do
+total = total + files[i].length()
+count = count + 1
 end
-
--- POORI QURAN (CONTINUOUS) - voice select list
+end
+end
+end)
+return total, count
+end
+local surahBytes, surahCount = dirSizeAndCount(downloadDir)
+local ayahBytes, ayahCount = dirSizeAndCount(ayahAudioDir)
+local duaBytes, duaCount = dirSizeAndCount(duaAudioDir)
+local totalMB = string.format("%.1f", (surahBytes + ayahBytes + duaBytes) / (1024*1024))
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="Storage Manager", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{LinearLayout, orientation=1, padding="15dp",
+{TextView, text="Total downloaded: " .. totalMB .. " MB", textSize="18sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="15dp"},
+{TextView, text="Surahs (whole-Surah downloads): " .. string.format("%.1f", surahBytes/(1024*1024)) .. " MB (" .. surahCount .. " files)", textSize="14sp", textColor=textColor, layout_marginBottom="8dp"},
+{TextView, text="Ayat-ba-Ayat / Ruku audio: " .. string.format("%.1f", ayahBytes/(1024*1024)) .. " MB (" .. ayahCount .. " files)", textSize="14sp", textColor=textColor, layout_marginBottom="8dp"},
+{TextView, text="Duas audio: " .. string.format("%.1f", duaBytes/(1024*1024)) .. " MB (" .. duaCount .. " files)", textSize="14sp", textColor=textColor, layout_marginBottom="20dp"},
+{Button, text="Clear All Downloads", textSize="14sp", backgroundColor="#C62828", textColor=-1, onClick=function()
+AlertDialog.Builder(activity).setTitle("Clear All Downloads").setMessage("Yeh Surahs, Ayat-ba-Ayat/Ruku audio, aur Duas audio - sab downloaded files delete kar dega. Yaqeen hai?").setPositiveButton("Yes, Delete All", {onClick=function()
+local function clearDir(dir)
+pcall(function()
+local f = File(dir)
+if f.exists() and f.isDirectory() then
+local files = f.listFiles()
+if files then for i=0, files.length-1 do pcall(function() files[i].delete() end) end end
+end
+end)
+end
+clearDir(downloadDir) clearDir(ayahAudioDir) clearDir(duaAudioDir)
+Toast.makeText(activity, "Saari downloads delete ho gayin.", 1).show()
+showStorageManager()
+end}).setNegativeButton("Cancel", nil).show()
+end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+end
 function showFullQuranScreen()
-  screen = "fullquranlist"
-  stopPlayer()
-  local bgColor, textColor = getThemeColors()
-  local names = {}
-  for i, v in ipairs(fullQuranVoices) do table.insert(names, v.name) end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#3E2723", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="Poori Quran (Continuous)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, text="Yeh EK hi bari (kai ghante lambi) file hai - Surah-wise seek nahi hoti, sirf continuous sunein ya scrub karein. Reciter select karein:", textSize="12sp", textColor="#C62828", padding="10dp"},
-    {ListView, id="fqList", layout_width=-1, layout_height=0, layout_weight=1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-  fqList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
-  fqList.onItemClick = function(l, v, p, i) showFullQuranPlayer(i + 1) end
+screen = "fullquranlist"
+M.stopPlayer()
+local bgColor, textColor = M.getThemeColors()
+local names = {}
+for i, v in ipairs(fullQuranVoices) do table.insert(names, v.name) end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#3E2723", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="Poori Quran (Continuous)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="Yeh EK hi bari (kai ghante lambi) file hai - Surah-wise seek nahi hoti, sirf continuous sunein ya scrub karein. Reciter select karein:", textSize="12sp", textColor="#C62828", padding="10dp"},
+{ListView, id="fqList", layout_width=-1, layout_height=0, layout_weight=1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+fqList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
+fqList.onItemClick = function(l, v, p, i) showFullQuranPlayer(i + 1) end
 end
-
--- POORI QURAN (CONTINUOUS) - player
 function showFullQuranPlayer(voiceIdx)
-  screen = "fullquranplayer"
-  local voice = fullQuranVoices[voiceIdx]
-  local localPath = getFullQuranLocal(voice)
-  local isDownloaded = File(localPath).exists()
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
-    {TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text=voice.name, textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="10dp", textColor=appColorStr, gravity="center"},
-    {TextView, text="Bari file hai, load hone mein waqt lag sakta hai.", textSize="11sp", textColor="#777777", layout_marginBottom="20dp"},
-    {SeekBar, id="fqSeekBar", layout_width=-1, layout_marginBottom="10dp"},
-    {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="20dp",
-      {TextView, id="fqCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
-      {TextView, id="fqTotalTxt", text="00:00", layout_weight=1, gravity="center"}
-    },
-    {Button, id="fqPlayPause", text="▶ " .. tr("Play"), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_width=-1, backgroundColor="#3E2723", textColor=-1},
-    {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginTop="10dp",
-      {Button, id="fqRwdBtn", text="⏪ "..seekSeconds.."s", textSize="14sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="fqFwdBtn", text=seekSeconds.."s ⏩", textSize="14sp", layout_weight=1, layout_margin="2dp"}
-    },
-    {Button, id="fqDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download (bari file)", textSize="14sp", layout_width=-1, layout_marginTop="15dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
-    {Button, text=tr("Back"), layout_width=-1, layout_marginTop="20dp", onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end}
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  fqPlayPause.onClick = function()
-    if duaMp then
-      pcall(function()
-        if duaMp.isPlaying() then
-          duaMp.pause()
-          fqPlayPause.setText("▶ " .. tr("Play"))
-        else
-          duaMp.start()
-          fqPlayPause.setText("⏸ " .. tr("Pause"))
-        end
-      end)
-    else
-      fqPlayPause.setText("Loading...")
-      playReliable(voice.url, localPath, voice.name, nil, nil)
-    end
-  end
-
-  fqRwdBtn.onClick = function()
-    if duaMp then pcall(function()
-      local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
-      duaMp.seekTo(np > 0 and np or 0)
-    end) end
-  end
-
-  fqFwdBtn.onClick = function()
-    if duaMp then pcall(function()
-      local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
-      if np < duaMp.getDuration() then duaMp.seekTo(np) end
-    end) end
-  end
-
-  fqDownload.onClick = function()
-    if File(localPath).exists() then
-      confirmDelete(localPath, function() showFullQuranPlayer(voiceIdx) end)
-    else
-      local ok, err = pcall(function()
-        local req = DownloadManager.Request(Uri.parse(voice.url))
-        req.setTitle(voice.name)
-        req.setDescription("Poori Quran download ho rahi hai - bari file, waqt lagega...")
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationUri(Uri.fromFile(File(localPath)))
-        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-      end)
-      if ok then
-        Toast.makeText(activity, "Download shuru ho gaya - bari file hai, kaafi waqt lag sakta hai. Notification se progress dekhein.", 1).show()
-      else
-        showErrorDialog("Full Quran Download Error", err)
-      end
-    end
-  end
-
-  updateTask = Runnable({run = function()
-    if duaMp then pcall(function()
-      if duaMp.isPlaying() then
-        fqSeekBar.setMax(duaMp.getDuration())
-        fqSeekBar.setProgress(duaMp.getCurrentPosition())
-        fqCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
-        fqTotalTxt.setText(ft(duaMp.getDuration()))
-      end
-    end) end
-    handler.postDelayed(updateTask, 1000)
-  end})
-  handler.post(updateTask)
-  fqSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+screen = "fullquranplayer"
+local voice = fullQuranVoices[voiceIdx]
+local localPath = M.getFullQuranLocal(voice)
+local isDownloaded = File(localPath).exists()
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
+{TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
+{TextView, text=voice.name, textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="10dp", textColor=appColorStr, gravity="center"},
+{TextView, text="Bari file hai, load hone mein waqt lag sakta hai.", textSize="11sp", textColor="#777777", layout_marginBottom="20dp"},
+{SeekBar, id="fqSeekBar", layout_width=-1, layout_marginBottom="10dp"},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="20dp",
+{TextView, id="fqCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
+{TextView, id="fqTotalTxt", text="00:00", layout_weight=1, gravity="center"}
+},
+{Button, id="fqPlayPause", text="▶ " .. tr("Play"), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_width=-1, backgroundColor="#3E2723", textColor=-1},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginTop="10dp",
+{Button, id="fqRwdBtn", text="⏪ "..seekSeconds.."s", textSize="14sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="fqFwdBtn", text=seekSeconds.."s ⏩", textSize="14sp", layout_weight=1, layout_margin="2dp"}
+},
+{Button, id="fqDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download (bari file)", textSize="14sp", layout_width=-1, layout_marginTop="15dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
+{Button, text=tr("Back"), layout_width=-1, layout_marginTop="20dp", onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end}
+})
+M.applyWallpaper(mainLayout, bgColor)
+fqPlayPause.onClick = function()
+if duaMp then
+pcall(function()
+if duaMp.isPlaying() then
+duaMp.pause()
+fqPlayPause.setText("▶ " .. tr("Play"))
+else
+duaMp.start()
+fqPlayPause.setText("⏸ " .. tr("Pause"))
 end
-
--- HADITH (Sahih Bukhari, English) - book list
+end)
+else
+fqPlayPause.setText("Loading...")
+M.playReliable(voice.url, localPath, voice.name, nil, nil)
+end
+end
+fqRwdBtn.onClick = function()
+if duaMp then pcall(function()
+local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
+duaMp.seekTo(np > 0 and np or 0)
+end) end
+end
+fqFwdBtn.onClick = function()
+if duaMp then pcall(function()
+local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
+if np < duaMp.getDuration() then duaMp.seekTo(np) end
+end) end
+end
+fqDownload.onClick = function()
+if File(localPath).exists() then
+confirmDelete(localPath, function() showFullQuranPlayer(voiceIdx) end)
+else
+local ok, err = pcall(function()
+local req = DownloadManager.Request(Uri.parse(voice.url))
+req.setTitle(voice.name)
+req.setDescription("Poori Quran download ho rahi hai - bari file, waqt lagega...")
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+req.setDestinationUri(Uri.fromFile(File(localPath)))
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if ok then
+Toast.makeText(activity, "Download shuru ho gaya - bari file hai, kaafi waqt lag sakta hai. Notification se progress dekhein.", 1).show()
+else
+showErrorDialog("Full Quran Download Error", err)
+end
+end
+end
+updateTask = Runnable({run = function()
+if duaMp then pcall(function()
+if duaMp.isPlaying() then
+fqSeekBar.setMax(duaMp.getDuration())
+fqSeekBar.setProgress(duaMp.getCurrentPosition())
+fqCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
+fqTotalTxt.setText(ft(duaMp.getDuration()))
+end
+end) end
+handler.postDelayed(updateTask, 1000)
+end})
+handler.post(updateTask)
+fqSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+end
 function showHadithScreen()
-  screen = "hadithlist"
-  stopPlayer()
-  local bgColor, textColor = getThemeColors()
-  local names = {}
-  for _, b in ipairs(hadithBooks()) do table.insert(names, "Book " .. b.n .. ": " .. b.title) end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#4E342E", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="Sahih Bukhari (English)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, text="97 Kitab (Books) - koi bhi select karein", textSize="12sp", textColor="#777777", padding="8dp"},
-    {ListView, id="hadithList", layout_width=-1, layout_height=0, layout_weight=1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-  hadithList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
-  hadithList.onItemClick = function(l, v, p, i) showHadithPlayer(i + 1) end
+screen = "hadithlist"
+M.stopPlayer()
+local bgColor, textColor = M.getThemeColors()
+local names = {}
+for _, b in ipairs(hadithBooks()) do table.insert(names, "Book " .. b.n .. ": " .. b.title) end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#4E342E", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="Sahih Bukhari (English)", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="97 Kitab (Books) - koi bhi select karein", textSize="12sp", textColor="#777777", padding="8dp"},
+{ListView, id="hadithList", layout_width=-1, layout_height=0, layout_weight=1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+hadithList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
+hadithList.onItemClick = function(l, v, p, i) showHadithPlayer(i + 1) end
 end
-
--- HADITH - player
 function showHadithPlayer(bookIdx)
-  screen = "hadithplayer"
-  -- FIX: Next/Prev Book screen ko naye sirey se render to kar rahe thay,
-  -- lekin purani Book ki audio (duaMp) aur uska updateTask kabhi properly
-  -- band nahi hota tha - is liye naye screen ke buttons purani audio ko
-  -- control kar rahe thay, jo "kaam nahi kar raha" jaisa lagta tha.
-  stopPlayer()
-  local b = hadithBooks()[bookIdx]
-  local localPath = getHadithLocal(b)
-  local playUrl = File(localPath).exists() and localPath or buildHadithUrl(b)
-  local isDownloaded = File(localPath).exists()
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
-    {TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text="Book " .. b.n .. ": " .. b.title, textSize="20sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="5dp", textColor=appColorStr, gravity="center"},
-    {TextView, text=b.range .. " of 7563", textSize="13sp", textColor=textColor, layout_marginBottom="20dp"},
-    {SeekBar, id="hdSeekBar", layout_width=-1, layout_marginBottom="10dp"},
-    {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
-      {TextView, id="hdCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
-      {TextView, id="hdTotalTxt", text="00:00", layout_weight=1, gravity="center"}
-    },
-    -- FIX (v2.1): ab bilkul Quran Majeed Surah Player jaisa hi row hai -
-    -- Prev Book / Rewind / Play-Pause / Forward / Next Book
-    {LinearLayout, orientation=0, gravity="center", layout_width=-1,
-      {Button, id="hdPrevBtn", text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="hdRwdBtn", text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="hdPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp"},
-      {Button, id="hdFwdBtn", text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="hdNextBtn", text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp"}
-    },
-    {Button, id="hdDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
-    {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text="Book List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
-      {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  hdPrevBtn.onClick = function() if bookIdx > 1 then showHadithPlayer(bookIdx - 1) end end
-  hdNextBtn.onClick = function() if bookIdx < #hadithBooks() then showHadithPlayer(bookIdx + 1) end end
-
-  hdRwdBtn.onClick = function()
-    if duaMp then pcall(function()
-      local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
-      duaMp.seekTo(np > 0 and np or 0)
-    end) end
-  end
-
-  hdFwdBtn.onClick = function()
-    if duaMp then pcall(function()
-      local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
-      if np < duaMp.getDuration() then duaMp.seekTo(np) end
-    end) end
-  end
-
-  hdPlayPause.onClick = function()
-    if duaMp then
-      pcall(function()
-        if duaMp.isPlaying() then
-          duaMp.pause()
-          hdPlayPause.setText("▶ " .. tr("Play"))
-        else
-          duaMp.start()
-          hdPlayPause.setText("⏸ " .. tr("Pause"))
-        end
-      end)
-    else
-      hdPlayPause.setText("Loading...")
-      playReliable(playUrl, localPath, "Bukhari Book " .. b.n, nil, function()
-        pcall(function() hdPlayPause.setText("▶ " .. tr("Play")) end)
-        if bookIdx < #hadithBooks() then showHadithPlayer(bookIdx + 1) end
-      end)
-    end
-  end
-
-  hdDownload.onClick = function()
-    if File(localPath).exists() then
-      confirmDelete(localPath, function() showHadithPlayer(bookIdx) end)
-    else
-      local ok, err = pcall(function()
-        local req = DownloadManager.Request(Uri.parse(buildHadithUrl(b)))
-        req.setTitle("Bukhari Book " .. b.n .. ": " .. b.title)
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationUri(Uri.fromFile(File(localPath)))
-        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-      end)
-      if ok then
-        Toast.makeText(activity, "Download shuru ho gaya...", 1).show()
-      else
-        showErrorDialog("Hadith Download Error", err)
-      end
-    end
-  end
-
-  updateTask = Runnable({run = function()
-    if duaMp then pcall(function()
-      if duaMp.isPlaying() then
-        hdSeekBar.setMax(duaMp.getDuration())
-        hdSeekBar.setProgress(duaMp.getCurrentPosition())
-        hdCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
-        hdTotalTxt.setText(ft(duaMp.getDuration()))
-      end
-    end) end
-    handler.postDelayed(updateTask, 1000)
-  end})
-  handler.post(updateTask)
-  hdSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+screen = "hadithplayer"
+M.stopPlayer()
+local b = hadithBooks()[bookIdx]
+local localPath = M.getHadithLocal(b)
+local playUrl = File(localPath).exists() and localPath or M.buildHadithUrl(b)
+local isDownloaded = File(localPath).exists()
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
+{TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
+{TextView, text="Book " .. b.n .. ": " .. b.title, textSize="20sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="5dp", textColor=appColorStr, gravity="center"},
+{TextView, text=b.range .. " of 7563", textSize="13sp", textColor=textColor, layout_marginBottom="20dp"},
+{SeekBar, id="hdSeekBar", layout_width=-1, layout_marginBottom="10dp"},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
+{TextView, id="hdCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
+{TextView, id="hdTotalTxt", text="00:00", layout_weight=1, gravity="center"}
+},
+{LinearLayout, orientation=0, gravity="center", layout_width=-1,
+{Button, id="hdPrevBtn", text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="hdRwdBtn", text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="hdPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp"},
+{Button, id="hdFwdBtn", text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="hdNextBtn", text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp"}
+},
+{Button, id="hdDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
+{LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
+{Button, text="Book List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
+{Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+hdPrevBtn.onClick = function() if bookIdx > 1 then showHadithPlayer(bookIdx - 1) end end
+hdNextBtn.onClick = function() if bookIdx < #hadithBooks() then showHadithPlayer(bookIdx + 1) end end
+hdRwdBtn.onClick = function()
+if duaMp then pcall(function()
+local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
+duaMp.seekTo(np > 0 and np or 0)
+end) end
 end
-
--- TAFSEER-E-QURAN (Dr. Israr Ahmad, Urdu) - list
+hdFwdBtn.onClick = function()
+if duaMp then pcall(function()
+local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
+if np < duaMp.getDuration() then duaMp.seekTo(np) end
+end) end
+end
+hdPlayPause.onClick = function()
+if duaMp then
+pcall(function()
+if duaMp.isPlaying() then
+duaMp.pause()
+hdPlayPause.setText("▶ " .. tr("Play"))
+else
+duaMp.start()
+hdPlayPause.setText("⏸ " .. tr("Pause"))
+end
+end)
+else
+hdPlayPause.setText("Loading...")
+M.playReliable(playUrl, localPath, "Bukhari Book " .. b.n, nil, function()
+pcall(function() hdPlayPause.setText("▶ " .. tr("Play")) end)
+if bookIdx < #hadithBooks() then showHadithPlayer(bookIdx + 1) end
+end)
+end
+end
+hdDownload.onClick = function()
+if File(localPath).exists() then
+confirmDelete(localPath, function() showHadithPlayer(bookIdx) end)
+else
+local ok, err = pcall(function()
+local req = DownloadManager.Request(Uri.parse(M.buildHadithUrl(b)))
+req.setTitle("Bukhari Book " .. b.n .. ": " .. b.title)
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+req.setDestinationUri(Uri.fromFile(File(localPath)))
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if ok then
+Toast.makeText(activity, "Download shuru ho gaya...", 1).show()
+else
+showErrorDialog("Hadith Download Error", err)
+end
+end
+end
+updateTask = Runnable({run = function()
+if duaMp then pcall(function()
+if duaMp.isPlaying() then
+hdSeekBar.setMax(duaMp.getDuration())
+hdSeekBar.setProgress(duaMp.getCurrentPosition())
+hdCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
+hdTotalTxt.setText(ft(duaMp.getDuration()))
+end
+end) end
+handler.postDelayed(updateTask, 1000)
+end})
+handler.post(updateTask)
+hdSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+end
 function showIsrarTafseerScreen()
-  screen = "israrlist"
-  stopPlayer()
-  local bgColor, textColor = getThemeColors()
-  local names = {}
-  for _, t in ipairs(israrTafseerFiles()) do table.insert(names, t.n == 0 and t.title or ("Surah " .. t.n .. ": " .. t.title)) end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#5D4037", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, text="Bayan-ul-Quran - Introduction + 114 Surah, Urdu mein", textSize="12sp", textColor="#777777", padding="8dp"},
-    {ListView, id="israrList", layout_width=-1, layout_height=0, layout_weight=1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-  israrList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
-  israrList.onItemClick = function(l, v, p, i) showIsrarTafseerPlayer(i + 1) end
+screen = "israrlist"
+M.stopPlayer()
+local bgColor, textColor = M.getThemeColors()
+local names = {}
+for _, t in ipairs(M.israrTafseerFiles()) do table.insert(names, t.n == 0 and t.title or ("Surah " .. t.n .. ": " .. t.title)) end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#5D4037", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="Bayan-ul-Quran - Introduction + 114 Surah, Urdu mein", textSize="12sp", textColor="#777777", padding="8dp"},
+{ListView, id="israrList", layout_width=-1, layout_height=0, layout_weight=1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+israrList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
+israrList.onItemClick = function(l, v, p, i) showIsrarTafseerPlayer(i + 1) end
 end
-
--- TAFSEER-E-QURAN (Dr. Israr Ahmad) - player (Quran Majeed Surah Player jaisa)
 function showIsrarTafseerPlayer(idx)
-  screen = "israrplayer"
-  stopPlayer()
-  local t = israrTafseerFiles()[idx]
-  local localPath = getIsrarTafseerLocal(t)
-  local playUrl = File(localPath).exists() and localPath or buildIsrarTafseerUrl(t)
-  local isDownloaded = File(localPath).exists()
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
-    {TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text=t.n == 0 and t.title or ("Surah " .. t.n .. ": " .. t.title), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr, gravity="center"},
-    {SeekBar, id="izSeekBar", layout_width=-1, layout_marginBottom="10dp"},
-    {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
-      {TextView, id="izCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
-      {TextView, id="izTotalTxt", text="00:00", layout_weight=1, gravity="center"}
-    },
-    {LinearLayout, orientation=0, gravity="center", layout_width=-1,
-      {Button, id="izPrevBtn", text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="izRwdBtn", text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="izPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp"},
-      {Button, id="izFwdBtn", text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="izNextBtn", text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp"}
-    },
-    {Button, id="izDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
-    {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
-      {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  izPrevBtn.onClick = function() if idx > 1 then showIsrarTafseerPlayer(idx - 1) end end
-  izNextBtn.onClick = function() if idx < #israrTafseerFiles() then showIsrarTafseerPlayer(idx + 1) end end
-
-  izRwdBtn.onClick = function()
-    if duaMp then pcall(function()
-      local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
-      duaMp.seekTo(np > 0 and np or 0)
-    end) end
-  end
-
-  izFwdBtn.onClick = function()
-    if duaMp then pcall(function()
-      local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
-      if np < duaMp.getDuration() then duaMp.seekTo(np) end
-    end) end
-  end
-
-  izPlayPause.onClick = function()
-    if duaMp then
-      pcall(function()
-        if duaMp.isPlaying() then
-          duaMp.pause()
-          izPlayPause.setText("▶ " .. tr("Play"))
-        else
-          duaMp.start()
-          izPlayPause.setText("⏸ " .. tr("Pause"))
-        end
-      end)
-    else
-      izPlayPause.setText("Loading...")
-      playReliable(playUrl, localPath, t.title, nil, function()
-        pcall(function() izPlayPause.setText("▶ " .. tr("Play")) end)
-        if idx < #israrTafseerFiles() then showIsrarTafseerPlayer(idx + 1) end
-      end)
-    end
-  end
-
-  izDownload.onClick = function()
-    if File(localPath).exists() then
-      confirmDelete(localPath, function() showIsrarTafseerPlayer(idx) end)
-    else
-      local ok, err = pcall(function()
-        local req = DownloadManager.Request(Uri.parse(buildIsrarTafseerUrl(t)))
-        req.setTitle(t.title)
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationUri(Uri.fromFile(File(localPath)))
-        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-      end)
-      if ok then
-        Toast.makeText(activity, "Download shuru ho gaya...", 1).show()
-      else
-        showErrorDialog("Tafseer Download Error", err)
-      end
-    end
-  end
-
-  updateTask = Runnable({run = function()
-    if duaMp then pcall(function()
-      if duaMp.isPlaying() then
-        izSeekBar.setMax(duaMp.getDuration())
-        izSeekBar.setProgress(duaMp.getCurrentPosition())
-        izCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
-        izTotalTxt.setText(ft(duaMp.getDuration()))
-      end
-    end) end
-    handler.postDelayed(updateTask, 1000)
-  end})
-  handler.post(updateTask)
-  izSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+screen = "israrplayer"
+M.stopPlayer()
+local t = M.israrTafseerFiles()[idx]
+local localPath = M.getIsrarTafseerLocal(t)
+local playUrl = File(localPath).exists() and localPath or M.buildIsrarTafseerUrl(t)
+local isDownloaded = File(localPath).exists()
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
+{TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
+{TextView, text=t.n == 0 and t.title or ("Surah " .. t.n .. ": " .. t.title), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr, gravity="center"},
+{SeekBar, id="izSeekBar", layout_width=-1, layout_marginBottom="10dp"},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
+{TextView, id="izCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
+{TextView, id="izTotalTxt", text="00:00", layout_weight=1, gravity="center"}
+},
+{LinearLayout, orientation=0, gravity="center", layout_width=-1,
+{Button, id="izPrevBtn", text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="izRwdBtn", text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="izPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp"},
+{Button, id="izFwdBtn", text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="izNextBtn", text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp"}
+},
+{Button, id="izDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
+{LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
+{Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
+{Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+izPrevBtn.onClick = function() if idx > 1 then showIsrarTafseerPlayer(idx - 1) end end
+izNextBtn.onClick = function() if idx < #M.israrTafseerFiles() then showIsrarTafseerPlayer(idx + 1) end end
+izRwdBtn.onClick = function()
+if duaMp then pcall(function()
+local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
+duaMp.seekTo(np > 0 and np or 0)
+end) end
 end
-
--- 40 HADITH NAWAWI - list
+izFwdBtn.onClick = function()
+if duaMp then pcall(function()
+local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
+if np < duaMp.getDuration() then duaMp.seekTo(np) end
+end) end
+end
+izPlayPause.onClick = function()
+if duaMp then
+pcall(function()
+if duaMp.isPlaying() then
+duaMp.pause()
+izPlayPause.setText("▶ " .. tr("Play"))
+else
+duaMp.start()
+izPlayPause.setText("⏸ " .. tr("Pause"))
+end
+end)
+else
+izPlayPause.setText("Loading...")
+M.playReliable(playUrl, localPath, t.title, nil, function()
+pcall(function() izPlayPause.setText("▶ " .. tr("Play")) end)
+if idx < #M.israrTafseerFiles() then showIsrarTafseerPlayer(idx + 1) end
+end)
+end
+end
+izDownload.onClick = function()
+if File(localPath).exists() then
+confirmDelete(localPath, function() showIsrarTafseerPlayer(idx) end)
+else
+local ok, err = pcall(function()
+local req = DownloadManager.Request(Uri.parse(M.buildIsrarTafseerUrl(t)))
+req.setTitle(t.title)
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+req.setDestinationUri(Uri.fromFile(File(localPath)))
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if ok then
+Toast.makeText(activity, "Download shuru ho gaya...", 1).show()
+else
+showErrorDialog("Tafseer Download Error", err)
+end
+end
+end
+updateTask = Runnable({run = function()
+if duaMp then pcall(function()
+if duaMp.isPlaying() then
+izSeekBar.setMax(duaMp.getDuration())
+izSeekBar.setProgress(duaMp.getCurrentPosition())
+izCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
+izTotalTxt.setText(ft(duaMp.getDuration()))
+end
+end) end
+handler.postDelayed(updateTask, 1000)
+end})
+handler.post(updateTask)
+izSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+end
 function showNawawiScreen()
-  screen = "nawawilist"
-  stopPlayer()
-  local bgColor, textColor = getThemeColors()
-  local names = {}
-  for i = 1, 40 do table.insert(names, "Hadith " .. i) end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#3E2723", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-      {TextView, text="40 Hadith (Imam An-Nawawi)", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, text="Mukhtasar, mash-hoor 40 Ahadith ka majmua", textSize="12sp", textColor="#777777", padding="8dp"},
-    {ListView, id="nawawiList", layout_width=-1, layout_height=0, layout_weight=1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-  nawawiList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
-  nawawiList.onItemClick = function(l, v, p, i) showNawawiPlayer(i + 1) end
+screen = "nawawilist"
+M.stopPlayer()
+local bgColor, textColor = M.getThemeColors()
+local names = {}
+for i = 1, 40 do table.insert(names, "Hadith " .. i) end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#3E2723", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{TextView, text="40 Hadith (Imam An-Nawawi)", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="Mukhtasar, mash-hoor 40 Ahadith ka majmua", textSize="12sp", textColor="#777777", padding="8dp"},
+{ListView, id="nawawiList", layout_width=-1, layout_height=0, layout_weight=1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+nawawiList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, names))
+nawawiList.onItemClick = function(l, v, p, i) showNawawiPlayer(i + 1) end
 end
-
--- 40 HADITH NAWAWI - player (Quran Majeed Surah Player jaisa)
 function showNawawiPlayer(n)
-  screen = "nawawiplayer"
-  stopPlayer()
-  local localPath = getNawawiLocal(n)
-  local playUrl = File(localPath).exists() and localPath or buildNawawiUrl(n)
-  local isDownloaded = File(localPath).exists()
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
-    {TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text="Hadith " .. n .. " of 40", textSize="20sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr, gravity="center"},
-    {SeekBar, id="nwSeekBar", layout_width=-1, layout_marginBottom="10dp"},
-    {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
-      {TextView, id="nwCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
-      {TextView, id="nwTotalTxt", text="00:00", layout_weight=1, gravity="center"}
-    },
-    {LinearLayout, orientation=0, gravity="center", layout_width=-1,
-      {Button, id="nwPrevBtn", text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="nwRwdBtn", text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="nwPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp"},
-      {Button, id="nwFwdBtn", text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp"},
-      {Button, id="nwNextBtn", text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp"}
-    },
-    {Button, id="nwDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
-    {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
-      {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  nwPrevBtn.onClick = function() if n > 1 then showNawawiPlayer(n - 1) end end
-  nwNextBtn.onClick = function() if n < 40 then showNawawiPlayer(n + 1) end end
-
-  nwRwdBtn.onClick = function()
-    if duaMp then pcall(function()
-      local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
-      duaMp.seekTo(np > 0 and np or 0)
-    end) end
-  end
-
-  nwFwdBtn.onClick = function()
-    if duaMp then pcall(function()
-      local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
-      if np < duaMp.getDuration() then duaMp.seekTo(np) end
-    end) end
-  end
-
-  nwPlayPause.onClick = function()
-    if duaMp then
-      pcall(function()
-        if duaMp.isPlaying() then
-          duaMp.pause()
-          nwPlayPause.setText("▶ " .. tr("Play"))
-        else
-          duaMp.start()
-          nwPlayPause.setText("⏸ " .. tr("Pause"))
-        end
-      end)
-    else
-      nwPlayPause.setText("Loading...")
-      playReliable(playUrl, localPath, "Hadith " .. n, nil, function()
-        pcall(function() nwPlayPause.setText("▶ " .. tr("Play")) end)
-        if n < 40 then showNawawiPlayer(n + 1) end
-      end)
-    end
-  end
-
-  nwDownload.onClick = function()
-    if File(localPath).exists() then
-      confirmDelete(localPath, function() showNawawiPlayer(n) end)
-    else
-      local ok, err = pcall(function()
-        local req = DownloadManager.Request(Uri.parse(buildNawawiUrl(n)))
-        req.setTitle("Hadith " .. n)
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationUri(Uri.fromFile(File(localPath)))
-        activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-      end)
-      if ok then
-        Toast.makeText(activity, "Download shuru ho gaya...", 1).show()
-      else
-        showErrorDialog("Hadith Download Error", err)
-      end
-    end
-  end
-
-  updateTask = Runnable({run = function()
-    if duaMp then pcall(function()
-      if duaMp.isPlaying() then
-        nwSeekBar.setMax(duaMp.getDuration())
-        nwSeekBar.setProgress(duaMp.getCurrentPosition())
-        nwCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
-        nwTotalTxt.setText(ft(duaMp.getDuration()))
-      end
-    end) end
-    handler.postDelayed(updateTask, 1000)
-  end})
-  handler.post(updateTask)
-  nwSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+screen = "nawawiplayer"
+M.stopPlayer()
+local localPath = M.getNawawiLocal(n)
+local playUrl = File(localPath).exists() and localPath or M.buildNawawiUrl(n)
+local isDownloaded = File(localPath).exists()
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
+{TextView, text=(isDownloaded and "Offline Mode" or "Online Stream"), textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
+{TextView, text="Hadith " .. n .. " of 40", textSize="20sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr, gravity="center"},
+{SeekBar, id="nwSeekBar", layout_width=-1, layout_marginBottom="10dp"},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="10dp",
+{TextView, id="nwCurrentTxt", text="00:00", layout_weight=1, gravity="center"},
+{TextView, id="nwTotalTxt", text="00:00", layout_weight=1, gravity="center"}
+},
+{LinearLayout, orientation=0, gravity="center", layout_width=-1,
+{Button, id="nwPrevBtn", text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="nwRwdBtn", text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="nwPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp"},
+{Button, id="nwFwdBtn", text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp"},
+{Button, id="nwNextBtn", text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp"}
+},
+{Button, id="nwDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
+{LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
+{Button, text="List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
+{Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+nwPrevBtn.onClick = function() if n > 1 then showNawawiPlayer(n - 1) end end
+nwNextBtn.onClick = function() if n < 40 then showNawawiPlayer(n + 1) end end
+nwRwdBtn.onClick = function()
+if duaMp then pcall(function()
+local np = duaMp.getCurrentPosition() - (seekSeconds*1000)
+duaMp.seekTo(np > 0 and np or 0)
+end) end
 end
-
+nwFwdBtn.onClick = function()
+if duaMp then pcall(function()
+local np = duaMp.getCurrentPosition() + (seekSeconds*1000)
+if np < duaMp.getDuration() then duaMp.seekTo(np) end
+end) end
+end
+nwPlayPause.onClick = function()
+if duaMp then
+pcall(function()
+if duaMp.isPlaying() then
+duaMp.pause()
+nwPlayPause.setText("▶ " .. tr("Play"))
+else
+duaMp.start()
+nwPlayPause.setText("⏸ " .. tr("Pause"))
+end
+end)
+else
+nwPlayPause.setText("Loading...")
+M.playReliable(playUrl, localPath, "Hadith " .. n, nil, function()
+pcall(function() nwPlayPause.setText("▶ " .. tr("Play")) end)
+if n < 40 then showNawawiPlayer(n + 1) end
+end)
+end
+end
+nwDownload.onClick = function()
+if File(localPath).exists() then
+confirmDelete(localPath, function() showNawawiPlayer(n) end)
+else
+local ok, err = pcall(function()
+local req = DownloadManager.Request(Uri.parse(M.buildNawawiUrl(n)))
+req.setTitle("Hadith " .. n)
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+req.setDestinationUri(Uri.fromFile(File(localPath)))
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if ok then
+Toast.makeText(activity, "Download shuru ho gaya...", 1).show()
+else
+showErrorDialog("Hadith Download Error", err)
+end
+end
+end
+updateTask = Runnable({run = function()
+if duaMp then pcall(function()
+if duaMp.isPlaying() then
+nwSeekBar.setMax(duaMp.getDuration())
+nwSeekBar.setProgress(duaMp.getCurrentPosition())
+nwCurrentTxt.setText(ft(duaMp.getCurrentPosition()))
+nwTotalTxt.setText(ft(duaMp.getDuration()))
+end
+end) end
+handler.postDelayed(updateTask, 1000)
+end})
+handler.post(updateTask)
+nwSeekBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and duaMp then pcall(function() duaMp.seekTo(p) end) end end})
+end
 function showMore()
-  screen = "more"
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {ScrollView, layout_width=-1, layout_height=0, layout_weight=1,
-    {LinearLayout, orientation=1, padding="20dp", layout_width=-1, layout_height=-2,
-      {TextView, text="More", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr},
-      {Button, text="30 Para", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#2E7D32", textColor=-1, onClick=function() safeRun("showPara", showPara) end},
-      {Button, text="Digital Tasbeeh", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00796B", textColor=-1, onClick=function() safeRun("showTasbeeh", showTasbeeh) end},
-      {Button, text="Bookmarks", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#E91E63", textColor=-1, onClick=function() safeRun("showBookmarksScreen", showBookmarksScreen) end},
-      {Button, text="99 Names of Allah", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#8E24AA", textColor=-1, onClick=function() safeRun("showNamesOfAllah", showNamesOfAllah) end},
-      {Button, text="Blessed Names of Prophet", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, onClick=function() safeRun("showAsmaNabi", showAsmaNabi) end},
-      {Button, text="Poori Quran (Continuous)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end},
-      {Button, text="Hadith (Sahih Bukhari)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#4E342E", textColor=-1, onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
-      {Button, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#5D4037", textColor=-1, onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
-      {Button, text="40 Hadith (An-Nawawi)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
-      {Button, text="Adhan Audio", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, contentDescription="Open Adhan recordings to play or download", onClick=function() safeRun("showAzan", showAzan) end},
-      {Button, text="6 Kalme / Iman / Namaz Audio", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, contentDescription="Six Kalimas, Iman e Mufassal, Iman e Mujmal, Namaz ka Sabaq aur Namaz e Janaza audio", onClick=function() safeRun("showKalimaImanScreen", showKalimaImanScreen) end},
-      {Button, text="Menu", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", onClick=function() safeRun("showSettings", showSettings) end}
-    }},
-    moreSubTabs("")
-  })
-  applyWallpaper(mainLayout, bgColor)
+screen = "more"
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{ScrollView, layout_width=-1, layout_height=0, layout_weight=1,
+{LinearLayout, orientation=1, padding="20dp", layout_width=-1, layout_height=-2,
+{TextView, text="More", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr},
+{Button, text="30 Para", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#2E7D32", textColor=-1, onClick=function() safeRun("showPara", showPara) end},
+{Button, text="Digital Tasbeeh", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00796B", textColor=-1, onClick=function() safeRun("showTasbeeh", showTasbeeh) end},
+{Button, text="Bookmarks", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#E91E63", textColor=-1, onClick=function() safeRun("showBookmarksScreen", showBookmarksScreen) end},
+{Button, text="99 Names of Allah", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#8E24AA", textColor=-1, onClick=function() safeRun("showNamesOfAllah", showNamesOfAllah) end},
+{Button, text="Blessed Names of Prophet", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, onClick=function() safeRun("showAsmaNabi", showAsmaNabi) end},
+{Button, text="Poori Quran (Continuous)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() safeRun("showFullQuranScreen", showFullQuranScreen) end},
+{Button, text="Hadith (Sahih Bukhari)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#4E342E", textColor=-1, onClick=function() safeRun("showHadithScreen", showHadithScreen) end},
+{Button, text="Tafseer-e-Quran (Dr. Israr Ahmad)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#5D4037", textColor=-1, onClick=function() safeRun("showIsrarTafseerScreen", showIsrarTafseerScreen) end},
+{Button, text="40 Hadith (An-Nawawi)", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#3E2723", textColor=-1, onClick=function() safeRun("showNawawiScreen", showNawawiScreen) end},
+{Button, text="Adhan Audio", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, contentDescription="Open Adhan recordings to play or download", onClick=function() safeRun("showAzan", showAzan) end},
+{Button, text="6 Kalme / Iman / Namaz Audio", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", backgroundColor="#00695C", textColor=-1, contentDescription="Six Kalimas, Iman e Mufassal, Iman e Mujmal, Namaz ka Sabaq aur Namaz e Janaza audio", onClick=function() safeRun("showKalimaImanScreen", showKalimaImanScreen) end},
+{Button, text="📚 اسلامک بکس / Islam Books (Urdu, English, Arabic, Punjabi)", textSize="15sp", layout_width=-1, layout_margin="5dp", onClick=function() safeRun("showUrduBooks", showUrduBooks) end},
+{Button, text="🔎 Advanced Search", textSize="15sp", layout_width=-1, layout_margin="5dp", onClick=function() safeRun("showAdvancedSearch", showAdvancedSearch) end},
+{Button, text="Menu", textSize="18sp", layout_width=-1, layout_marginBottom="15dp", onClick=function() safeRun("showSettings", showSettings) end}
+}},
+M.moreSubTabs("")
+})
+M.applyWallpaper(mainLayout, bgColor)
 end
-
--- TASBEEH
 function showTasbeeh()
-  screen = "tasbeeh"
-  local targets = {33, 34, 99, 100, 1000, 5000, 10000, 100000, 9999999}
-  local targetLabels = {"Target: 33", "Target: 34", "Target: 99", "Target: 100", "Target: 1,000", "Target: 5,000", "Target: 10,000", "Target: 100,000", "Unlimited (No Limit)"}
-  local targetIndex = 0
-  for i,v in ipairs(targets) do if v == tasbeehTarget then targetIndex = i - 1 break end end
-
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    ScrollView, layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
-    {LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
-
-      {LinearLayout, orientation=0, layout_width=-1, gravity="center_vertical", layout_marginBottom="10dp",
-        {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-        {TextView, text=tr("Digital Tasbeeh"), textSize="22sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="15dp", textColor=textColor}
-      },
-
-      {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="15dp", padding="10dp", backgroundColor="#1A000000",
-        {TextView, text="🌟 " .. tr("Lifetime Zikr:"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_weight=1},
-        {TextView, id="txtLifetime", text=tostring(lifetimeZikrTotal), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor}
-      },
-
-      {LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="15dp",
-        {CheckBox, id="chkSound", text="🔊", textSize="16sp", checked=tasbeehBeepEnabled, textColor=textColor, layout_marginRight="10dp"},
-        {CheckBox, id="chkVib", text="📳", textSize="16sp", checked=tasbeehVibrateEnabled, textColor=textColor, layout_marginRight="10dp"},
-        {CheckBox, id="chkAwake", text="💡 Awake", textSize="16sp", checked=false, textColor=textColor}
-      },
-
-      {TextView, text=tr("Select Category:"), textSize="14sp", textColor=textColor, layout_width=-1, gravity="left", layout_marginBottom="5dp"},
-      {Spinner, id="categorySpinner", layout_width=-1, layout_marginBottom="10dp"},
-
-      {TextView, text="Select Wazeefa:", textSize="14sp", textColor=textColor, layout_width=-1, gravity="left", layout_marginBottom="5dp"},
-      {Spinner, id="wazeefaSpinner", layout_width=-1, layout_marginBottom="10dp"},
-
-      {TextView, id="txtWazeefaDisplay", text=wazaifArabicText[currentWazeefaIndex + 1], textSize="26sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="center", layout_marginBottom="10dp"},
-      {Spinner, id="targetSpinner", layout_width="200dp", layout_marginBottom="10dp"},
-
-      {ProgressBar, id="tasbeehProgress", style="?android:attr/progressBarStyleHorizontal", layout_width=-1, layout_marginBottom="15dp", max=tasbeehTarget, progress=tasbeehCount},
-
-      {TextView, id="txtCount", text=tostring(tasbeehCount), textSize="80sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="20dp"},
-      {Button, id="btnTap", text="TAP", textSize="36sp", typeface=Typeface.DEFAULT_BOLD, layout_width="200dp", layout_height="200dp", backgroundColor="#4CAF50", textColor=-1},
-
-      {LinearLayout, orientation=1, layout_width=-1, layout_marginTop="20dp",
-        {LinearLayout, orientation=0, layout_width=-1, layout_marginBottom="5dp",
-          {Button, id="btnSave", text="💾 " .. tr("Save"), textSize="14sp", layout_weight=1, layout_marginRight="5dp", backgroundColor="#1976D2", textColor=-1},
-          {Button, id="btnRecent", text="🔁 " .. tr("Recent"), textSize="14sp", layout_weight=1, layout_marginLeft="5dp", backgroundColor="#FF8F00", textColor=-1}
-        },
-        {LinearLayout, orientation=0, layout_width=-1,
-          {Button, id="btnClearSaved", text="🧹 " .. tr("Clear"), textSize="14sp", layout_weight=1, layout_marginRight="5dp", backgroundColor="#757575", textColor=-1},
-          {Button, id="btnReset", text="❌ " .. tr("Reset"), textSize="14sp", layout_weight=1, layout_marginLeft="5dp", backgroundColor="#C62828", textColor=-1}
-        }
-      }
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  chkSound.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) tasbeehBeepEnabled=isChecked saveActiveTasbeehState() end})
-  chkVib.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) tasbeehVibrateEnabled=isChecked saveActiveTasbeehState() end})
-  chkAwake.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked)
-    if isChecked then activity.getWindow().addFlags(128) else activity.getWindow().clearFlags(128) end
-  end})
-
-  categorySpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, wazaifCategories))
-  wazeefaSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, wazaifLabels))
-  wazeefaSpinner.setSelection(currentWazeefaIndex)
-  wazeefaSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p, v, pos, id) currentWazeefaIndex=pos txtWazeefaDisplay.setText(wazaifArabicText[pos+1]) saveActiveTasbeehState() end})
-
-  targetSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, targetLabels))
-  targetSpinner.setSelection(targetIndex)
-  targetSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p, v, pos, id) tasbeehTarget=targets[pos+1] tasbeehProgress.setMax(tasbeehTarget) if tasbeehTarget==9999999 then tasbeehProgress.setMax(100) tasbeehProgress.setProgress(100) end saveActiveTasbeehState() end})
-
-  btnTap.onClick = function()
-    if tasbeehVibrateEnabled then doVibrate(30) end
-    tasbeehCount = tasbeehCount + 1
-    lifetimeZikrTotal = lifetimeZikrTotal + 1
-    txtCount.setText(tostring(tasbeehCount))
-    txtLifetime.setText(tostring(lifetimeZikrTotal))
-    prefs.edit().putInt("lifetimeZikrTotal", lifetimeZikrTotal).apply()
-
-    if tasbeehTarget ~= 9999999 then tasbeehProgress.setProgress(tasbeehCount) end
-    saveActiveTasbeehState()
-
-    if tasbeehCount == tasbeehTarget and tasbeehTarget ~= 9999999 then
-      if tasbeehBeepEnabled then playBeep() end if tasbeehVibrateEnabled then doVibrate(500) end
-      Toast.makeText(activity, "MashAllah! Target Reached", 1).show()
-    end
-  end
-
-  btnSave.onClick = function() prefs.edit().putInt("savedCount", tasbeehCount).putInt("savedTarget", tasbeehTarget).putInt("savedWazeefa", currentWazeefaIndex).apply() Toast.makeText(activity, "Tasbeeh Saved!", 0).show() end
-
-  btnRecent.onClick = function()
-    local sCount = prefs.getInt("savedCount", -1)
-    if sCount == -1 then Toast.makeText(activity, "No saved data!", 0).show() else
-      tasbeehCount=sCount tasbeehTarget=prefs.getInt("savedTarget", 33) currentWazeefaIndex=prefs.getInt("savedWazeefa", 0)
-      txtCount.setText(tostring(tasbeehCount)) txtWazeefaDisplay.setText(wazaifArabicText[currentWazeefaIndex + 1])
-      wazeefaSpinner.setSelection(currentWazeefaIndex)
-      for i,v in ipairs(targets) do if v == tasbeehTarget then targetSpinner.setSelection(i - 1) break end end
-      if tasbeehTarget ~= 9999999 then tasbeehProgress.setMax(tasbeehTarget) tasbeehProgress.setProgress(tasbeehCount) end
-      saveActiveTasbeehState()
-    end
-  end
-
-  btnClearSaved.onClick = function() prefs.edit().remove("savedCount").remove("savedTarget").remove("savedWazeefa").apply() Toast.makeText(activity, "Saved Data Cleared!", 0).show() end
-
-  btnReset.onClick = function() tasbeehCount=0 txtCount.setText("0") tasbeehProgress.setProgress(0) saveActiveTasbeehState() if tasbeehVibrateEnabled then doVibrate(50) end end
+screen = "tasbeeh"
+local targets = {33, 34, 99, 100, 1000, 5000, 10000, 100000, 9999999}
+local targetLabels = {"Target: 33", "Target: 34", "Target: 99", "Target: 100", "Target: 1,000", "Target: 5,000", "Target: 10,000", "Target: 100,000", "Unlimited (No Limit)"}
+local targetIndex = 0
+for i,v in ipairs(targets) do if v == tasbeehTarget then targetIndex = i - 1 break end end
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+ScrollView, layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
+{LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
+{LinearLayout, orientation=0, layout_width=-1, gravity="center_vertical", layout_marginBottom="10dp",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{TextView, text=tr("Digital Tasbeeh"), textSize="22sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="15dp", textColor=textColor}
+},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="15dp", padding="10dp", backgroundColor="#1A000000",
+{TextView, text="🌟 " .. tr("Lifetime Zikr:"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_weight=1},
+{TextView, id="txtLifetime", text=tostring(lifetimeZikrTotal), textSize="18sp", typeface=Typeface.DEFAULT_BOLD, textColor=textColor}
+},
+{LinearLayout, orientation=0, layout_width=-1, gravity="center", layout_marginBottom="15dp",
+{CheckBox, id="chkSound", text="🔊", textSize="16sp", checked=tasbeehBeepEnabled, textColor=textColor, layout_marginRight="10dp"},
+{CheckBox, id="chkVib", text="📳", textSize="16sp", checked=tasbeehVibrateEnabled, textColor=textColor, layout_marginRight="10dp"},
+{CheckBox, id="chkAwake", text="💡 Awake", textSize="16sp", checked=false, textColor=textColor}
+},
+{TextView, text=tr("Select Category:"), textSize="14sp", textColor=textColor, layout_width=-1, gravity="left", layout_marginBottom="5dp"},
+{Spinner, id="categorySpinner", layout_width=-1, layout_marginBottom="10dp"},
+{TextView, text="Select Wazeefa:", textSize="14sp", textColor=textColor, layout_width=-1, gravity="left", layout_marginBottom="5dp"},
+{Spinner, id="wazeefaSpinner", layout_width=-1, layout_marginBottom="10dp"},
+{TextView, id="txtWazeefaDisplay", text=wazaifArabicText[currentWazeefaIndex + 1], textSize="26sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="center", layout_marginBottom="10dp"},
+{Spinner, id="targetSpinner", layout_width="200dp", layout_marginBottom="10dp"},
+{ProgressBar, id="tasbeehProgress", style="?android:attr/progressBarStyleHorizontal", layout_width=-1, layout_marginBottom="15dp", max=tasbeehTarget, progress=tasbeehCount},
+{TextView, id="txtCount", text=tostring(tasbeehCount), textSize="80sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, layout_marginBottom="20dp"},
+{Button, id="btnTap", text="TAP", textSize="36sp", typeface=Typeface.DEFAULT_BOLD, layout_width="200dp", layout_height="200dp", backgroundColor="#4CAF50", textColor=-1},
+{LinearLayout, orientation=1, layout_width=-1, layout_marginTop="20dp",
+{LinearLayout, orientation=0, layout_width=-1, layout_marginBottom="5dp",
+{Button, id="btnSave", text="💾 " .. tr("Save"), textSize="14sp", layout_weight=1, layout_marginRight="5dp", backgroundColor="#1976D2", textColor=-1},
+{Button, id="btnRecent", text="🔁 " .. tr("Recent"), textSize="14sp", layout_weight=1, layout_marginLeft="5dp", backgroundColor="#FF8F00", textColor=-1}
+},
+{LinearLayout, orientation=0, layout_width=-1,
+{Button, id="btnClearSaved", text="🧹 " .. tr("Clear"), textSize="14sp", layout_weight=1, layout_marginRight="5dp", backgroundColor="#757575", textColor=-1},
+{Button, id="btnReset", text="❌ " .. tr("Reset"), textSize="14sp", layout_weight=1, layout_marginLeft="5dp", backgroundColor="#C62828", textColor=-1}
+}
+}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+chkSound.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) tasbeehBeepEnabled=isChecked M.saveActiveTasbeehState() end})
+chkVib.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) tasbeehVibrateEnabled=isChecked M.saveActiveTasbeehState() end})
+chkAwake.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked)
+if isChecked then activity.getWindow().addFlags(128) else activity.getWindow().clearFlags(128) end
+end})
+categorySpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, wazaifCategories))
+wazeefaSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, wazaifLabels))
+wazeefaSpinner.setSelection(currentWazeefaIndex)
+wazeefaSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p, v, pos, id) currentWazeefaIndex=pos txtWazeefaDisplay.setText(wazaifArabicText[pos+1]) M.saveActiveTasbeehState() end})
+targetSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, targetLabels))
+targetSpinner.setSelection(targetIndex)
+targetSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p, v, pos, id) tasbeehTarget=targets[pos+1] tasbeehProgress.setMax(tasbeehTarget) if tasbeehTarget==9999999 then tasbeehProgress.setMax(100) tasbeehProgress.setProgress(100) end M.saveActiveTasbeehState() end})
+btnTap.onClick = function()
+if tasbeehVibrateEnabled then M.doVibrate(30) end
+tasbeehCount = tasbeehCount + 1
+lifetimeZikrTotal = lifetimeZikrTotal + 1
+txtCount.setText(tostring(tasbeehCount))
+txtLifetime.setText(tostring(lifetimeZikrTotal))
+prefs.edit().putInt("lifetimeZikrTotal", lifetimeZikrTotal).apply()
+if tasbeehTarget ~= 9999999 then tasbeehProgress.setProgress(tasbeehCount) end
+M.saveActiveTasbeehState()
+if tasbeehCount == tasbeehTarget and tasbeehTarget ~= 9999999 then
+if tasbeehBeepEnabled then M.playBeep() end if tasbeehVibrateEnabled then M.doVibrate(500) end
+Toast.makeText(activity, "MashAllah! Target Reached", 1).show()
 end
-
--- SURAH LIST
+end
+btnSave.onClick = function() prefs.edit().putInt("savedCount", tasbeehCount).putInt("savedTarget", tasbeehTarget).putInt("savedWazeefa", currentWazeefaIndex).apply() Toast.makeText(activity, "Tasbeeh Saved!", 0).show() end
+btnRecent.onClick = function()
+local sCount = prefs.getInt("savedCount", -1)
+if sCount == -1 then Toast.makeText(activity, "No saved data!", 0).show() else
+tasbeehCount=sCount tasbeehTarget=prefs.getInt("savedTarget", 33) currentWazeefaIndex=prefs.getInt("savedWazeefa", 0)
+txtCount.setText(tostring(tasbeehCount)) txtWazeefaDisplay.setText(wazaifArabicText[currentWazeefaIndex + 1])
+wazeefaSpinner.setSelection(currentWazeefaIndex)
+for i,v in ipairs(targets) do if v == tasbeehTarget then targetSpinner.setSelection(i - 1) break end end
+if tasbeehTarget ~= 9999999 then tasbeehProgress.setMax(tasbeehTarget) tasbeehProgress.setProgress(tasbeehCount) end
+M.saveActiveTasbeehState()
+end
+end
+btnClearSaved.onClick = function() prefs.edit().remove("savedCount").remove("savedTarget").remove("savedWazeefa").apply() Toast.makeText(activity, "Saved Data Cleared!", 0).show() end
+btnReset.onClick = function() tasbeehCount=0 txtCount.setText("0") tasbeehProgress.setProgress(0) M.saveActiveTasbeehState() if tasbeehVibrateEnabled then M.doVibrate(50) end end
+end
 function showSurahList()
-  screen = "surahlist"
-  local bgColor, textColor = getThemeColors()
-
-  local filteredSurahs = {} local filteredIndices = {}
-  for i,v in ipairs(surahNames) do
-    if not deletedSurahs[i] and pinned[i] then table.insert(filteredSurahs, "📌 " .. v) table.insert(filteredIndices, i) end
-  end
-  for i,v in ipairs(surahNames) do
-    if not deletedSurahs[i] and not pinned[i] then table.insert(filteredSurahs, v) table.insert(filteredIndices, i) end
-  end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showHome", showHome) end},
-      {TextView, text="Quran Pak (use the search bar on Home to find a Surah)", textSize="14sp", layout_marginLeft="10dp", textColor=-1}
-    },
-    {ListView, id="list", layout_width=-1, layout_height=0, layout_weight=1},
-    bottomTabs("quran")
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  local adapter = ArrayAdapter(activity, android.R.layout.simple_list_item_1, filteredSurahs)
-  list.setAdapter(adapter)
-
-  list.onItemClick = function(l, v, p, i) currentIndex = filteredIndices[i + 1] showPlayer(currentIndex) end
-
-  list.onItemLongClick = function(l, v, p, i)
-    local sIndex = filteredIndices[i + 1]
-    local sName = surahNames[sIndex]
-
-    AlertDialog.Builder(activity).setTitle(sName).setItems({"▶️ Play", "🔖 Bookmark", "📌 Pin", "📋 Copy", "🗑️ Delete", "❌ Cancel"}, {onClick=function(dialog, which)
-      if which == 0 then currentIndex = sIndex showPlayer(currentIndex)
-      elseif which == 1 then table.insert(bookmarks, sIndex) saveBookmarks() Toast.makeText(activity, "Bookmarked!", 0).show()
-      elseif which == 2 then pinned[sIndex] = not pinned[sIndex] savePinned() showSurahList()
-      elseif which == 3 then activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Surah", sName)) Toast.makeText(activity, "Copied!", 0).show()
-      elseif which == 4 then deletedSurahs[sIndex] = true saveDeleted() showSurahList()
-      end
-    end}).show()
-    return true
-  end
+screen = "surahlist"
+local bgColor, textColor = M.getThemeColors()
+local filteredSurahs = {} local filteredIndices = {}
+for i,v in ipairs(surahNames) do
+if not deletedSurahs[i] and pinned[i] then table.insert(filteredSurahs, "📌 " .. v) table.insert(filteredIndices, i) end
 end
-
--- BOOKMARKS
+for i,v in ipairs(surahNames) do
+if not deletedSurahs[i] and not pinned[i] then table.insert(filteredSurahs, v) table.insert(filteredIndices, i) end
+end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showHome", showHome) end},
+{TextView, text="Quran Pak (use the search bar on Home to find a Surah)", textSize="14sp", layout_marginLeft="10dp", textColor=-1}
+},
+{ListView, id="list", layout_width=-1, layout_height=0, layout_weight=1},
+M.bottomTabs("quran")
+})
+M.applyWallpaper(mainLayout, bgColor)
+local adapter = ArrayAdapter(activity, android.R.layout.simple_list_item_1, filteredSurahs)
+list.setAdapter(adapter)
+list.onItemClick = function(l, v, p, i) currentIndex = filteredIndices[i + 1] showPlayer(currentIndex) end
+list.onItemLongClick = function(l, v, p, i)
+local sIndex = filteredIndices[i + 1]
+local sName = surahNames[sIndex]
+AlertDialog.Builder(activity).setTitle(sName).setItems({"▶️ Play", "🔖 Bookmark", "📌 Pin", "📋 Copy", "🗑️ Delete", "❌ Cancel"}, {onClick=function(dialog, which)
+if which == 0 then currentIndex = sIndex showPlayer(currentIndex)
+elseif which == 1 then table.insert(bookmarks, sIndex) M.saveBookmarks() Toast.makeText(activity, "Bookmarked!", 0).show()
+elseif which == 2 then pinned[sIndex] = not pinned[sIndex] M.savePinned() showSurahList()
+elseif which == 3 then activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Surah", sName)) Toast.makeText(activity, "Copied!", 0).show()
+elseif which == 4 then deletedSurahs[sIndex] = true M.saveDeleted() showSurahList()
+end
+end}).show()
+return true
+end
+end
 function showBookmarksScreen()
-  screen = "bookmarks"
-  local bgColor, textColor = getThemeColors()
-
-  local filteredBms = {} local filteredIndices = {}
-  local function loadBm(query)
-    filteredBms = {} filteredIndices = {}
-    for i,v in ipairs(bookmarks) do
-      local sName = surahNames[v]
-      if sName:lower():find(query) or query == "" then table.insert(filteredBms, sName) table.insert(filteredIndices, v) end
-    end
-  end
-  loadBm("")
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
-      {EditText, id="etSearchBm", hint="Search Bookmarks...", layout_marginLeft="10dp", layout_weight=1, singleLine=true, textColor=-1, hintTextColor="#DDDDDD"},
-      {Button, text="🗑️ Clear", layout_marginLeft="5dp", onClick=function() bookmarks = {} saveBookmarks() showBookmarksScreen() end}
-    },
-    {ListView, id="bmList", layout_width=-1, layout_height=-1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  local adapter = ArrayAdapter(activity, android.R.layout.simple_list_item_1, filteredBms)
-  bmList.setAdapter(adapter)
-
-  etSearchBm.addTextChangedListener(TextWatcher{onTextChanged=function(c) loadBm(tostring(c):lower()) adapter = ArrayAdapter(activity, android.R.layout.simple_list_item_1, filteredBms) bmList.setAdapter(adapter) end})
-  bmList.onItemClick = function(l, v, p, i) hideKeyboard(etSearchBm) if #bookmarks > 0 then currentIndex = filteredIndices[i + 1] showPlayer(currentIndex) end end
-  bmList.onItemLongClick = function(l, v, p, i)
-    hideKeyboard(etSearchBm)
-    if #bookmarks > 0 then
-      local realIndex = filteredIndices[i+1]
-      AlertDialog.Builder(activity).setTitle("Options").setItems({"▶️ Play", "🔖 Remove", "❌ Cancel"}, {onClick=function(d, w)
-        if w == 0 then currentIndex = realIndex showPlayer(currentIndex)
-        elseif w == 1 then for idx, val in ipairs(bookmarks) do if val == realIndex then table.remove(bookmarks, idx) break end end saveBookmarks() showBookmarksScreen() end
-      end}).show()
-    end return true
-  end
+screen = "bookmarks"
+local bgColor, textColor = M.getThemeColors()
+local filteredBms = {} local filteredIndices = {}
+local function loadBm(query)
+filteredBms = {} filteredIndices = {}
+for i,v in ipairs(bookmarks) do
+local sName = surahNames[v]
+if sName:lower():find(query) or query == "" then table.insert(filteredBms, sName) table.insert(filteredIndices, v) end
 end
-
--- SETTINGS
+end
+loadBm("")
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), onClick=function() safeRun("showMore", showMore) end},
+{EditText, id="etSearchBm", hint="Search Bookmarks...", layout_marginLeft="10dp", layout_weight=1, singleLine=true, textColor=-1, hintTextColor="#DDDDDD"},
+{Button, text="🗑️ Clear", layout_marginLeft="5dp", onClick=function() bookmarks = {} M.saveBookmarks() showBookmarksScreen() end}
+},
+{ListView, id="bmList", layout_width=-1, layout_height=-1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+local adapter = ArrayAdapter(activity, android.R.layout.simple_list_item_1, filteredBms)
+bmList.setAdapter(adapter)
+etSearchBm.addTextChangedListener(TextWatcher{onTextChanged=function(c) loadBm(tostring(c):lower()) adapter = ArrayAdapter(activity, android.R.layout.simple_list_item_1, filteredBms) bmList.setAdapter(adapter) end})
+bmList.onItemClick = function(l, v, p, i) M.hideKeyboard(etSearchBm) if #bookmarks > 0 then currentIndex = filteredIndices[i + 1] showPlayer(currentIndex) end end
+bmList.onItemLongClick = function(l, v, p, i)
+M.hideKeyboard(etSearchBm)
+if #bookmarks > 0 then
+local realIndex = filteredIndices[i+1]
+AlertDialog.Builder(activity).setTitle("Options").setItems({"▶️ Play", "🔖 Remove", "❌ Cancel"}, {onClick=function(d, w)
+if w == 0 then currentIndex = realIndex showPlayer(currentIndex)
+elseif w == 1 then for idx, val in ipairs(bookmarks) do if val == realIndex then table.remove(bookmarks, idx) break end end M.saveBookmarks() showBookmarksScreen() end
+end}).show()
+end return true
+end
+end
 function showSettings()
-  screen = "settings"
-  local bgColor, textColor = getThemeColors()
-
-  local reciterNames = {} for i, v in ipairs(reciters) do table.insert(reciterNames, v.name) end
-  local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"} local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
-  local speedIndex = 1 for i,v in ipairs(speedValues) do if v == PS.speed then speedIndex = i - 1 break end end
-  local sleepLabels = {"Off", "15 Minutes", "30 Minutes", "45 Minutes", "60 Minutes"} local sleepValues = {0, 15, 30, 45, 60}
-  local sleepIndex = 0 for i,v in ipairs(sleepValues) do if v == sleepTimerMinutes then sleepIndex = i - 1 break end end
-  local seekLabels = {"5 Seconds", "10 Seconds", "15 Seconds", "20 Seconds", "25 Seconds", "30 Seconds", "1 Minute"} local seekValues = {5, 10, 15, 20, 25, 30, 60}
-  local seekIndex = 1 for i,v in ipairs(seekValues) do if v == seekSeconds then seekIndex = i - 1 break end end
-  -- NAYA (v2.1): Tarjuma (Translation) Off/Urdu spinner
-  -- FIX (v2.2): Chinese option hata di gayi (uska audio source reliably
-  -- kaam nahi kar raha tha). NAYA (v2.2): Sindhi tarjuma add ki gayi.
-  local tarjumaLabels = V25_TRANSLATION_LABELS
-  local tarjumaIndex = 0 for i,v in ipairs(tarjumaLabels) do if v == translationMode then tarjumaIndex = i - 1 break end end
-  local urduVoiceLabels = {"Shamshad Ali Khan", "Farhat Hashmi"}
-  local urduVoiceValues = {"Shamshad", "Farhat"}
-  local urduVoiceIndex = 0 for i,v in ipairs(urduVoiceValues) do if v == urduVoice then urduVoiceIndex = i - 1 break end end
-  local farsiVoiceLabels = {"Fooladvand + Hedayatfar", "Makarem + Kabiri"}
-  local farsiVoiceValues = {"Fooladvand", "Makarem"}
-  local farsiVoiceIndex = (farsiVoice == "Makarem") and 1 or 0
-  -- NAYA (v2.2): Ayat-ba-Ayat mode mein Ayat kitni dafa repeat ho
-  local repeatLabels = {"1x (No Repeat)", "2x", "3x", "5x", "10x"} local repeatValues = {1, 2, 3, 5, 10}
-  local repeatIndex = 0 for i,v in ipairs(repeatValues) do if v == PS.ayahRepeat then repeatIndex = i - 1 break end end
-
-  activity.setContentView(loadlayout{
-    ScrollView, id="mainLayout", layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
-    {LinearLayout, orientation=1, padding="20dp", layout_width=-1, layout_height=-1,
-      {TextView, text="Menu", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr},
-      {TextView, text="Select Reciter (DI + " .. (#reciters-1) .. " others):", textSize="16sp", textColor=textColor, typeface=Typeface.DEFAULT_BOLD},
-      {Spinner, id="reciterSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
-      {TextView, text="Skip/Rewind Time:", textSize="16sp", textColor=textColor},
-      {Spinner, id="seekSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
-      {TextView, text="Playback Speed:", textSize="16sp", textColor=textColor},
-      {Spinner, id="speedSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
-      {TextView, text="Sleep Timer:", textSize="16sp", textColor=textColor},
-      {Spinner, id="sleepSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
-      {TextView, text="Tarjuma (Translation):", textSize="16sp", textColor=textColor},
-      {Spinner, id="tarjumaSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
-      {TextView, text="Urdu Tarjuma Awaz (jab Tarjuma=Urdu ho):", textSize="16sp", textColor=textColor},
-      {Spinner, id="urduVoiceSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
-      {TextView, text="Farsi Ayah Tarjuma Awaz (jab Tarjuma=Farsi ho):", textSize="16sp", textColor=textColor},
-      {Spinner, id="farsiVoiceSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
-      {TextView, text="Ayat Repeat Count (Ayat-ba-Ayat mode, hifz ke liye):", textSize="16sp", textColor=textColor},
-      {Spinner, id="repeatCountSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
-      {TextView, text="App Preferences:", textSize="16sp", textColor=appColorStr, typeface=Typeface.DEFAULT_BOLD},
-      {CheckBox, id="chkAutoNext", text="Auto Next Surah Mode", textSize="16sp", layout_marginTop="10dp", checked=autoNextMode, textColor=textColor},
-
-      {Button, text="💬 " .. tr("Feedback & Support"), textSize="16sp", layout_width=-1, layout_marginTop="30dp", backgroundColor="#607D8B", textColor=-1, onClick=function() safeRun("showFeedback", showFeedback) end},
-      {Button, text="Social Media Support", textSize="16sp", layout_width=-1, layout_marginTop="10dp", backgroundColor="#00695C", textColor=-1, onClick=function() safeRun("showSocialMedia", showSocialMedia) end},
-      {Button, text="ℹ️ " .. tr("About App"), textSize="16sp", layout_width=-1, layout_marginTop="10dp", backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showAbout", showAbout) end},
-
-      {LinearLayout, orientation=0, gravity="center", layout_marginTop="20dp", layout_width=-1,
-        {Button, text=tr("Back"), layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showMore", showMore) end},
-        {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
-      }
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  reciterSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, reciterNames))
-  reciterSpinner.setSelection(math.min(currentReciter, #reciters) - 1)
-  reciterSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) currentReciter=pos+1 end})
-  seekSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, seekLabels)) seekSpinner.setSelection(seekIndex) seekSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) seekSeconds=seekValues[pos+1] end})
-  speedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels)) speedSpinner.setSelection(speedIndex) speedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) savePlaybackSpeed(speedValues[pos+1]) if mp then applyPlaybackSpeed(mp) end if duaMp then applyPlaybackSpeed(duaMp) end end})
-  sleepSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, sleepLabels)) sleepSpinner.setSelection(sleepIndex) sleepSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) sleepTimerMinutes=sleepValues[pos+1] end})
-  tarjumaSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, tarjumaLabels)) tarjumaSpinner.setSelection(tarjumaIndex) tarjumaSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveTranslationMode(tarjumaLabels[pos+1]) end})
-  urduVoiceSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, urduVoiceLabels)) urduVoiceSpinner.setSelection(urduVoiceIndex) urduVoiceSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveUrduVoice(urduVoiceValues[pos+1]) end})
-  farsiVoiceSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, farsiVoiceLabels)) farsiVoiceSpinner.setSelection(farsiVoiceIndex) farsiVoiceSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveFarsiVoice(farsiVoiceValues[pos+1]) end})
-  repeatCountSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repeatLabels)) repeatCountSpinner.setSelection(repeatIndex) repeatCountSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveAyahRepeatCount(repeatValues[pos+1]) end})
-  chkAutoNext.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) autoNextMode=isChecked end})
+screen = "settings"
+local bgColor, textColor = M.getThemeColors()
+local reciterNames = {} for i, v in ipairs(reciters) do table.insert(reciterNames, v.name) end
+local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"} local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
+local speedIndex = 1 for i,v in ipairs(speedValues) do if v == PS.speed then speedIndex = i - 1 break end end
+local sleepLabels = {"Off", "15 Minutes", "30 Minutes", "45 Minutes", "60 Minutes"} local sleepValues = {0, 15, 30, 45, 60}
+local sleepIndex = 0 for i,v in ipairs(sleepValues) do if v == sleepTimerMinutes then sleepIndex = i - 1 break end end
+local seekLabels = {"5 Seconds", "10 Seconds", "15 Seconds", "20 Seconds", "25 Seconds", "30 Seconds", "1 Minute"} local seekValues = {5, 10, 15, 20, 25, 30, 60}
+local seekIndex = 1 for i,v in ipairs(seekValues) do if v == seekSeconds then seekIndex = i - 1 break end end
+local tarjumaLabels = V25_TRANSLATION_LABELS
+local tarjumaIndex = 0 for i,v in ipairs(tarjumaLabels) do if v == translationMode then tarjumaIndex = i - 1 break end end
+local urduVoiceLabels = {"Shamshad Ali Khan", "Farhat Hashmi", "Kanzul Iman"}
+local urduVoiceValues = {"Shamshad", "Farhat", "Kanzul"}
+local urduVoiceIndex = 0 for i,v in ipairs(urduVoiceValues) do if v == urduVoice then urduVoiceIndex = i - 1 break end end
+local farsiVoiceLabels = {"Fooladvand + Hedayatfar", "Makarem + Kabiri"}
+local farsiVoiceValues = {"Fooladvand", "Makarem"}
+local farsiVoiceIndex = (farsiVoice == "Makarem") and 1 or 0
+local repeatLabels = {"1x (No Repeat)", "2x", "3x", "5x", "10x"} local repeatValues = {1, 2, 3, 5, 10}
+local repeatIndex = 0 for i,v in ipairs(repeatValues) do if v == PS.ayahRepeat then repeatIndex = i - 1 break end end
+activity.setContentView(loadlayout{
+ScrollView, id="mainLayout", layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
+{LinearLayout, orientation=1, padding="20dp", layout_width=-1, layout_height=-1,
+{TextView, text="Menu", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", textColor=appColorStr},
+{TextView, text="Select Reciter (DI + " .. (#reciters-1) .. " others):", textSize="16sp", textColor=textColor, typeface=Typeface.DEFAULT_BOLD},
+{Spinner, id="reciterSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+{TextView, text="Skip/Rewind Time:", textSize="16sp", textColor=textColor},
+{Spinner, id="seekSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+{TextView, text="Playback Speed:", textSize="16sp", textColor=textColor},
+{Spinner, id="speedSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+{TextView, text="Sleep Timer:", textSize="16sp", textColor=textColor},
+{Spinner, id="sleepSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+{TextView, text="Tarjuma (Translation):", textSize="16sp", textColor=textColor},
+{Spinner, id="tarjumaSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+{TextView, text="Urdu Tarjuma Awaz (jab Tarjuma=Urdu ho):", textSize="16sp", textColor=textColor},
+{Spinner, id="urduVoiceSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+{TextView, text="Farsi Ayah Tarjuma Awaz (jab Tarjuma=Farsi ho):", textSize="16sp", textColor=textColor},
+{Spinner, id="farsiVoiceSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+{TextView, text="Ayat Repeat Count (Ayat-ba-Ayat mode, hifz ke liye):", textSize="16sp", textColor=textColor},
+{Spinner, id="repeatCountSpinner", layout_width=-1, layout_marginTop="5dp", layout_marginBottom="15dp"},
+{TextView, text="App Preferences:", textSize="16sp", textColor=appColorStr, typeface=Typeface.DEFAULT_BOLD},
+{CheckBox, id="chkAutoNext", text="Auto Next Surah Mode", textSize="16sp", layout_marginTop="10dp", checked=autoNextMode, textColor=textColor},
+{Button, text="💬 " .. tr("Feedback & Support"), textSize="16sp", layout_width=-1, layout_marginTop="30dp", backgroundColor="#607D8B", textColor=-1, onClick=function() safeRun("showFeedback", showFeedback) end},
+{Button, text="Social Media Support", textSize="16sp", layout_width=-1, layout_marginTop="10dp", backgroundColor="#00695C", textColor=-1, onClick=function() safeRun("showSocialMedia", showSocialMedia) end},
+{Button, text="ℹ️ " .. tr("About App"), textSize="16sp", layout_width=-1, layout_marginTop="10dp", backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showAbout", showAbout) end},
+{LinearLayout, orientation=0, gravity="center", layout_marginTop="20dp", layout_width=-1,
+{Button, text=tr("Back"), layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showMore", showMore) end},
+{Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
+}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+reciterSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, reciterNames))
+reciterSpinner.setSelection(math.min(currentReciter, #reciters) - 1)
+reciterSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) currentReciter=pos+1 end})
+seekSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, seekLabels)) seekSpinner.setSelection(seekIndex) seekSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) seekSeconds=seekValues[pos+1] end})
+speedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels)) speedSpinner.setSelection(speedIndex) speedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) savePlaybackSpeed(speedValues[pos+1]) if mp then applyPlaybackSpeed(mp) end if duaMp then applyPlaybackSpeed(duaMp) end end})
+sleepSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, sleepLabels)) sleepSpinner.setSelection(sleepIndex) sleepSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) sleepTimerMinutes=sleepValues[pos+1] end})
+tarjumaSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, tarjumaLabels)) tarjumaSpinner.setSelection(tarjumaIndex) tarjumaSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) M.saveTranslationMode(tarjumaLabels[pos+1]) end})
+urduVoiceSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, urduVoiceLabels)) urduVoiceSpinner.setSelection(urduVoiceIndex) urduVoiceSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) M.saveUrduVoice(urduVoiceValues[pos+1]) end})
+farsiVoiceSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, farsiVoiceLabels)) farsiVoiceSpinner.setSelection(farsiVoiceIndex) farsiVoiceSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) M.saveFarsiVoice(farsiVoiceValues[pos+1]) end})
+repeatCountSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repeatLabels)) repeatCountSpinner.setSelection(repeatIndex) repeatCountSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id) saveAyahRepeatCount(repeatValues[pos+1]) end})
+chkAutoNext.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(b, isChecked) autoNextMode=isChecked end})
 end
-
--- SOCIAL MEDIA SUPPORT
 function showSocialMedia()
-  screen = "socialmedia"
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    ScrollView, layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
-    {LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
-      {TextView, text="Social Media Support", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", layout_marginTop="10dp", textColor=appColorStr},
-      {TextView, text="Community: WhatsApp Group", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
-      {Button, text="Join WhatsApp Community", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#25D366", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/ItdQOG8lw5E6DKsxx9iNSd") end},
-      {TextView, text="Channel: Bridge Tech Welfare", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
-      {Button, text="Follow WhatsApp Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#128C7E", textColor=-1, onClick=function() openLinkAndClose("https://whatsapp.com/channel/0029VbCJfWSAojYuaMuB9E1t") end},
-      {TextView, text="Channel: Bridge Tech Welfare (Telegram)", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
-      {Button, text="Join Telegram Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#0088CC", textColor=-1, onClick=function() openLinkAndClose("https://t.me/+NF0bOu66afYxYWM0") end},
-      {TextView, text="YouTube Channel: Instructor of BTW", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
-      {Button, text="Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#FF0000", textColor=-1, onClick=function() openLinkAndClose("https://youtube.com/@instructor-of-btw?si=nXc_isZVvMV8OQoc") end},
-      {TextView, text="YouTube Channel: Technology Information", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
-      {Button, text="Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="30dp", backgroundColor="#FF0000", textColor=-1, onClick=function() openLinkAndClose("https://www.youtube.com/@Technologyinformation-y4g") end},
-      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
+screen = "socialmedia"
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+ScrollView, layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
+{LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
+{TextView, text="Social Media Support", textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", layout_marginTop="10dp", textColor=appColorStr},
+{TextView, text="Community: WhatsApp Group", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
+{Button, text="Join WhatsApp Community", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#25D366", textColor=-1, onClick=function() M.openLinkAndClose("https://chat.whatsapp.com/ItdQOG8lw5E6DKsxx9iNSd") end},
+{TextView, text="Channel: Bridge Tech Welfare", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
+{Button, text="Follow WhatsApp Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#128C7E", textColor=-1, onClick=function() M.openLinkAndClose("https://whatsapp.com/channel/0029VbCJfWSAojYuaMuB9E1t") end},
+{TextView, text="Channel: Bridge Tech Welfare (Telegram)", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
+{Button, text="Join Telegram Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#0088CC", textColor=-1, onClick=function() M.openLinkAndClose("https://t.me/+NF0bOu66afYxYWM0") end},
+{TextView, text="YouTube Channel: Instructor of BTW", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
+{Button, text="Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#FF0000", textColor=-1, onClick=function() M.openLinkAndClose("https://youtube.com/@instructor-of-btw?si=nXc_isZVvMV8OQoc") end},
+{TextView, text="YouTube Channel: Technology Information", textSize="12sp", textColor="#777777", layout_width=-1, layout_marginTop="10dp"},
+{Button, text="Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="30dp", backgroundColor="#FF0000", textColor=-1, onClick=function() M.openLinkAndClose("https://www.youtube.com/@Technologyinformation-y4g") end},
+{Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
 end
-
--- FEEDBACK AND SUPPORT
 function showFeedback()
-  screen = "feedback"
-  local bgColor, textColor = getThemeColors()
-
-  local supportMsg = "Assalam-o-Alaikum! 🌟\n\nWe hope this application helps you in your spiritual journey and becomes a source of Sadqa-e-Jariyah. Your feedback, support, and bug reports are highly valuable to us.\n\nJoin our community using the official links below to stay updated, suggest new features, or connect with the developers.\n\nJazakAllah Khair,\nQuran Majeed Team"
-
-  local waMsg = URLEncoder.encode("Assalam-o-Alaikum Numan bhai! MashAllah 'Quran Majeed' app bohot behtareen hai. Allah Pak is koshish ko qabool farmaye aur ise sab ke liye Sadqa-e-Jariyah banaye. Ameen.")
-  local waNumberUrl = "https://wa.me/923145406759?text=" .. waMsg
-
-  activity.setContentView(loadlayout{
-    ScrollView, layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
-    {LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
-      {TextView, text=tr("Feedback & Support"), textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", layout_marginTop="10dp", textColor=appColorStr},
-      {LinearLayout, orientation=1, layout_width=-1, padding="15dp", layout_marginBottom="20dp", backgroundColor="#1A000000",
-        {TextView, text=supportMsg, textSize="15sp", gravity="left", textColor=textColor}
-      },
-      {Button, text="📱 " .. tr("Direct WhatsApp Feedback"), textSize="14sp", layout_width=-1, layout_marginBottom="20dp", backgroundColor="#25D366", textColor=-1, onClick=function() openLinkAndClose(waNumberUrl) end},
-      {Button, text="💬 Join WhatsApp Group 1", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/DJY36CzqJdO7uYMsUi1fXp") end},
-      {Button, text="💬 Join WhatsApp Group 2", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/KzqqC44433PF2iwsXNd93p") end},
-      {Button, text="💬 Join WhatsApp Group 3", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/FsiATGe2BAb2rfNWolL3k4") end},
-      {Button, text="💬 Join WhatsApp Group 4", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() openLinkAndClose("https://chat.whatsapp.com/JGz8fgOFXth9cTWh3IRF7s?s=cl&p=a&mlu=4") end},
-      {Button, text="📢 Follow WhatsApp Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#128C7E", textColor=-1, onClick=function() openLinkAndClose("https://whatsapp.com/channel/0029Vb7I39ILikgHRF0PBV3k") end},
-      {Button, text="📺 Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="30dp", backgroundColor="#FF0000", textColor=-1, onClick=function() openLinkAndClose("https://youtube.com/@friendtagresourcesteam?si=mT_M3jqVLcpwlRjN") end},
-      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
+screen = "feedback"
+local bgColor, textColor = M.getThemeColors()
+local supportMsg = "Assalam-o-Alaikum! 🌟\n\nWe hope this application helps you in your spiritual journey and becomes a source of Sadqa-e-Jariyah. Your feedback, support, and bug reports are highly valuable to us.\n\nJoin our community using the official links below to stay updated, suggest new features, or connect with the developers.\n\nJazakAllah Khair,\nQuran Majeed Team"
+local waMsg = URLEncoder.encode("Assalam-o-Alaikum Numan bhai! MashAllah 'Quran Majeed' app bohot behtareen hai. Allah Pak is koshish ko qabool farmaye aur ise sab ke liye Sadqa-e-Jariyah banaye. Ameen.")
+local waNumberUrl = "https://wa.me/923145406759?text=" .. waMsg
+activity.setContentView(loadlayout{
+ScrollView, layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
+{LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
+{TextView, text=tr("Feedback & Support"), textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", layout_marginTop="10dp", textColor=appColorStr},
+{LinearLayout, orientation=1, layout_width=-1, padding="15dp", layout_marginBottom="20dp", backgroundColor="#1A000000",
+{TextView, text=supportMsg, textSize="15sp", gravity="left", textColor=textColor}
+},
+{Button, text="📱 " .. tr("Direct WhatsApp Feedback"), textSize="14sp", layout_width=-1, layout_marginBottom="20dp", backgroundColor="#25D366", textColor=-1, onClick=function() M.openLinkAndClose(waNumberUrl) end},
+{Button, text="💬 Join WhatsApp Group 1", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() M.openLinkAndClose("https://chat.whatsapp.com/DJY36CzqJdO7uYMsUi1fXp") end},
+{Button, text="💬 Join WhatsApp Group 2", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() M.openLinkAndClose("https://chat.whatsapp.com/KzqqC44433PF2iwsXNd93p") end},
+{Button, text="💬 Join WhatsApp Group 3", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() M.openLinkAndClose("https://chat.whatsapp.com/FsiATGe2BAb2rfNWolL3k4") end},
+{Button, text="💬 Join WhatsApp Group 4", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#075E54", textColor=-1, onClick=function() M.openLinkAndClose("https://chat.whatsapp.com/JGz8fgOFXth9cTWh3IRF7s?s=cl&p=a&mlu=4") end},
+{Button, text="📢 Follow WhatsApp Channel", textSize="14sp", layout_width=-1, layout_marginBottom="10dp", backgroundColor="#128C7E", textColor=-1, onClick=function() M.openLinkAndClose("https://whatsapp.com/channel/0029Vb7I39ILikgHRF0PBV3k") end},
+{Button, text="📺 Subscribe YouTube Channel", textSize="14sp", layout_width=-1, layout_marginBottom="30dp", backgroundColor="#FF0000", textColor=-1, onClick=function() M.openLinkAndClose("https://youtube.com/@friendtagresourcesteam?si=mT_M3jqVLcpwlRjN") end},
+{Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
 end
-
--- ABOUT
 function showAbout()
-  screen = "about"
-  local bgColor, textColor = getThemeColors()
+screen = "about"
+local bgColor, textColor = M.getThemeColors()
+local infoText = [[QURAN MAJEED v3.0 - CHANGELOG (Roman Urdu)
 
-  local infoText = [[
-Assalam-o-Alaikum!
-Version: 2.7
+1) ISLAMIC (HIJRI) TAREEKH:
+   Ab tareekh bilkul sahi hai. Aaj 16 Rabi-us-Sani 1448 Hijri.
+   Ye internet ke bagair bhi chalti hai. Koi tap ya likhne ki zaroorat
+   nahi. Home par teen lines khud update hoti hain: Urdu, Roman aur
+   Punjabi (desi) tareekh.
 
---- WHAT'S NEW IN V2.7 ---
+2) APP HANG HONA BAND:
+   Background download aur purane loops hata diye. Masla ho to app khud
+   Retry, Download ya Cancel ka option deti hai. App band nahi hoti.
 
-1) Islamic (Hijri) date - ab 100% OFFLINE (API hata di gayi):
-- Purani Islamic date Aladhan API ke response se aati thi; network/API masle par woh Home screen par load hi nahi hoti thi aur screen par kuch theek se nazar nahi aata tha. Wo API tareeqa poori tarah hata diya gaya hai.
-- Ab bilkul Punjabi date ki tarah Islamic date device par hi local tabular (Kuwaiti) algorithm se compute hoti hai - koi internet, koi API, koi download nahi.
-- Display: din, Urdu mahina, saal ھ - sath Roman mahina + AH (TalkBack ke liye). Default correction 0 din (tabular result South Asian calendars se match karta hai, e.g. 25 September 2026 = 12 Rabi-ul-Thani 1448). Home par tap kar ke ±2 din manual correction laga sakte hain.
+3) AUDIO AB ALAG ALAG:
+   Chhe Kalme alag alag, Namaz ka Sabaq alag, Namaz e Janaza ki chaar
+   Takbeer alag, aur Iman e Mufassal wa Mujmal ka text sath.
 
-2) NAYA audio section - 6 Kalme / Iman / Namaz:
-- Chhe Kalme, Iman-e-Mufassal, Iman-e-Mujmal, Namaz ka Sabaq aur Namaz-e-Janaza ka Tareeqa add kiye gaye hain.
-- Audio wale items (Chhe Kalme, Namaz ka Sabaq, Namaz-e-Janaza) online stream hote hain aur Quran ki tarah download + offline replay support karte hain; player bilkul Quran wala hi (online/offline, seek, speed, prev/next) hai.
-- Iman-e-Mufassal aur Iman-e-Mujmal ka koi verified direct MP3 nahi mila, is liye unhein mukammal Arabic/Urdu/English text ke sath rakha gaya hai aur online sunne ke liye source page ka button diya gaya hai.
-- Ye sab Duas tab, universal search, aur naye "6 Kalme" menu button/tab se khulte hain.
+4) CHHE KALME SCREEN:
+   Click ka masla hal. Ab list par tap karte hi sahi track chalta hai.
 
-3) Version 2.7:
-- Poori app ka version ab 2.7 hai (title, About aur internal notes sab jagah).
+5) ERROR REPORT:
+   Kisi bhi masle par Copy aur Share ki sahulat, poori device report sath.
 
-5) v2.7-fix2 - HANG FIX + alag alag audio tracks + live Islamic date:
-- HANG/ISN'T RESPONDING ka asli sabab hata diya: pehle stream fail hone par player CHUPKE se poore file ka DownloadManager download shuru karta tha aur 60 second tak Thread.sleep poll loop chalata rehta tha. Ab AUTO-DOWNLOAD POORI TARAH BAND hai - fail hone par sirf Retry online / Download / Cancel dialog aata hai, aur download sirf aap ke button se hota hai.
-- Wahi background-download fallback Word-by-Word mode se bhi hata diya.
-- Ab audio ALAG ALAG tracks mein hai: 6 Kalme (chhe alag entries), Namaz ka Sabaq (8 alag verified step files), Namaz-e-Janaza (poora audio + takbeer-wise 4 step), Iman-e-Mufassal aur Iman-e-Mujmal (mukammal text + online link).
-- Clip support (startAt/endAt) add hua, is liye ek hi recording ka ek hissa apne track ki tarah lagta hai; clip entries ek hi offline copy share karte hain (26 MB sirf ek dafa).
-- اسلامی تاریخ ab bilkul LIVE hai, Punjabi date ki tarah screen par seedha nazar aati hai; manual "tap to adjust" hata diya aur aadhi raat par khud update hoti hai.
+6) BOOKS PLAYER THEEK:
+   Pehle kitaab kholte the to andar se Kalma ya Namaz ki audio bajti thi.
+   Ab jo kitaab kholi jaye, sirf usi ke hisse bajte hain.
 
-4) v2.7-fix - 6 Kalme screen ka click/error masla + universal error dialog:
-- 6 Kalme / Iman / Namaz screen ab ListView + onItemClick par hai (wahi pattern jo Poora Quran / Para list aur Search mein pehle se theek chalta hai). Purani alag "6 Kalme" bottom tab hata di gayi (wo screen ki width se bahar nikal jati thi, is liye click nahi hota tha) - entry ab More menu ke bare button, Duas tab aur Search se hai.
-- Ab har error par ek dialog khulta hai jisme 3 buttons hain: Copy, Share aur Cancel - sath mein poora report (app version, screen, Android version, device, city, tareekh, error + traceback) jo copy ya WhatsApp/Email par share ho sakta hai.
-- Ye error dialog ab in sab par laga hai: 6 Kalme ke har item ka click, app start/Home, bottom tabs aur More menu ke saare buttons, audio/stream errors, aur Duas/Search ke text-item dialogs (wo Copy+Cancel wale hain). Kisi bhi screen par error aaye to app band nahi hogi, dialog khulega.
+7) ISLAM BOOKS (NAYA):
+   Urdu, Hindi, English, Arabic, Punjabi aur Chinese kategori ke sath 40 mukammal
+   kitaabein aur 3247 hisse. Har kitaab ke saare hisse maujood hain.
+   Player Poora Quran jaisa: play, pause, seek, speed, download aur
+   offline. Download sirf mp3, phone ke Downloads/Islam_Books folder
+   mein. Koi text file download nahi hoti.
 
---- FEATURES CARRIED FORWARD ---
-- v2.5: eight whole-surah language collections (English Ibrahim Walk, English Mishary, Hindi, Bengali, French, Sindhi, Pashto, Farsi), each mapped for 114 surahs; Waheed Zafar and Shakir Urdu Qari maps; two Farsi ayah voices; preserved player, speed/repeat, offline, Tafseer, Hadith, duas, Tasbeeh and Quran features.
-- v2.6: Quran-style Adhan player, 15 verified recordings, per-prayer city schedule, 130 categorized duas (119 audio, 11 text-only), English meanings/descriptions, 40 Rabbana references, filtered/fuzzy search, voice-search launch, and Hijri adjustment control.
-- v2.7 keeps the v2.6 feature set and corrects Waheed audio playback/cache handling and Hijri cache refresh/local offset defaults.
+8) QURAN KE URDU TARJUMA (NAYA):
+   Pehle sirf do aawazein thin: Shamshad Ali Khan aur Farhat Hashmi.
+   Ab kul atharah (18) Urdu aawazein hain. Poore surah wale pandrah
+   (15) qari: Waheed Zafar Qasmi, Shakir Qasmi, Sudais wa Shuraim,
+   Abdul Basit, Maher Al Muaiqly, Abdullah Momin, Saud Al Shuraim,
+   Minshawi, Hani Al Rifai, Ahmed Al Ajmi, Abdullah Ali Basfar,
+   Aasan Tarjuma (Mufti Taqi Usmani), tarjuma ki doosri recording,
+   aur sirf tarjuma bagair tilawat ke sath. Har qari ke poore 114
+   surah hain aur har link check kiya gaya.
 
-Android exact-alarm caveat: the host app must declare SCHEDULE_EXACT_ALARM and RECEIVE_BOOT_COMPLETED and supply a manifest boot receiver for guaranteed alarms after process death/reboot. Runtime dynamic receivers alone cannot promise that lifecycle guarantee.
-
---- CREDITS ---
-Lead Developer: Numan Khan.
-May Allah accept our continuous efforts!
+9) TALASH (SEARCH):
+   Surah, Dua, Kalma, kitaab aur kitaab ke hisse. Urdu aur Roman dono
+   mein talash ho jati hai.
 ]]
-
-  activity.setContentView(loadlayout{
-    ScrollView, id="mainLayout", layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
-    {LinearLayout, orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
-      {TextView, text=tr("About App"), textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", layout_marginTop="10dp", textColor=appColorStr},
-      {TextView, text=infoText, textSize="14sp", gravity="left", layout_marginBottom="40dp", textColor=textColor},
-      {Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
+activity.setContentView(loadlayout{
+ScrollView, id="mainLayout", layout_width=-1, layout_height=-1, fillViewport=true, backgroundColor=bgColor,
+{LinearLayout, orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center_horizontal",
+{TextView, text=tr("About App"), textSize="24sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="20dp", layout_marginTop="10dp", textColor=appColorStr},
+{TextView, text=infoText, textSize="14sp", gravity="left", layout_marginBottom="40dp", textColor=textColor},
+{Button, text=tr("Back"), layout_width=-1, backgroundColor=appColorStr, textColor=-1, onClick=function() safeRun("showSettings", showSettings) end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
 end
-
--- PLAYER LOGIC HELPERS
 function playNextSurah() if currentIndex < #surahNames then currentIndex = currentIndex + 1 showPlayer(currentIndex) end end
 function playPrevSurah() if currentIndex > 1 then currentIndex = currentIndex - 1 showPlayer(currentIndex) end end
--- FIX: Toast messages 2 second mein khud ghayab ho jate hain, is liye error
--- ka poora text kabhi nazar/copy nahi hota tha. Ye chhota helper ek Dialog
--- box dikhata hai jo khud band NAHI hota (jab tak user khud OK/Copy na
--- dabaye) - "Copy" button se error seedha clipboard mein copy ho jata hai.
--- NAYA (v2.7-fix): UNIVERSAL ERROR DIALOG. Har error ka poora report (app
--- version, screen, Android version, device, tareekh, error + traceback) ek
--- SELECT karne layak text mein dikhta hai aur us ke sath teen buttons hote
--- hain: Copy, Share aur Cancel - is liye aap koi bhi error aasani se copy ya
--- share kar ke bhej sakte hain.
 function V25.buildErrorReport(title, errText)
-  local function g(f) local ok, v = pcall(f) if ok and v ~= nil then return tostring(v) end return "?" end
-  local lines = {}
-  table.insert(lines, "Quran Majeed v2.7 - ERROR REPORT")
-  table.insert(lines, "Time     : " .. g(function() return os.date("%Y-%m-%d %H:%M:%S") end))
-  table.insert(lines, "Screen   : " .. tostring(screen))
-  table.insert(lines, "Where    : " .. tostring(title or "Unknown"))
-  table.insert(lines, "Android  : " .. g(function() return Build.VERSION.RELEASE end) .. " (SDK " .. g(function() return Build.VERSION.SDK_INT end) .. ")")
-  table.insert(lines, "Device   : " .. g(function() return Build.MANUFACTURER end) .. " " .. g(function() return Build.MODEL end))
-  table.insert(lines, "Location : " .. tostring(savedCity) .. ", " .. tostring(savedCountry))
-  table.insert(lines, "------------------------------------------")
-  table.insert(lines, tostring(errText))
-  return table.concat(lines, "\n")
+local function g(f) local ok, v = pcall(f) if ok and v ~= nil then return tostring(v) end return "?" end
+local lines = {}
+table.insert(lines, "Quran Majeed v3.0 - ERROR REPORT")
+table.insert(lines, "Time     : " .. g(function() return os.date("%Y-%m-%d %H:%M:%S") end))
+table.insert(lines, "Screen   : " .. tostring(screen))
+table.insert(lines, "Where    : " .. tostring(title or "Unknown"))
+table.insert(lines, "Android  : " .. g(function() return Build.VERSION.RELEASE end) .. " (SDK " .. g(function() return Build.VERSION.SDK_INT end) .. ")")
+table.insert(lines, "Device   : " .. g(function() return Build.MANUFACTURER end) .. " " .. g(function() return Build.MODEL end))
+table.insert(lines, "Location : " .. tostring(savedCity) .. ", " .. tostring(savedCountry))
+table.insert(lines, "------------------------------------------")
+table.insert(lines, tostring(errText))
+return table.concat(lines, "\n")
 end
-
 function V25.copyTextToClipboard(txt)
-  local ok = pcall(function()
-    activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Quran Majeed", tostring(txt)))
-  end)
-  if ok then
-    pcall(function() Toast.makeText(activity, "Copy ho gaya! Ab paste kar ke bhejein.", 0).show() end)
-  else
-    pcall(function() Toast.makeText(activity, "Copy nahi ho saka - text ko long-press kar ke select karein.", 1).show() end)
-  end
+local ok = pcall(function()
+activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Quran Majeed", tostring(txt)))
+end)
+if ok then
+pcall(function() Toast.makeText(activity, "Copy ho gaya! Ab paste kar ke bhejein.", 0).show() end)
+else
+pcall(function() Toast.makeText(activity, "Copy nahi ho saka - text ko long-press kar ke select karein.", 1).show() end)
 end
-
+end
 function showErrorDialog(title, errText)
-  local ok = pcall(function()
-    local msg = V25.buildErrorReport(title, errText)
-    local tv = TextView(activity)
-    tv.setText(msg)
-    pcall(function() tv.setTextIsSelectable(true) end)
-    pcall(function() tv.setPadding(24, 18, 24, 18) end)
-    pcall(function() tv.setTextSize(11) end)
-    AlertDialog.Builder(activity)
-      .setTitle("⚠ " .. tostring(title or "Error") .. " - Copy / Share karein")
-      .setView(tv)
-      .setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(msg) end})
-      .setNeutralButton("Share", {onClick=function()
-        pcall(function()
-          local shareIntent = Intent(Intent.ACTION_SEND)
-          shareIntent.setType("text/plain")
-          shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Quran Majeed v2.7 error report")
-          shareIntent.putExtra(Intent.EXTRA_TEXT, msg)
-          activity.startActivity(Intent.createChooser(shareIntent, "Error bhejein (WhatsApp / Email)"))
-        end)
-      end})
-      .setNegativeButton("Cancel", nil)
-      .show()
-  end)
-  if not ok then
-    pcall(function() Toast.makeText(activity, "Error: " .. tostring(errText), 1).show() end)
-  end
+local ok = pcall(function()
+local msg = V25.buildErrorReport(title, errText)
+local tv = TextView(activity)
+tv.setText(msg)
+pcall(function() tv.setTextIsSelectable(true) end)
+pcall(function() tv.setPadding(24, 18, 24, 18) end)
+pcall(function() tv.setTextSize(11) end)
+AlertDialog.Builder(activity)
+.setTitle("⚠ " .. tostring(title or "Error") .. " - Copy / Share karein")
+.setView(tv)
+.setPositiveButton("Copy", {onClick=function() V25.copyTextToClipboard(msg) end})
+.setNeutralButton("Share", {onClick=function()
+pcall(function()
+local shareIntent = Intent(Intent.ACTION_SEND)
+shareIntent.setType("text/plain")
+shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Quran Majeed v3.0 error report")
+shareIntent.putExtra(Intent.EXTRA_TEXT, msg)
+activity.startActivity(Intent.createChooser(shareIntent, "Error bhejein (WhatsApp / Email)"))
+end)
+end})
+.setNegativeButton("Cancel", nil)
+.show()
+end)
+if not ok then
+pcall(function() Toast.makeText(activity, "Error: " .. tostring(errText), 1).show() end)
 end
-
--- Safe runner: kisi bhi screen ya click ko is ke andar chalayein - agar error
--- aaye to app band/crash hone ke bajaye upar wala Copy/Share/Cancel dialog
--- khulega (poori tafseel + traceback ke sath).
+end
 function safeRun(label, fn, ...)
-  if type(fn) ~= "function" then return false end
-  local unpackFn = table.unpack or unpack
-  local args = {...}
-  local ok, err = xpcall(function() return fn(unpackFn(args)) end, function(e)
-    local tb = tostring(e)
-    pcall(function() if debug and debug.traceback then tb = debug.traceback(tostring(e), 2) end end)
-    return tb
-  end)
-  if not ok then showErrorDialog(label or "Error", err) end
-  return ok, err
+if type(fn) ~= "function" then return false end
+local unpackFn = table.unpack or unpack
+local args = {...}
+local ok, err = xpcall(function() return fn(unpackFn(args)) end, function(e)
+local tb = tostring(e)
+pcall(function() if debug and debug.traceback then tb = debug.traceback(tostring(e), 2) end end)
+return tb
+end)
+if not ok then showErrorDialog(label or "Error", err) end
+return ok, err
 end
-
 function downloadSurah(url, fileName, title)
-  -- FIX: is function mein pehle koi error-handling nahi thi - agar
-  -- DownloadManager.enqueue() kisi bhi wajah se (storage permission,
-  -- device masla, wagera) fail hota, to sirf ek generic/khamosh error
-  -- aata tha, asal wajah kabhi pata nahi chalti thi. Ab pcall se wrap
-  -- kar ke asal error message dikhaya jata hai.
-  local ok, err = pcall(function()
-    local req = DownloadManager.Request(Uri.parse(url))
-    req.setTitle(title)
-    req.setDescription("Downloading...")
-    -- FIX (asal wajah, ab error se confirm ho gayi): Android public
-    -- Downloads folder mein save hone wali file ke liye "HIDDEN"
-    -- notification allow nahi karta - SecurityException "Invalid value
-    -- for visibility: 2" deta hai. VISIBLE_NOTIFY_COMPLETED istemal karte
-    -- hain (ek chhota system notification dikhega jab tak download chale,
-    -- phir mukammal hone par - koi crash nahi hoga).
-    req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-    -- FIX: pehle setDestinationUri(Uri.fromFile(...)) se raw file path di
-    -- ja rahi thi - naye Android (10+) ki "Scoped Storage" restriction ki
-    -- wajah se yeh tareeqa kabhi kabhi beech mein hi fail/interrupt ho
-    -- jata hai. setDestinationInExternalPublicDir(...) DownloadManager ka
-    -- officially-supported, hamesha kaam karne wala tareeqa hai (isay
-    -- storage-permission ki bhi zaroorat nahi hoti, DownloadManager khud
-    -- is ke liye exempt hota hai) - end result wahi jagah hai
-    -- (Downloads/Quran_Files/), sirf tareeqa zyada reliable hai.
-    req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Quran_Files/" .. fileName)
-    activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
-  end)
-  if ok then
-    Toast.makeText(activity, "Download shuru ho gaya... khatam hote hi is Surah screen par wapis aakar offline play karein.", 1).show()
-  else
-    -- FIX: pehle sirf 2-second wala Toast tha, error text kabhi copy nahi
-    -- ho pata tha - ab persistent Dialog + Copy button hai
-    showErrorDialog("Download Error", err)
-  end
+local ok, err = pcall(function()
+local req = DownloadManager.Request(Uri.parse(url))
+req.setTitle(title)
+req.setDescription("Downloading...")
+req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Quran_Files/" .. fileName)
+activity.getSystemService(Context.DOWNLOAD_SERVICE).enqueue(req)
+end)
+if ok then
+Toast.makeText(activity, "Download shuru ho gaya... khatam hote hi is Surah screen par wapis aakar offline play karein.", 1).show()
+else
+showErrorDialog("Download Error", err)
+end
 end
 function confirmDelete(filePath, onSuccess) AlertDialog.Builder(activity).setTitle("Delete Confirmation").setMessage("Delete this offline file?").setPositiveButton("Yes", {onClick=function() local f=File(filePath) if f.exists() then f.delete() end Toast.makeText(activity,"Deleted",0).show() if onSuccess then onSuccess() end end}).setNegativeButton("No", nil).show() end
-
--- Surah metadata (Ruku boundaries + Arabic ayah text) - api.alquran.cloud se
--- live fetch hoti hai (guess/hardcode nahi ki, taake ghalat na ho), disk par
--- cache hoti hai taake offline bhi kaam kare. Ayat-ba-Ayat aur Ruku Mode dono
--- isay share karte hain.
 local rukuCache = {}
 local ayahTextCache = {}
-
-local function getSurahMetaCachePath(surahIdx) return ayahAudioDir .. "meta_surah" .. surahIdx .. ".txt" end
-
-local function saveSurahMetaToDisk(surahIdx, list, texts)
-  pcall(function()
-    local f = io.open(getSurahMetaCachePath(surahIdx), "w")
-    if f then
-      for _, r in ipairs(list) do
-        for a = r.startAyah, r.endAyah do
-          f:write(tostring(a) .. "|" .. tostring(r.globalRuku) .. "|" .. tostring(texts[a] or "") .. "\n")
-        end
-      end
-      f:close()
-    end
-  end)
+M.getSurahMetaCachePath = function(surahIdx) return activity.getCacheDir().getAbsolutePath() .. "/meta_surah" .. surahIdx .. ".json" end
+M.saveSurahMetaToDisk = function(surahIdx, list, texts)
+pcall(function()
+local f = io.open(M.getSurahMetaCachePath(surahIdx), "w")
+if f then
+for _, r in ipairs(list) do
+for a = r.startAyah, r.endAyah do
+f:write(tostring(a) .. "|" .. tostring(r.globalRuku) .. "|" .. tostring(texts[a] or "") .. "\n")
 end
-
-local function loadSurahMetaFromDisk(surahIdx)
-  local path = getSurahMetaCachePath(surahIdx)
-  if not File(path).exists() then return nil, nil end
-  local ok, list, texts = pcall(function()
-    local f = io.open(path, "r")
-    if not f then return nil, nil end
-    local list2 = {}
-    local texts2 = {}
-    local curRuku = nil
-    for lineStr in f:lines() do
-      local aStr, rStr, txt = lineStr:match("^(%d+)|(%d+)|(.*)$")
-      if aStr then
-        local a = tonumber(aStr)
-        local rukuNum = tonumber(rStr)
-        texts2[a] = txt
-        if not curRuku or curRuku.globalRuku ~= rukuNum then
-          curRuku = {globalRuku=rukuNum, startAyah=a, endAyah=a}
-          table.insert(list2, curRuku)
-        else
-          curRuku.endAyah = a
-        end
-      end
-    end
-    f:close()
-    return list2, texts2
-  end)
-  if ok then return list, texts end
-  return nil, nil
 end
-
-local function fetchSurahMeta(surahIdx, callback)
-  if rukuCache[surahIdx] and ayahTextCache[surahIdx] then callback(rukuCache[surahIdx], ayahTextCache[surahIdx]) return end
-  local diskList, diskTexts = loadSurahMetaFromDisk(surahIdx)
-  if diskList and diskTexts and next(diskTexts) then
-    rukuCache[surahIdx] = diskList
-    ayahTextCache[surahIdx] = diskTexts
-    callback(diskList, diskTexts)
-    return
-  end
-  Thread(Runnable{run=function()
-    local ok, result, texts = pcall(function()
-      local conn = URL("https://api.alquran.cloud/v1/surah/" .. surahIdx .. "/quran-uthmani").openConnection()
-      conn.setConnectTimeout(10000) conn.setReadTimeout(15000)
-      local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
-      local res = "" local line = reader.readLine()
-      while line do res = res..line line = reader.readLine() end
-      reader.close()
-      local JSONObject = luajava.bindClass("org.json.JSONObject")
-      local root = JSONObject(res)
-      local data = root.getJSONObject("data")
-      local ayahs = data.getJSONArray("ayahs")
-      local list = {}
-      local ayahTexts = {}
-      local curRuku = nil
-      for i=0, ayahs.length()-1 do
-        local a = ayahs.getJSONObject(i)
-        local ayahNum = a.getInt("numberInSurah")
-        local rukuNum = a.getInt("ruku")
-        ayahTexts[ayahNum] = tostring(a.getString("text"))
-        if not curRuku or curRuku.globalRuku ~= rukuNum then
-          curRuku = {globalRuku=rukuNum, startAyah=ayahNum, endAyah=ayahNum}
-          table.insert(list, curRuku)
-        else
-          curRuku.endAyah = ayahNum
-        end
-      end
-      return list, ayahTexts
-    end)
-    handler.post(Runnable{run=function()
-      if ok and result and #result > 0 then
-        rukuCache[surahIdx] = result
-        ayahTextCache[surahIdx] = texts or {}
-        saveSurahMetaToDisk(surahIdx, result, texts or {})
-        callback(result, ayahTextCache[surahIdx])
-      else
-        callback(nil, nil)
-      end
-    end})
-  end}).start()
+f:close()
 end
-
---------------------------------------------------
--- WORD-BY-WORD (HIFZ) MODE - v2.1
--- Sirf ek naya, alag-thalag mode hai - koi bhi existing function
--- (playReliable/stopPlayer/mp/duaMp/Ayat-ba-Ayat/Ruku wagera) mein koi
--- tabdeeli nahi ki gayi. Ye mode wahi cheezein reuse karta hai jo v2.0
--- mein pehle se ban chuki hain:
---   - Audio: buildAyahUrl()/getAyahAudioLocal() (Alafasy, everyayah.com) -
---     bilkul wahi jo Ayat-ba-Ayat mode use karta hai
---   - Text: fetchSurahMeta() (api.alquran.cloud, disk-cached) - bilkul
---     wahi jo Ayat-ba-Ayat/Ruku mode use karte hain
--- Sirf NAYI cheez: lafz (word) ki exact timing (kaunsa lafz audio ke
--- kis second par shuru/khatam hota hai) - iske liye ek free, open-source
--- data ("quran-align" project, GitHub) use hota hai jo Alafasy reciter
--- ke liye hi bana hai - is liye yeh bilkul sahi audio ke saath sync hoga.
--- Apna ALAG MediaPlayer (WBW.player) hai - mp/duaMp ko bilkul touch nahi
--- karta, is liye kisi bhi purani screen ki playback logic par asar nahi.
---------------------------------------------------
--- FIX (v2.5): saari WBW state EK table - AndroLua 200-local limit
-local WBW = {
-  player=nil, timingIndex=nil, words=nil, timings=nil,
-  wordIdx=1, surahIdx=1, ayahNum=1, autoAdv=false,
-  stopHandle=nil, pendingWordDuration=200, onWordPlaybackDone=nil,
-  timingUrl="https://github.com/cpfair/quran-align/releases/download/release-2016-11-24/Alafasy_128kbps.json",
-  timingCachePath=ayahAudioDir .. "wbw_timing_alafasy.json",
-  timingLoadError=nil,
-}
+end)
+end
+M.loadSurahMetaFromDisk = function(surahIdx)
+local path = M.getSurahMetaCachePath(surahIdx)
+if not File(path).exists() then return nil, nil end
+local ok, list, texts = pcall(function()
+local f = io.open(path, "r")
+if not f then return nil, nil end
+local list2 = {}
+local texts2 = {}
+local curRuku = nil
+for lineStr in f:lines() do
+local aStr, rStr, txt = lineStr:match("^(%d+)|(%d+)|(.*)$")
+if aStr then
+local a = tonumber(aStr)
+local rukuNum = tonumber(rStr)
+texts2[a] = txt
+if not curRuku or curRuku.globalRuku ~= rukuNum then
+curRuku = {globalRuku=rukuNum, startAyah=a, endAyah=a}
+table.insert(list2, curRuku)
+else
+curRuku.endAyah = a
+end
+end
+end
+f:close()
+return list2, texts2
+end)
+if ok then return list, texts end
+return nil, nil
+end
+M.fetchSurahMeta = function(surahIdx, callback)
+if rukuCache[surahIdx] and ayahTextCache[surahIdx] then callback(rukuCache[surahIdx], ayahTextCache[surahIdx]) return end
+local diskList, diskTexts = M.loadSurahMetaFromDisk(surahIdx)
+if diskList and diskTexts and next(diskTexts) then
+rukuCache[surahIdx] = diskList
+ayahTextCache[surahIdx] = diskTexts
+callback(diskList, diskTexts)
+return
+end
+Thread(Runnable{run=function()
+local ok, result, texts = pcall(function()
+local conn = URL("https://api.alquran.cloud/v1/surah/" .. surahIdx .. "/quran-uthmani").openConnection()
+conn.setConnectTimeout(10000) conn.setReadTimeout(15000)
+local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
+local res = "" local line = reader.readLine()
+while line do res = res..line line = reader.readLine() end
+reader.close()
+local JSONObject = luajava.bindClass("org.json.JSONObject")
+local root = JSONObject(res)
+local data = root.getJSONObject("data")
+local ayahs = data.getJSONArray("ayahs")
+local list = {}
+local ayahTexts = {}
+local curRuku = nil
+for i=0, ayahs.length()-1 do
+local a = ayahs.getJSONObject(i)
+local ayahNum = a.getInt("numberInSurah")
+local rukuNum = a.getInt("ruku")
+ayahTexts[ayahNum] = tostring(a.getString("text"))
+if not curRuku or curRuku.globalRuku ~= rukuNum then
+curRuku = {globalRuku=rukuNum, startAyah=ayahNum, endAyah=ayahNum}
+table.insert(list, curRuku)
+else
+curRuku.endAyah = ayahNum
+end
+end
+return list, ayahTexts
+end)
+handler.post(Runnable{run=function()
+if ok and result and #result > 0 then
+rukuCache[surahIdx] = result
+ayahTextCache[surahIdx] = texts or {}
+M.saveSurahMetaToDisk(surahIdx, result, texts or {})
+callback(result, ayahTextCache[surahIdx])
+else
+callback(nil, nil)
+end
+end})
+end}).start()
+end
+local WBW = { player=nil, timingIndex=nil, words=nil, timings=nil, wordIdx=1, surahIdx=1, ayahNum=1, autoAdv=false, stopHandle=nil, pendingWordDuration=200, onWordPlaybackDone=nil, timingUrl="https://github.com/cpfair/quran-align/releases/download/release-2016-11-24/Alafasy_128kbps.json", timingCachePath=ayahAudioDir .. "wbw_timing_alafasy.json", timingLoadError=nil, }
 function wbwStopAudio()
-  WBW.onWordPlaybackDone = nil
-  if WBW.stopHandle then pcall(function() handler.removeCallbacks(WBW.stopHandle) end) WBW.stopHandle = nil end
-  if WBW.player then
-    local oldP = WBW.player
-    WBW.player = nil
-    Thread(Runnable{run=function()
-      pcall(function() if oldP.isPlaying() then oldP.stop() end end)
-      pcall(function() oldP.release() end)
-    end}).start()
-  end
+WBW.onWordPlaybackDone = nil
+if WBW.stopHandle then pcall(function() handler.removeCallbacks(WBW.stopHandle) end) WBW.stopHandle = nil end
+if WBW.player then
+local oldP = WBW.player
+WBW.player = nil
+Thread(Runnable{run=function()
+pcall(function() if oldP.isPlaying() then oldP.stop() end end)
+pcall(function() oldP.release() end)
+end}).start()
 end
-
--- GitHub release downloads kabhi kabhi ek "redirect" (302) se guzarte hain
--- (github.com -> objects.githubusercontent.com) - kuch Android versions par
--- HttpURLConnection ise khud follow nahi karta, is liye manually follow
--- karte hain (max 5 hops) taake download reliably chale.
+end
 function httpGetFollowRedirects(urlStr, maxRedirects)
-  local curUrl = urlStr
-  for i = 1, (maxRedirects or 5) do
-    local conn = URL(curUrl).openConnection()
-    conn.setConnectTimeout(20000) conn.setReadTimeout(60000)
-    conn.setInstanceFollowRedirects(false)
-    pcall(function() conn.setRequestProperty("User-Agent", "Mozilla/5.0") end)
-    local rc = conn.getResponseCode()
-    if rc >= 300 and rc < 400 then
-      local loc = conn.getHeaderField("Location")
-      pcall(function() conn.disconnect() end)
-      if not loc or loc == "" then error("Redirect mila lekin Location header khaali tha") end
-      curUrl = loc
-    else
-      if rc ~= 200 then error("HTTP " .. rc) end
-      local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
-      local res = "" local line = reader.readLine()
-      while line do res = res..line line = reader.readLine() end
-      reader.close()
-      return res
-    end
-  end
-  error("Bohot zyada redirects (5+)")
+local curUrl = urlStr
+for i = 1, (maxRedirects or 5) do
+local conn = URL(curUrl).openConnection()
+conn.setConnectTimeout(20000) conn.setReadTimeout(60000)
+conn.setInstanceFollowRedirects(false)
+pcall(function() conn.setRequestProperty("User-Agent", "Mozilla/5.0") end)
+local rc = conn.getResponseCode()
+if rc >= 300 and rc < 400 then
+local loc = conn.getHeaderField("Location")
+pcall(function() conn.disconnect() end)
+if not loc or loc == "" then error("Redirect mila lekin Location header khaali tha") end
+curUrl = loc
+else
+if rc ~= 200 then error("HTTP " .. rc) end
+local reader = BufferedReader(InputStreamReader(conn.getInputStream()))
+local res = "" local line = reader.readLine()
+while line do res = res..line line = reader.readLine() end
+reader.close()
+return res
 end
-
--- Alafasy ki poori word-timing JSON (ek hi baar) local cache se, ya download
--- karke, load karta hai aur parse karke WBW.timingIndex banata hai. Sirf app
--- session mein ek dafa hota hai - baad ki har ayat isi table se milti hai.
--- NOTE: agar yeh kisi bhi wajah se fail ho (network, parse), wbwLoadAyah
--- neeche khud-kaar "approximate" per-lafz timing bana leta hai, is liye
--- Word-by-Word feature is failure ki soorat mein bhi dead-end nahi hoti.
+end
+error("Bohot zyada redirects (5+)")
+end
 function wbwLoadTimingIndex(onDone)
-  if WBW.timingIndex then onDone(true) return end
-  Thread(Runnable{run=function()
-    local ok, raw = pcall(function()
-      if File(WBW.timingCachePath).exists() and File(WBW.timingCachePath).length() > 1000 then
-        local f = io.open(WBW.timingCachePath, "r")
-        local c = f:read("*a")
-        f:close()
-        return c
-      end
-      local res = httpGetFollowRedirects(WBW.timingUrl, 5)
-      pcall(function()
-        local fo = io.open(WBW.timingCachePath, "w")
-        fo:write(res)
-        fo:close()
-      end)
-      return res
-    end)
-    if not ok or not raw then
-      WBW.timingLoadError = "Timing file download nahi hui: " .. tostring(raw)
-      handler.post(Runnable{run=function() onDone(false) end})
-      return
-    end
-    local idx = {}
-    local pok, perr = pcall(function()
-      local JSONArray = luajava.bindClass("org.json.JSONArray")
-      local arr = JSONArray(raw)
-      for i=0, arr.length()-1 do
-        local o = arr.getJSONObject(i)
-        local s = o.getInt("surah")
-        local a = o.getInt("ayah")
-        local segsJson = o.getJSONArray("segments")
-        local segs = {}
-        for j=0, segsJson.length()-1 do
-          local seg = segsJson.getJSONArray(j)
-          segs[#segs+1] = {seg.getInt(0), seg.getInt(1), seg.getInt(2), seg.getInt(3)}
-        end
-        idx[string.format("%d_%d", s, a)] = segs
-      end
-    end)
-    if not pok then WBW.timingLoadError = "Timing file parse nahi hui: " .. tostring(perr) end
-    handler.post(Runnable{run=function()
-      if pok then WBW.timingIndex = idx end
-      onDone(pok)
-    end})
-  end}).start()
+if WBW.timingIndex then onDone(true) return end
+Thread(Runnable{run=function()
+local ok, raw = pcall(function()
+if File(WBW.timingCachePath).exists() and File(WBW.timingCachePath).length() > 1000 then
+local f = io.open(WBW.timingCachePath, "r")
+local c = f:read("*a")
+f:close()
+return c
 end
-
--- Ek ayat ke liye: text (fetchSurahMeta se), timing (WBW.timingIndex se),
--- aur audio (buildAyahUrl/getAyahAudioLocal se, already-downloaded ho to
--- wahi use hoti hai) - teeno load karke onReady(true) ya onReady(false, err)
+local res = httpGetFollowRedirects(WBW.timingUrl, 5)
+pcall(function()
+local fo = io.open(WBW.timingCachePath, "w")
+fo:write(res)
+fo:close()
+end)
+return res
+end)
+if not ok or not raw then
+WBW.timingLoadError = "Timing file download nahi hui: " .. tostring(raw)
+handler.post(Runnable{run=function() onDone(false) end})
+return
+end
+local idx = {}
+local pok, perr = pcall(function()
+local JSONArray = luajava.bindClass("org.json.JSONArray")
+local arr = JSONArray(raw)
+for i=0, arr.length()-1 do
+local o = arr.getJSONObject(i)
+local s = o.getInt("surah")
+local a = o.getInt("ayah")
+local segsJson = o.getJSONArray("segments")
+local segs = {}
+for j=0, segsJson.length()-1 do
+local seg = segsJson.getJSONArray(j)
+segs[#segs+1] = {seg.getInt(0), seg.getInt(1), seg.getInt(2), seg.getInt(3)}
+end
+idx[string.format("%d_%d", s, a)] = segs
+end
+end)
+if not pok then WBW.timingLoadError = "Timing file parse nahi hui: " .. tostring(perr) end
+handler.post(Runnable{run=function()
+if pok then WBW.timingIndex = idx end
+onDone(pok)
+end})
+end}).start()
+end
 function wbwLoadAyah(surahIdx, ayahNum, onReady)
-  wbwLoadTimingIndex(function(timingOk)
-    fetchSurahMeta(surahIdx, function(list, texts)
-      if not texts or not texts[ayahNum] then
-        onReady(false, "Ayat ka text load nahi hua. Internet check karein.")
-        return
-      end
-      local words = {}
-      for w in tostring(texts[ayahNum]):gmatch("%S+") do words[#words+1] = w end
-      WBW.words = words
-
-      local segs = (WBW.timingIndex and WBW.timingIndex[string.format("%d_%d", surahIdx, ayahNum)]) or {}
-      local tim = {}
-      for _, seg in ipairs(segs) do
-        local ws, we, st, en = seg[1], seg[2], seg[3], seg[4]
-        for i = ws, we - 1 do tim[i+1] = {st, en} end
-      end
-      local hasExactTiming = next(tim) ~= nil
-      WBW.timings = tim
-      WBW.wordIdx = 1
-
-      local localPath = getAyahAudioLocal(surahIdx, ayahNum)
-      local playUrl = File(localPath).exists() and localPath or buildAyahUrl(surahIdx, ayahNum)
-
-      wbwStopAudio()
-      local ok = pcall(function()
-        WBW.player = MediaPlayer()
-        -- FIX: pehle yahan setAudioStreamType nahi tha, jo purane Android
-        -- (jaise S7) par MediaPlayer ko prepare/play hi nahi hone deta -
-        -- yehi wajah thi "koi awaz nahi aati" ki. Ayat-ba-Ayat/Duas mode
-        -- (playReliable) mein yeh hamesha set hota hai, ab yahan bhi karte hain.
-        pcall(function() WBW.player.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
-        -- FIX (v2.2): screen band hone par bhi playback chalti rahe
-        pcall(function() WBW.player.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
-        WBW.player.setDataSource(playUrl)
-        WBW.player.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
-          -- SAFETY FALLBACK: agar is ayat ke liye exact per-lafz timing
-          -- nahi mili (timing file download/parse fail hui, ya is khaas
-          -- ayat ka data quran-align mein maujood nahi), to "not available"
-          -- dikhane ki bajaye ayat ki poori audio duration ko lafzon ki
-          -- tadaad mein barabar taqseem kar ke ek andazan (approximate)
-          -- timing khud bana lete hain - taake Sunein button HAMESHA kaam
-          -- kare
-          if not hasExactTiming then
-            local dur = 0
-            pcall(function() dur = p.getDuration() end)
-            if dur and dur > 0 and #words > 0 then
-              local est = {}
-              for i = 1, #words do
-                est[i] = {math.floor((i-1) * dur / #words), math.floor(i * dur / #words)}
-              end
-              WBW.timings = est
-            end
-          end
-          onReady(true, nil, hasExactTiming)
-        end})
-        -- FIX: seekTo() asynchronous hai - is se pehle start() foran bula
-        -- lena (seek poori hone se pehle hi) kabhi kabhi bilkul khamosh
-        -- reh jata tha (khaas kar pehli/"cold" seek par). Ab play/pause
-        -- dono OnSeekCompleteListener ke andar, seek MUKAMMAL hone ke
-        -- BAAD hote hain - is se har lafz reliably bajta hai.
-        WBW.player.setOnSeekCompleteListener(MediaPlayer.OnSeekCompleteListener{onSeekComplete=function(p)
-          pcall(function() p.start() end)
-          WBW.stopHandle = Runnable{run=function()
-            pcall(function() if WBW.player and WBW.player.isPlaying() then WBW.player.pause() end end)
-            WBW.stopHandle = nil
-            if screen == "wbwmode" and WBW.onWordPlaybackDone then WBW.onWordPlaybackDone() end
-          end}
-          handler.postDelayed(WBW.stopHandle, WBW.pendingWordDuration)
-        end})
-        WBW.player.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
-          -- FIX: kuch hosts (yahi everyayah.com bhi) is device/Android
-          -- version par seedhe streaming se theek se play nahi hote -
-          -- Ayat-ba-Ayat/Duas mode (playReliable) mein isi wajah se
-          -- background-download-fallback banaya gaya tha - Word-by-Word
-          -- mein bhi ab wahi established tareeqa reuse ho raha hai:
-          -- background download, phir local file se retry.
-          if playUrl ~= localPath then
-            -- v2.7-fix2: yahan se bhi background download (Thread) hata diya
-            -- gaya hai - wahi loop phone ko hang karta tha.
-            Toast.makeText(activity, "Online stream nahi hui - internet check kar ke dobara try karein.", 1).show()
-            onReady(false, "Ayat ki audio online load nahi hui (auto-download ab band hai - hang fix).")
-          else
-            onReady(false, "Ayat ki audio load nahi hui (downloaded file kharab hai).")
-          end
-          return true
-        end})
-        WBW.player.prepareAsync()
-      end)
-      if not ok then onReady(false, "Audio player error.") end
-    end)
-  end)
+wbwLoadTimingIndex(function(timingOk)
+M.fetchSurahMeta(surahIdx, function(list, texts)
+if not texts or not texts[ayahNum] then
+onReady(false, "Ayat ka text load nahi hua. Internet check karein.")
+return
 end
-
--- Ayat number poochne wala chhota dialog (Update Location wale dialog jaisa) -
--- Surah Player screen ke naye button se khulta hai
+local words = {}
+for w in tostring(texts[ayahNum]):gmatch("%S+") do words[#words+1] = w end
+WBW.words = words
+local segs = (WBW.timingIndex and WBW.timingIndex[string.format("%d_%d", surahIdx, ayahNum)]) or {}
+local tim = {}
+for _, seg in ipairs(segs) do
+local ws, we, st, en = seg[1], seg[2], seg[3], seg[4]
+for i = ws, we - 1 do tim[i+1] = {st, en} end
+end
+local hasExactTiming = next(tim) ~= nil
+WBW.timings = tim
+WBW.wordIdx = 1
+local localPath = M.getAyahAudioLocal(surahIdx, ayahNum)
+local playUrl = File(localPath).exists() and localPath or M.buildAyahUrl(surahIdx, ayahNum)
+wbwStopAudio()
+local ok = pcall(function()
+WBW.player = MediaPlayer()
+pcall(function() WBW.player.setAudioStreamType(AudioManager.STREAM_MUSIC) end)
+pcall(function() WBW.player.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
+WBW.player.setDataSource(playUrl)
+WBW.player.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
+if not hasExactTiming then
+local dur = 0
+pcall(function() dur = p.getDuration() end)
+if dur and dur > 0 and #words > 0 then
+local est = {}
+for i = 1, #words do
+est[i] = {math.floor((i-1) * dur / #words), math.floor(i * dur / #words)}
+end
+WBW.timings = est
+end
+end
+onReady(true, nil, hasExactTiming)
+end})
+WBW.player.setOnSeekCompleteListener(MediaPlayer.OnSeekCompleteListener{onSeekComplete=function(p)
+pcall(function() p.start() end)
+WBW.stopHandle = Runnable{run=function()
+pcall(function() if WBW.player and WBW.player.isPlaying() then WBW.player.pause() end end)
+WBW.stopHandle = nil
+if screen == "wbwmode" and WBW.onWordPlaybackDone then WBW.onWordPlaybackDone() end
+end}
+handler.postDelayed(WBW.stopHandle, WBW.pendingWordDuration)
+end})
+WBW.player.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p,w,e)
+if playUrl ~= localPath then
+Toast.makeText(activity, "Online stream nahi hui - internet check kar ke dobara try karein.", 1).show()
+onReady(false, "Ayat ki audio online load nahi hui (auto-download ab band hai - hang fix).")
+else
+onReady(false, "Ayat ki audio load nahi hui (downloaded file kharab hai).")
+end
+return true
+end})
+WBW.player.prepareAsync()
+end)
+if not ok then onReady(false, "Audio player error.") end
+end)
+end)
+end
 function showWbwStartDialog(surahIdx)
-  local mx = surahAyahCounts[surahIdx] or 1
-  local defaultAyah = lastAyahProgress[surahIdx] or 1
-  local inp = EditText(activity)
-  inp.setHint("Ayat number (1-" .. mx .. ")")
-  inp.setText(tostring(defaultAyah))
-  AlertDialog.Builder(activity).setTitle("Word-by-Word: " .. surahNames[surahIdx]).setView(inp).setPositiveButton("Shuru Karein", {onClick=function()
-    local av = tonumber(inp.getText().toString()) or 1
-    if av < 1 then av = 1 end
-    if av > mx then av = mx end
-    showWordByWordMode(surahIdx, av)
-  end}).setNegativeButton("Cancel", nil).show()
+local mx = surahAyahCounts[surahIdx] or 1
+local defaultAyah = lastAyahProgress[surahIdx] or 1
+local inp = EditText(activity)
+inp.setHint("Ayat number (1-" .. mx .. ")")
+inp.setText(tostring(defaultAyah))
+AlertDialog.Builder(activity).setTitle("Word-by-Word: " .. surahNames[surahIdx]).setView(inp).setPositiveButton("Shuru Karein", {onClick=function()
+local av = tonumber(inp.getText().toString()) or 1
+if av < 1 then av = 1 end
+if av > mx then av = mx end
+showWordByWordMode(surahIdx, av)
+end}).setNegativeButton("Cancel", nil).show()
 end
-
 function showWordByWordMode(surahIdx, startAyah)
-  screen = "wbwmode"
-  WBW.surahIdx = surahIdx
-  WBW.ayahNum = startAyah or 1
-  wbwStopAudio()
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() wbwStopAudio() showPlayer(WBW.surahIdx) end},
-      {TextView, id="wbwHeaderTxt", text=surahNames[surahIdx] .. " - Ayat " .. WBW.ayahNum .. "/" .. (surahAyahCounts[surahIdx] or "?"), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, id="wbwStatusTxt", text="Loading...", textSize="12sp", textColor="#777777", padding="6dp", gravity="center"},
-    {TextView, id="wbwWordTxt", text="", textSize="46sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="center", padding="10dp", layout_width=-1, layout_height=0, layout_weight=3, contentDescription="Current word"},
-    {TextView, id="wbwCountTxt", text="", textSize="13sp", textColor=textColor, gravity="center"},
-    {LinearLayout, orientation=0, gravity="center", layout_width=-1, layout_marginTop="10dp",
-      {Button, id="wbwPrevWordBtn", text="Prev Lafz", textSize="13sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous word"},
-      {Button, id="wbwPlayWordBtn", text="Sunein", textSize="14sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.2, layout_margin="2dp", contentDescription="Play this word"},
-      {Button, id="wbwNextWordBtn", text="Next Lafz", textSize="13sp", layout_weight=1, layout_margin="2dp", contentDescription="Next word"}
-    },
-    {LinearLayout, orientation=0, gravity="center", layout_width=-1, layout_marginTop="8dp",
-      {Button, id="wbwAutoBtn", text="Auto: OFF", textSize="12sp", layout_weight=1, layout_margin="2dp", contentDescription="Toggle auto advance to next word"},
-      {Button, id="wbwPrevAyahBtn", text="Pichli Ayat", textSize="12sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous Ayat"},
-      {Button, id="wbwNextAyahBtn", text="Agli Ayat", textSize="12sp", layout_weight=1, layout_margin="2dp", contentDescription="Next Ayat"}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  local function renderWord()
-    if WBW.words and WBW.words[WBW.wordIdx] then
-      pcall(function()
-        wbwWordTxt.setText(WBW.words[WBW.wordIdx])
-        wbwCountTxt.setText("Lafz " .. WBW.wordIdx .. " / " .. #WBW.words)
-      end)
-    end
-  end
-
-  local playCurrentWord
-  playCurrentWord = function()
-    if WBW.stopHandle then pcall(function() handler.removeCallbacks(WBW.stopHandle) end) WBW.stopHandle = nil end
-    if not WBW.player then
-      Toast.makeText(activity, "Audio abhi taiyar nahi hui, thoda intezar karein.", 0).show()
-      return
-    end
-    local t = WBW.timings and WBW.timings[WBW.wordIdx]
-    if not t then
-      -- FIX: pehle "andazan" (approximate) timing sirf ek dafa, audio
-      -- "prepared" hote hi bana li jati thi - us waqt duration kabhi kabhi
-      -- 0 milti hai (khaas kar streaming/naye-download-hue files par),
-      -- is liye andazan timing khaali reh jati thi aur hamesha "not
-      -- available" aata tha. Ab isay YAHIN, Sunein dabane ke waqt banate
-      -- hain - is waqt tak duration hamesha reliably mil jati hai.
-      local dur = 0
-      pcall(function() dur = WBW.player.getDuration() end)
-      if dur and dur > 0 and WBW.words and #WBW.words > 0 then
-        local st = math.floor((WBW.wordIdx - 1) * dur / #WBW.words)
-        local en = math.floor(WBW.wordIdx * dur / #WBW.words)
-        t = {st, en}
-        WBW.timings = WBW.timings or {}
-        WBW.timings[WBW.wordIdx] = t
-      end
-    end
-    if not t then
-      Toast.makeText(activity, "Is lafz ke liye audio timing nahi mili (audio duration abhi maloom nahi ho saki).", 0).show()
-      return
-    end
-    local st, en = t[1], t[2]
-    -- FIX: seekTo() asynchronous hai - foran baad start() bulane se, seek
-    -- poori hone se PEHLE hi audio start/pause ho jati thi (khaas kar
-    -- pehli/"cold" seek par) - is liye kabhi kabhi bilkul awaz nahi aati
-    -- thi (Auto mode mein baad ke lafzon tak seek "warm" ho jati thi, is
-    -- liye wahan chalta mehsoos hota tha). Ab start() aur stop-timer dono
-    -- OnSeekCompleteListener ke andar, seek MUKAMMAL hone ke BAAD shuru
-    -- hote hain.
-    WBW.pendingWordDuration = math.max(en - st, 200)
-    pcall(function() WBW.player.seekTo(st) end)
-  end
-
-  WBW.onWordPlaybackDone = function()
-    if WBW.autoAdv and WBW.words and WBW.wordIdx < #WBW.words then
-      WBW.wordIdx = WBW.wordIdx + 1
-      renderWord()
-      playCurrentWord()
-    end
-  end
-
-  local function loadAndRender()
-    pcall(function()
-      wbwStatusTxt.setText("Loading...")
-      wbwWordTxt.setText("")
-      wbwHeaderTxt.setText(surahNames[WBW.surahIdx] .. " - Ayat " .. WBW.ayahNum .. "/" .. (surahAyahCounts[WBW.surahIdx] or "?"))
-    end)
-    wbwLoadAyah(WBW.surahIdx, WBW.ayahNum, function(ok, err, exact)
-      if screen ~= "wbwmode" then return end
-      if ok then
-        pcall(function()
-          if exact then
-            wbwStatusTxt.setText("Reciter: Mishary Alafasy - lafz par Sunein dabayein")
-          else
-            wbwStatusTxt.setText("Reciter: Mishary Alafasy - andazan (approximate) taqseem, is ayat ke liye exact lafz-timing maujood nahi")
-          end
-          saveLastAyahProgress(WBW.surahIdx, WBW.ayahNum)
-        end)
-        renderWord()
-      else
-        pcall(function() wbwStatusTxt.setText(err or "Load nahi hua.") end)
-      end
-    end)
-  end
-
-  wbwPlayWordBtn.onClick = function() playCurrentWord() end
-  wbwPrevWordBtn.onClick = function() if WBW.words and WBW.wordIdx > 1 then WBW.wordIdx = WBW.wordIdx - 1 renderWord() end end
-  wbwNextWordBtn.onClick = function() if WBW.words and WBW.wordIdx < #WBW.words then WBW.wordIdx = WBW.wordIdx + 1 renderWord() end end
-
-  wbwAutoBtn.onClick = function()
-    WBW.autoAdv = not WBW.autoAdv
-    wbwAutoBtn.setText(WBW.autoAdv and "Auto: ON" or "Auto: OFF")
-    pcall(function() wbwAutoBtn.setBackgroundColor(Color.parseColor(WBW.autoAdv and "#1565C0" or "#607D8B")) end)
-  end
-
-  wbwPrevAyahBtn.onClick = function()
-    if WBW.ayahNum > 1 then WBW.ayahNum = WBW.ayahNum - 1
-    elseif WBW.surahIdx > 1 then WBW.surahIdx = WBW.surahIdx - 1 WBW.ayahNum = surahAyahCounts[WBW.surahIdx] or 1
-    else return end
-    wbwStopAudio()
-    loadAndRender()
-  end
-
-  wbwNextAyahBtn.onClick = function()
-    local mx = surahAyahCounts[WBW.surahIdx] or 1
-    if WBW.ayahNum < mx then WBW.ayahNum = WBW.ayahNum + 1
-    elseif WBW.surahIdx < 114 then WBW.surahIdx = WBW.surahIdx + 1 WBW.ayahNum = 1
-    else return end
-    wbwStopAudio()
-    loadAndRender()
-  end
-
-  loadAndRender()
+screen = "wbwmode"
+WBW.surahIdx = surahIdx
+WBW.ayahNum = startAyah or 1
+wbwStopAudio()
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() wbwStopAudio() showPlayer(WBW.surahIdx) end},
+{TextView, id="wbwHeaderTxt", text=surahNames[surahIdx] .. " - Ayat " .. WBW.ayahNum .. "/" .. (surahAyahCounts[surahIdx] or "?"), textSize="14sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, id="wbwStatusTxt", text="Loading...", textSize="12sp", textColor="#777777", padding="6dp", gravity="center"},
+{TextView, id="wbwWordTxt", text="", textSize="46sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="center", padding="10dp", layout_width=-1, layout_height=0, layout_weight=3, contentDescription="Current word"},
+{TextView, id="wbwCountTxt", text="", textSize="13sp", textColor=textColor, gravity="center"},
+{LinearLayout, orientation=0, gravity="center", layout_width=-1, layout_marginTop="10dp",
+{Button, id="wbwPrevWordBtn", text="Prev Lafz", textSize="13sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous word"},
+{Button, id="wbwPlayWordBtn", text="Sunein", textSize="14sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.2, layout_margin="2dp", contentDescription="Play this word"},
+{Button, id="wbwNextWordBtn", text="Next Lafz", textSize="13sp", layout_weight=1, layout_margin="2dp", contentDescription="Next word"}
+},
+{LinearLayout, orientation=0, gravity="center", layout_width=-1, layout_marginTop="8dp",
+{Button, id="wbwAutoBtn", text="Auto: OFF", textSize="12sp", layout_weight=1, layout_margin="2dp", contentDescription="Toggle auto advance to next word"},
+{Button, id="wbwPrevAyahBtn", text="Pichli Ayat", textSize="12sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous Ayat"},
+{Button, id="wbwNextAyahBtn", text="Agli Ayat", textSize="12sp", layout_weight=1, layout_margin="2dp", contentDescription="Next Ayat"}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+local function renderWord()
+if WBW.words and WBW.words[WBW.wordIdx] then
+pcall(function()
+wbwWordTxt.setText(WBW.words[WBW.wordIdx])
+wbwCountTxt.setText("Lafz " .. WBW.wordIdx .. " / " .. #WBW.words)
+end)
 end
-
--- AYAT-BA-AYAT MODE (verse by verse - tap an Ayat number to play just that ayah)
+end
+local playCurrentWord
+playCurrentWord = function()
+if WBW.stopHandle then pcall(function() handler.removeCallbacks(WBW.stopHandle) end) WBW.stopHandle = nil end
+if not WBW.player then
+Toast.makeText(activity, "Audio abhi taiyar nahi hui, thoda intezar karein.", 0).show()
+return
+end
+local t = WBW.timings and WBW.timings[WBW.wordIdx]
+if not t then
+local dur = 0
+pcall(function() dur = WBW.player.getDuration() end)
+if dur and dur > 0 and WBW.words and #WBW.words > 0 then
+local st = math.floor((WBW.wordIdx - 1) * dur / #WBW.words)
+local en = math.floor(WBW.wordIdx * dur / #WBW.words)
+t = {st, en}
+WBW.timings = WBW.timings or {}
+WBW.timings[WBW.wordIdx] = t
+end
+end
+if not t then
+Toast.makeText(activity, "Is lafz ke liye audio timing nahi mili (audio duration abhi maloom nahi ho saki).", 0).show()
+return
+end
+local st, en = t[1], t[2]
+WBW.pendingWordDuration = math.max(en - st, 200)
+pcall(function() WBW.player.seekTo(st) end)
+end
+WBW.onWordPlaybackDone = function()
+if WBW.autoAdv and WBW.words and WBW.wordIdx < #WBW.words then
+WBW.wordIdx = WBW.wordIdx + 1
+renderWord()
+playCurrentWord()
+end
+end
+local function loadAndRender()
+pcall(function()
+wbwStatusTxt.setText("Loading...")
+wbwWordTxt.setText("")
+wbwHeaderTxt.setText(surahNames[WBW.surahIdx] .. " - Ayat " .. WBW.ayahNum .. "/" .. (surahAyahCounts[WBW.surahIdx] or "?"))
+end)
+wbwLoadAyah(WBW.surahIdx, WBW.ayahNum, function(ok, err, exact)
+if screen ~= "wbwmode" then return end
+if ok then
+pcall(function()
+if exact then
+wbwStatusTxt.setText("Reciter: Mishary Alafasy - lafz par Sunein dabayein")
+else
+wbwStatusTxt.setText("Reciter: Mishary Alafasy - andazan (approximate) taqseem, is ayat ke liye exact lafz-timing maujood nahi")
+end
+M.saveLastAyahProgress(WBW.surahIdx, WBW.ayahNum)
+end)
+renderWord()
+else
+pcall(function() wbwStatusTxt.setText(err or "Load nahi hua.") end)
+end
+end)
+end
+wbwPlayWordBtn.onClick = function() playCurrentWord() end
+wbwPrevWordBtn.onClick = function() if WBW.words and WBW.wordIdx > 1 then WBW.wordIdx = WBW.wordIdx - 1 renderWord() end end
+wbwNextWordBtn.onClick = function() if WBW.words and WBW.wordIdx < #WBW.words then WBW.wordIdx = WBW.wordIdx + 1 renderWord() end end
+wbwAutoBtn.onClick = function()
+WBW.autoAdv = not WBW.autoAdv
+wbwAutoBtn.setText(WBW.autoAdv and "Auto: ON" or "Auto: OFF")
+pcall(function() wbwAutoBtn.setBackgroundColor(Color.parseColor(WBW.autoAdv and "#1565C0" or "#607D8B")) end)
+end
+wbwPrevAyahBtn.onClick = function()
+if WBW.ayahNum > 1 then WBW.ayahNum = WBW.ayahNum - 1
+elseif WBW.surahIdx > 1 then WBW.surahIdx = WBW.surahIdx - 1 WBW.ayahNum = surahAyahCounts[WBW.surahIdx] or 1
+else return end
+wbwStopAudio()
+loadAndRender()
+end
+wbwNextAyahBtn.onClick = function()
+local mx = surahAyahCounts[WBW.surahIdx] or 1
+if WBW.ayahNum < mx then WBW.ayahNum = WBW.ayahNum + 1
+elseif WBW.surahIdx < 114 then WBW.surahIdx = WBW.surahIdx + 1 WBW.ayahNum = 1
+else return end
+wbwStopAudio()
+loadAndRender()
+end
+loadAndRender()
+end
 function showAyahByAyah(surahIdx, autoPlayAyat)
-  screen = "ayahmode"
-  local bgColor, textColor = getThemeColors()
-  local totalAyahs = surahAyahCounts[surahIdx] or 0
-  local alreadyDownloaded = 0
-  for a=1, totalAyahs do
-    if File(getAyahAudioLocal(surahIdx, a)).exists() then alreadyDownloaded = alreadyDownloaded + 1 end
-  end
-
-  local function buildLabels(texts)
-    local labels = {}
-    for a=1, totalAyahs do
-      if texts and texts[a] then
-        table.insert(labels, "Ayat " .. a .. "  -  " .. texts[a])
-      else
-        table.insert(labels, "Ayat " .. a)
-      end
-    end
-    return labels
-  end
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() showPlayer(surahIdx) end},
-      {TextView, text=surahNames[surahIdx] .. " - Ayat-ba-Ayat", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, id="txtAyahStatus", text="Reciter: Mishary Alafasy (fixed reciter for this mode). Tap an Ayat to play it, long-press for Copy/Share.", textSize="11sp", textColor="#777777", padding="8dp"},
-    (lastAyahProgress[surahIdx] and {Button, id="btnResumeAyah", text="Resume from Ayat " .. lastAyahProgress[surahIdx], textSize="13sp", backgroundColor="#FF8F00", textColor=-1, layout_margin="8dp"}) or {LinearLayout, orientation=0, layout_width=-1, layout_height=0},
-    -- NAYA (v2.5): Ayat Repeat spinner seedha is screen par (Menu nahi jana)
-    {LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, padding="8dp",
-      {TextView, text="Ayat Repeat:", textSize="13sp", textColor=textColor, layout_marginRight="8dp"},
-      {Spinner, id="ayahRepeatSpinner", layout_width=0, layout_weight=1}
-    },
-    {TextView, id="txtDownloadProgress", text="Downloaded for offline: " .. alreadyDownloaded .. " / " .. totalAyahs, textSize="12sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="8dp"},
-    {Button, id="btnDownloadAllAyahs", text="Download All Ayahs for Offline", textSize="13sp", backgroundColor="#1976D2", textColor=-1, layout_margin="8dp"},
-    {ListView, id="ayahList", layout_width=-1, layout_height=0, layout_weight=1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  do
-    local repLabels = {"1x (No Repeat)", "2x", "3x", "5x", "10x"}
-    local repValues = {1, 2, 3, 5, 10}
-    local repIndex = 0
-    for i,v in ipairs(repValues) do if v == PS.ayahRepeat then repIndex = i - 1 break end end
-    ayahRepeatSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repLabels))
-    ayahRepeatSpinner.setSelection(repIndex)
-    ayahRepeatSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
-      saveAyahRepeatCount(repValues[pos+1])
-    end})
-  end
-
-  -- NAYA (v2.2): "Repeat" - Settings mein jo count chuna hai, usi hisaab se
-  -- yeh Ayat lagataar utni dafa bajti hai (translation bhi har dafa, agar
-  -- ON ho) - hifz/memorization ke liye. remainingRepeats khatam hone tak
-  -- khud-ba-khud agli "dohrai" chalti hai.
-  local function playAyahRepeated(n, remainingRepeats)
-    if n < 1 or n > totalAyahs then return end
-    if remainingRepeats < 1 then return end
-    local repeatTotal = PS.ayahRepeat
-    local repeatNow = repeatTotal - remainingRepeats + 1
-    local statusSuffix = (repeatTotal > 1) and (" (repeat " .. repeatNow .. "/" .. repeatTotal .. ")") or ""
-    pcall(function() txtAyahStatus.setText("Playing Ayat " .. n .. " of " .. totalAyahs .. statusSuffix) end)
-    saveLastAyahProgress(surahIdx, n)
-    local function afterOneRound()
-      if remainingRepeats > 1 then playAyahRepeated(n, remainingRepeats - 1) end
-    end
-    -- NAYA (v2.1): Tarjuma "Urdu" ON ho to Arabic ke turant baad usi
-    -- Ayat ka Urdu tarjuma bhi play hota hai (per-Ayat, everyayah.com)
-    playReliable(buildAyahUrl(surahIdx, n), getAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n, nil, function()
-      if translationMode == "Urdu" then
-        local uUrl, uPath = currentUrduAyahPair(surahIdx, n)
-        playReliable(uUrl, uPath, surahNames[surahIdx] .. " Ayat " .. n .. " (Urdu)", nil, afterOneRound)
-      elseif translationMode == "English" then
-        playReliable(buildEnglishAyahUrl(surahIdx, n), getEnglishAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (English)", nil, afterOneRound)
-      elseif translationMode == "Farsi" then
-        playReliable(buildFarsiAyahUrl(surahIdx, n), getFarsiAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (Farsi)", nil, afterOneRound)
-      else
-        afterOneRound()
-      end
-    end)
-  end
-  local function playAyah(n) playAyahRepeated(n, PS.ayahRepeat) end
-
-  if lastAyahProgress[surahIdx] and btnResumeAyah then
-    btnResumeAyah.onClick = function() playAyah(lastAyahProgress[surahIdx]) end
-  end
-
-  ayahList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, buildLabels(nil)))
-  ayahList.onItemClick = function(l, v, p, i) playAyah(i + 1) end
-  -- NAYA (v2.2): long-press par Copy/Share ka options menu (Arabic text
-  -- fetchSurahMeta se cached hota hai - agar abhi load nahi hui to
-  -- Toast se bata dete hain, jabran khaali text copy/share nahi karte)
-  ayahList.onItemLongClick = function(l, v, p, i)
-    local n = i + 1
-    local ayahText = ayahTextCache[surahIdx] and ayahTextCache[surahIdx][n]
-    AlertDialog.Builder(activity).setTitle(surahNames[surahIdx] .. " - Ayat " .. n).setItems({"▶️ Play", "📋 Copy Text", "📤 Share Text", "❌ Cancel"}, {onClick=function(d, w)
-      if w == 0 then
-        playAyah(n)
-      elseif w == 1 then
-        if ayahText then
-          pcall(function() activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Ayat", ayahText)) end)
-          Toast.makeText(activity, "Ayat text copied!", 0).show()
-        else
-          Toast.makeText(activity, "Ayat text abhi load nahi hui, thoda intezar karein.", 0).show()
-        end
-      elseif w == 2 then
-        if ayahText then
-          pcall(function()
-            local shareText = ayahText .. "\n\n(" .. surahNames[surahIdx] .. " " .. n .. ")"
-            local shareIntent = Intent(Intent.ACTION_SEND)
-            shareIntent.setType("text/plain")
-            shareIntent.putExtra(Intent.EXTRA_TEXT, shareText)
-            activity.startActivity(Intent.createChooser(shareIntent, "Share Ayat"))
-          end)
-        else
-          Toast.makeText(activity, "Ayat text abhi load nahi hui, thoda intezar karein.", 0).show()
-        end
-      end
-    end}).show()
-    return true
-  end
-
-  -- NAYA (v2.1): agar search se seedha kisi khaas Ayat par bheja gaya hai
-  if autoPlayAyat then playAyah(autoPlayAyat) end
-
-  fetchSurahMeta(surahIdx, function(list, texts)
-    if screen == "ayahmode" and texts then
-      pcall(function() ayahList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, buildLabels(texts))) end)
-    end
-  end)
-
-  btnDownloadAllAyahs.onClick = function()
-    btnDownloadAllAyahs.setEnabled(false)
-    btnDownloadAllAyahs.setText("Downloading...")
-    local items = {}
-    for a=1, totalAyahs do
-      table.insert(items, {url=buildAyahUrl(surahIdx, a), path=getAyahAudioLocal(surahIdx, a)})
-    end
-    -- NAYA (v2.1): Tarjuma "Urdu"/"English" ON ho to offline ke liye
-    -- tarjuma wali Ayat files bhi isi download mein saath shamil ho jati hain
-    local totalItems = totalAyahs
-    if translationMode == "Urdu" then
-      for a=1, totalAyahs do
-        local uUrl, uPath = currentUrduAyahPair(surahIdx, a)
-        table.insert(items, {url=uUrl, path=uPath})
-      end
-      totalItems = totalAyahs * 2
-    elseif translationMode == "English" then
-      for a=1, totalAyahs do
-        table.insert(items, {url=buildEnglishAyahUrl(surahIdx, a), path=getEnglishAyahAudioLocal(surahIdx, a)})
-      end
-      totalItems = totalAyahs * 2
-    elseif translationMode == "Farsi" then
-      for a=1, totalAyahs do
-        table.insert(items, {url=buildFarsiAyahUrl(surahIdx, a), path=getFarsiAyahAudioLocal(surahIdx, a)})
-      end
-      totalItems = totalAyahs * 2
-    end
-    downloadSequentially(items, 1, 0, function(doneSoFar, idx)
-      if idx % 3 == 0 or idx == totalItems then
-        if screen == "ayahmode" then pcall(function() txtDownloadProgress.setText("Downloaded for offline: " .. doneSoFar .. " / " .. totalItems) end) end
-      end
-    end, function(done)
-      if screen == "ayahmode" then
-        pcall(function()
-          btnDownloadAllAyahs.setEnabled(true)
-          btnDownloadAllAyahs.setText("Download All Ayahs for Offline")
-          if done < totalItems then
-            Toast.makeText(activity, "Downloaded " .. done .. " / " .. totalItems .. ". Kuch fail hui - error: " .. lastDownloadError, 1).show()
-          else
-            Toast.makeText(activity, "Download complete: " .. done .. " / " .. totalItems .. " files saved for offline.", 1).show()
-          end
-        end)
-      end
-    end)
-  end
+screen = "ayahmode"
+local bgColor, textColor = M.getThemeColors()
+local totalAyahs = surahAyahCounts[surahIdx] or 0
+local alreadyDownloaded = 0
+for a=1, totalAyahs do
+if File(M.getAyahAudioLocal(surahIdx, a)).exists() then alreadyDownloaded = alreadyDownloaded + 1 end
 end
-
--- RUKU MODE - Ruku boundaries (kaunsi ayat se kaunsi ayat tak) api.alquran.cloud
--- se live fetch hoti hain (guess/hardcode nahi ki, taake ghalat na ho), phir
--- Ayat-ba-Ayat wala hi (already offline-proven) audio system reuse hota hai
+local function buildLabels(texts)
+local labels = {}
+for a=1, totalAyahs do
+if texts and texts[a] then
+table.insert(labels, "Ayat " .. a .. "  -  " .. texts[a])
+else
+table.insert(labels, "Ayat " .. a)
+end
+end
+return labels
+end
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() showPlayer(surahIdx) end},
+{TextView, text=surahNames[surahIdx] .. " - Ayat-ba-Ayat", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, id="txtAyahStatus", text="Reciter: Mishary Alafasy (fixed reciter for this mode). Tap an Ayat to play it, long-press for Copy/Share.", textSize="11sp", textColor="#777777", padding="8dp"},
+(lastAyahProgress[surahIdx] and {Button, id="btnResumeAyah", text="Resume from Ayat " .. lastAyahProgress[surahIdx], textSize="13sp", backgroundColor="#FF8F00", textColor=-1, layout_margin="8dp"}) or {LinearLayout, orientation=0, layout_width=-1, layout_height=0},
+{LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, padding="8dp",
+{TextView, text="Ayat Repeat:", textSize="13sp", textColor=textColor, layout_marginRight="8dp"},
+{Spinner, id="ayahRepeatSpinner", layout_width=0, layout_weight=1}
+},
+{TextView, id="txtDownloadProgress", text="Downloaded for offline: " .. alreadyDownloaded .. " / " .. totalAyahs, textSize="12sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, padding="8dp"},
+{Button, id="btnDownloadAllAyahs", text="Download All Ayahs for Offline", textSize="13sp", backgroundColor="#1976D2", textColor=-1, layout_margin="8dp"},
+{ListView, id="ayahList", layout_width=-1, layout_height=0, layout_weight=1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+do
+local repLabels = {"1x (No Repeat)", "2x", "3x", "5x", "10x"}
+local repValues = {1, 2, 3, 5, 10}
+local repIndex = 0
+for i,v in ipairs(repValues) do if v == PS.ayahRepeat then repIndex = i - 1 break end end
+ayahRepeatSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repLabels))
+ayahRepeatSpinner.setSelection(repIndex)
+ayahRepeatSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
+saveAyahRepeatCount(repValues[pos+1])
+end})
+end
+local function playAyahRepeated(n, remainingRepeats)
+if n < 1 or n > totalAyahs then return end
+if remainingRepeats < 1 then return end
+local repeatTotal = PS.ayahRepeat
+local repeatNow = repeatTotal - remainingRepeats + 1
+local statusSuffix = (repeatTotal > 1) and (" (repeat " .. repeatNow .. "/" .. repeatTotal .. ")") or ""
+pcall(function() txtAyahStatus.setText("Playing Ayat " .. n .. " of " .. totalAyahs .. statusSuffix) end)
+M.saveLastAyahProgress(surahIdx, n)
+local function afterOneRound()
+if remainingRepeats > 1 then playAyahRepeated(n, remainingRepeats - 1) end
+end
+M.playReliable(M.buildAyahUrl(surahIdx, n), M.getAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n, nil, function()
+if translationMode == "Urdu" then
+local uUrl, uPath = M.currentUrduAyahPair(surahIdx, n)
+M.playReliable(uUrl, uPath, surahNames[surahIdx] .. " Ayat " .. n .. " (Urdu)", nil, afterOneRound)
+elseif translationMode == "English" then
+M.playReliable(M.buildEnglishAyahUrl(surahIdx, n), M.getEnglishAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (English)", nil, afterOneRound)
+elseif translationMode == "Farsi" then
+M.playReliable(M.buildFarsiAyahUrl(surahIdx, n), M.getFarsiAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (Farsi)", nil, afterOneRound)
+else
+afterOneRound()
+end
+end)
+end
+local function playAyah(n) playAyahRepeated(n, PS.ayahRepeat) end
+if lastAyahProgress[surahIdx] and btnResumeAyah then
+btnResumeAyah.onClick = function() playAyah(lastAyahProgress[surahIdx]) end
+end
+ayahList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, buildLabels(nil)))
+ayahList.onItemClick = function(l, v, p, i) playAyah(i + 1) end
+ayahList.onItemLongClick = function(l, v, p, i)
+local n = i + 1
+local ayahText = ayahTextCache[surahIdx] and ayahTextCache[surahIdx][n]
+AlertDialog.Builder(activity).setTitle(surahNames[surahIdx] .. " - Ayat " .. n).setItems({"▶️ Play", "📋 Copy Text", "📤 Share Text", "❌ Cancel"}, {onClick=function(d, w)
+if w == 0 then
+playAyah(n)
+elseif w == 1 then
+if ayahText then
+pcall(function() activity.getSystemService(Context.CLIPBOARD_SERVICE).setPrimaryClip(ClipData.newPlainText("Ayat", ayahText)) end)
+Toast.makeText(activity, "Ayat text copied!", 0).show()
+else
+Toast.makeText(activity, "Ayat text abhi load nahi hui, thoda intezar karein.", 0).show()
+end
+elseif w == 2 then
+if ayahText then
+pcall(function()
+local shareText = ayahText .. "\n\n(" .. surahNames[surahIdx] .. " " .. n .. ")"
+local shareIntent = Intent(Intent.ACTION_SEND)
+shareIntent.setType("text/plain")
+shareIntent.putExtra(Intent.EXTRA_TEXT, shareText)
+activity.startActivity(Intent.createChooser(shareIntent, "Share Ayat"))
+end)
+else
+Toast.makeText(activity, "Ayat text abhi load nahi hui, thoda intezar karein.", 0).show()
+end
+end
+end}).show()
+return true
+end
+if autoPlayAyat then playAyah(autoPlayAyat) end
+M.fetchSurahMeta(surahIdx, function(list, texts)
+if screen == "ayahmode" and texts then
+pcall(function() ayahList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, buildLabels(texts))) end)
+end
+end)
+btnDownloadAllAyahs.onClick = function()
+btnDownloadAllAyahs.setEnabled(false)
+btnDownloadAllAyahs.setText("Downloading...")
+local items = {}
+for a=1, totalAyahs do
+table.insert(items, {url=M.buildAyahUrl(surahIdx, a), path=M.getAyahAudioLocal(surahIdx, a)})
+end
+local totalItems = totalAyahs
+if translationMode == "Urdu" then
+for a=1, totalAyahs do
+local uUrl, uPath = M.currentUrduAyahPair(surahIdx, a)
+table.insert(items, {url=uUrl, path=uPath})
+end
+totalItems = totalAyahs * 2
+elseif translationMode == "English" then
+for a=1, totalAyahs do
+table.insert(items, {url=M.buildEnglishAyahUrl(surahIdx, a), path=M.getEnglishAyahAudioLocal(surahIdx, a)})
+end
+totalItems = totalAyahs * 2
+elseif translationMode == "Farsi" then
+for a=1, totalAyahs do
+table.insert(items, {url=M.buildFarsiAyahUrl(surahIdx, a), path=M.getFarsiAyahAudioLocal(surahIdx, a)})
+end
+totalItems = totalAyahs * 2
+end
+M.downloadSequentially(items, 1, 0, function(doneSoFar, idx)
+if idx % 3 == 0 or idx == totalItems then
+if screen == "ayahmode" then pcall(function() txtDownloadProgress.setText("Downloaded for offline: " .. doneSoFar .. " / " .. totalItems) end) end
+end
+end, function(done)
+if screen == "ayahmode" then
+pcall(function()
+btnDownloadAllAyahs.setEnabled(true)
+btnDownloadAllAyahs.setText("Download All Ayahs for Offline")
+if done < totalItems then
+Toast.makeText(activity, "Downloaded " .. done .. " / " .. totalItems .. ". Kuch fail hui - error: " .. lastDownloadError, 1).show()
+else
+Toast.makeText(activity, "Download complete: " .. done .. " / " .. totalItems .. " files saved for offline.", 1).show()
+end
+end)
+end
+end)
+end
+end
 function showRukuMode(surahIdx)
-  screen = "rukumode"
-  local bgColor, textColor = getThemeColors()
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
-      {Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() showPlayer(surahIdx) end},
-      {TextView, text=surahNames[surahIdx] .. " - Ruku List", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
-    },
-    {TextView, id="txtRukuStatus", text="Loading Ruku data from Al Quran Cloud...", textSize="12sp", textColor="#777777", padding="8dp"},
-    (lastRukuProgress[surahIdx] and {Button, id="btnResumeRuku", text="Resume Ruku " .. lastRukuProgress[surahIdx], textSize="13sp", backgroundColor="#FF8F00", textColor=-1, layout_margin="8dp"}) or {LinearLayout, orientation=0, layout_width=-1, layout_height=0},
-    {ListView, id="rukuList", layout_width=-1, layout_height=0, layout_weight=1}
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  if lastRukuProgress[surahIdx] and btnResumeRuku then
-    btnResumeRuku.onClick = function() showRukuPlayer(surahIdx, lastRukuProgress[surahIdx]) end
-  end
-
-  fetchSurahMeta(surahIdx, function(list, texts)
-    if screen ~= "rukumode" then return end
-    if not list then
-      pcall(function() txtRukuStatus.setText("Ruku data load nahi ho saki - internet check karein.") end)
-      return
-    end
-    pcall(function() txtRukuStatus.setText("Reciter: Mishary Alafasy. Tap a Ruku to play it (Ayat " .. list[1].startAyah .. " se shuru).") end)
-    local labels = {}
-    for i, r in ipairs(list) do table.insert(labels, "Ruku " .. i .. " (Ayat " .. r.startAyah .. "-" .. r.endAyah .. ")") end
-    rukuList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
-    rukuList.onItemClick = function(l, v, p, i) showRukuPlayer(surahIdx, i + 1) end
-  end)
+screen = "rukumode"
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+{Button, text=tr("Back"), contentDescription="Back to Surah player", onClick=function() showPlayer(surahIdx) end},
+{TextView, text=surahNames[surahIdx] .. " - Ruku List", textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, id="txtRukuStatus", text="Loading Ruku data from Al Quran Cloud...", textSize="12sp", textColor="#777777", padding="8dp"},
+(lastRukuProgress[surahIdx] and {Button, id="btnResumeRuku", text="Resume Ruku " .. lastRukuProgress[surahIdx], textSize="13sp", backgroundColor="#FF8F00", textColor=-1, layout_margin="8dp"}) or {LinearLayout, orientation=0, layout_width=-1, layout_height=0},
+{ListView, id="rukuList", layout_width=-1, layout_height=0, layout_weight=1}
+})
+M.applyWallpaper(mainLayout, bgColor)
+if lastRukuProgress[surahIdx] and btnResumeRuku then
+btnResumeRuku.onClick = function() showRukuPlayer(surahIdx, lastRukuProgress[surahIdx]) end
 end
-
+M.fetchSurahMeta(surahIdx, function(list, texts)
+if screen ~= "rukumode" then return end
+if not list then
+pcall(function() txtRukuStatus.setText("Ruku data load nahi ho saki - internet check karein.") end)
+return
+end
+pcall(function() txtRukuStatus.setText("Reciter: Mishary Alafasy. Tap a Ruku to play it (Ayat " .. list[1].startAyah .. " se shuru).") end)
+local labels = {}
+for i, r in ipairs(list) do table.insert(labels, "Ruku " .. i .. " (Ayat " .. r.startAyah .. "-" .. r.endAyah .. ")") end
+rukuList.setAdapter(ArrayAdapter(activity, android.R.layout.simple_list_item_1, labels))
+rukuList.onItemClick = function(l, v, p, i) showRukuPlayer(surahIdx, i + 1) end
+end)
+end
 function showRukuPlayer(surahIdx, rukuIdx)
-  screen = "rukuplayer"
-  -- FIX: Prev/Next Ruku dabane par screen naye sirey se render hoti thi,
-  -- lekin purani Ruku ki audio (duaMp) band nahi hoti thi - is liye naya
-  -- Play button purani (pehli) Ayat ki audio ko hi control kar raha tha.
-  -- Bilkul wahi bug jo Hadith player mein tha, wahi fix yahan bhi.
-  stopPlayer()
-  local bgColor, textColor = getThemeColors()
-  local list = rukuCache[surahIdx]
-  if not list or not list[rukuIdx] then showRukuMode(surahIdx) return end
-  local ruku = list[rukuIdx]
-  saveLastRukuProgress(surahIdx, rukuIdx)
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
-    {TextView, text=surahNames[surahIdx], textSize="22sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="5dp", textColor=appColorStr},
-    {TextView, text="Ruku " .. rukuIdx .. " of " .. #list .. " (Ayat " .. ruku.startAyah .. "-" .. ruku.endAyah .. ")", textSize="16sp", layout_marginBottom="20dp", textColor=textColor},
-    {TextView, id="txtRukuPlaying", text="Not playing", textSize="13sp", textColor="#777777", layout_marginBottom="20dp"},
-    {LinearLayout, orientation=0, gravity="center", layout_width=-1,
-      {Button, text="Prev Ruku", textSize="13sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous Ruku", onClick=function() if rukuIdx > 1 then showRukuPlayer(surahIdx, rukuIdx-1) end end},
-      {Button, id="btnRukuPlayPause", text="Play Ruku", textSize="14sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", contentDescription="Play this Ruku"},
-      {Button, text="Next Ruku", textSize="13sp", layout_weight=1, layout_margin="2dp", contentDescription="Next Ruku", onClick=function() if rukuIdx < #list then showRukuPlayer(surahIdx, rukuIdx+1) end end}
-    },
-    {Button, id="btnDownloadRuku", text="Download This Ruku for Offline", textSize="13sp", backgroundColor="#1976D2", textColor=-1, layout_marginTop="20dp"},
-    {TextView, id="txtRukuDlProgress", text="", textSize="12sp", textColor=appColorStr, layout_marginTop="8dp"},
-    {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text=tr("Back"), layout_weight=1, contentDescription="Back to Ruku list", onClick=function() showRukuMode(surahIdx) end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  local isPlayingRuku = false
-  local currentAyahInRuku = ruku.startAyah
-  local function playRukuFrom(n)
-    if n > ruku.endAyah then
-      isPlayingRuku = false
-      pcall(function() txtRukuPlaying.setText("Ruku complete.") btnRukuPlayPause.setText("Play Ruku") end)
-      return
-    end
-    isPlayingRuku = true
-    currentAyahInRuku = n
-    pcall(function() txtRukuPlaying.setText("Playing Ayat " .. n .. " (Ruku range " .. ruku.startAyah .. "-" .. ruku.endAyah .. ")") btnRukuPlayPause.setText("Pause") end)
-    -- NAYA (v2.1): Tarjuma "Urdu" ON ho to har Ayat ke Arabic ke baad
-    -- usi Ayat ka Urdu tarjuma bhi bajta hai, phir Ruku aage barhta hai
-    playReliable(buildAyahUrl(surahIdx, n), getAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n, nil, function()
-      if translationMode == "Urdu" then
-        local uUrl, uPath = currentUrduAyahPair(surahIdx, n)
-        playReliable(uUrl, uPath, surahNames[surahIdx] .. " Ayat " .. n .. " (Urdu)", nil, function()
-          if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
-        end)
-      elseif translationMode == "English" then
-        playReliable(buildEnglishAyahUrl(surahIdx, n), getEnglishAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (English)", nil, function()
-          if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
-        end)
-      elseif translationMode == "Farsi" then
-        playReliable(buildFarsiAyahUrl(surahIdx, n), getFarsiAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (Farsi)", nil, function()
-          if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
-        end)
-      else
-        if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
-      end
-    end)
-  end
-
-  btnRukuPlayPause.onClick = function()
-    if duaMp then
-      pcall(function()
-        if duaMp.isPlaying() then
-          duaMp.pause()
-          isPlayingRuku = false
-          btnRukuPlayPause.setText("Play Ruku")
-          txtRukuPlaying.setText("Paused at Ayat " .. currentAyahInRuku)
-        else
-          duaMp.start()
-          isPlayingRuku = true
-          btnRukuPlayPause.setText("Pause")
-          txtRukuPlaying.setText("Playing Ayat " .. currentAyahInRuku .. " (Ruku range " .. ruku.startAyah .. "-" .. ruku.endAyah .. ")")
-        end
-      end)
-    else
-      playRukuFrom(currentAyahInRuku)
-    end
-  end
-
-  btnDownloadRuku.onClick = function()
-    btnDownloadRuku.setEnabled(false)
-    btnDownloadRuku.setText("Downloading...")
-    local total = ruku.endAyah - ruku.startAyah + 1
-    local items = {}
-    for a = ruku.startAyah, ruku.endAyah do
-      table.insert(items, {url=buildAyahUrl(surahIdx, a), path=getAyahAudioLocal(surahIdx, a)})
-    end
-    -- NAYA (v2.1): Tarjuma "Urdu"/"English" ON ho to Ruku ke tarjuma
-    -- wali Ayat files bhi isi download mein saath shamil ho jati hain
-    if translationMode == "Urdu" then
-      for a = ruku.startAyah, ruku.endAyah do
-        local uUrl, uPath = currentUrduAyahPair(surahIdx, a)
-        table.insert(items, {url=uUrl, path=uPath})
-      end
-      total = total * 2
-    elseif translationMode == "English" then
-      for a = ruku.startAyah, ruku.endAyah do
-        table.insert(items, {url=buildEnglishAyahUrl(surahIdx, a), path=getEnglishAyahAudioLocal(surahIdx, a)})
-      end
-      total = total * 2
-    elseif translationMode == "Farsi" then
-      for a = ruku.startAyah, ruku.endAyah do
-        table.insert(items, {url=buildFarsiAyahUrl(surahIdx, a), path=getFarsiAyahAudioLocal(surahIdx, a)})
-      end
-      total = total * 2
-    end
-    downloadSequentially(items, 1, 0, function(doneSoFar, idx)
-      if screen == "rukuplayer" then pcall(function() txtRukuDlProgress.setText("Downloaded: " .. doneSoFar .. " / " .. total) end) end
-    end, function(done)
-      if screen == "rukuplayer" then
-        pcall(function() btnDownloadRuku.setEnabled(true) btnDownloadRuku.setText("Download This Ruku for Offline") end)
-        Toast.makeText(activity, "Ruku download complete: " .. done .. " / " .. total, 1).show()
-      end
-    end)
-  end
+screen = "rukuplayer"
+M.stopPlayer()
+local bgColor, textColor = M.getThemeColors()
+local list = rukuCache[surahIdx]
+if not list or not list[rukuIdx] then showRukuMode(surahIdx) return end
+local ruku = list[rukuIdx]
+M.saveLastRukuProgress(surahIdx, rukuIdx)
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
+{TextView, text=surahNames[surahIdx], textSize="22sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="5dp", textColor=appColorStr},
+{TextView, text="Ruku " .. rukuIdx .. " of " .. #list .. " (Ayat " .. ruku.startAyah .. "-" .. ruku.endAyah .. ")", textSize="16sp", layout_marginBottom="20dp", textColor=textColor},
+{TextView, id="txtRukuPlaying", text="Not playing", textSize="13sp", textColor="#777777", layout_marginBottom="20dp"},
+{LinearLayout, orientation=0, gravity="center", layout_width=-1,
+{Button, text="Prev Ruku", textSize="13sp", layout_weight=1, layout_margin="2dp", contentDescription="Previous Ruku", onClick=function() if rukuIdx > 1 then showRukuPlayer(surahIdx, rukuIdx-1) end end},
+{Button, id="btnRukuPlayPause", text="Play Ruku", textSize="14sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", contentDescription="Play this Ruku"},
+{Button, text="Next Ruku", textSize="13sp", layout_weight=1, layout_margin="2dp", contentDescription="Next Ruku", onClick=function() if rukuIdx < #list then showRukuPlayer(surahIdx, rukuIdx+1) end end}
+},
+{Button, id="btnDownloadRuku", text="Download This Ruku for Offline", textSize="13sp", backgroundColor="#1976D2", textColor=-1, layout_marginTop="20dp"},
+{TextView, id="txtRukuDlProgress", text="", textSize="12sp", textColor=appColorStr, layout_marginTop="8dp"},
+{LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
+{Button, text=tr("Back"), layout_weight=1, contentDescription="Back to Ruku list", onClick=function() showRukuMode(surahIdx) end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+local isPlayingRuku = false
+local currentAyahInRuku = ruku.startAyah
+local function playRukuFrom(n)
+if n > ruku.endAyah then
+isPlayingRuku = false
+pcall(function() txtRukuPlaying.setText("Ruku complete.") btnRukuPlayPause.setText("Play Ruku") end)
+return
 end
-
--- READING MODE
+isPlayingRuku = true
+currentAyahInRuku = n
+pcall(function() txtRukuPlaying.setText("Playing Ayat " .. n .. " (Ruku range " .. ruku.startAyah .. "-" .. ruku.endAyah .. ")") btnRukuPlayPause.setText("Pause") end)
+M.playReliable(M.buildAyahUrl(surahIdx, n), M.getAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n, nil, function()
+if translationMode == "Urdu" then
+local uUrl, uPath = M.currentUrduAyahPair(surahIdx, n)
+M.playReliable(uUrl, uPath, surahNames[surahIdx] .. " Ayat " .. n .. " (Urdu)", nil, function()
+if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
+end)
+elseif translationMode == "English" then
+M.playReliable(M.buildEnglishAyahUrl(surahIdx, n), M.getEnglishAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (English)", nil, function()
+if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
+end)
+elseif translationMode == "Farsi" then
+M.playReliable(M.buildFarsiAyahUrl(surahIdx, n), M.getFarsiAyahAudioLocal(surahIdx, n), surahNames[surahIdx] .. " Ayat " .. n .. " (Farsi)", nil, function()
+if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
+end)
+else
+if screen == "rukuplayer" and isPlayingRuku then playRukuFrom(n + 1) end
+end
+end)
+end
+btnRukuPlayPause.onClick = function()
+if duaMp then
+pcall(function()
+if duaMp.isPlaying() then
+duaMp.pause()
+isPlayingRuku = false
+btnRukuPlayPause.setText("Play Ruku")
+txtRukuPlaying.setText("Paused at Ayat " .. currentAyahInRuku)
+else
+duaMp.start()
+isPlayingRuku = true
+btnRukuPlayPause.setText("Pause")
+txtRukuPlaying.setText("Playing Ayat " .. currentAyahInRuku .. " (Ruku range " .. ruku.startAyah .. "-" .. ruku.endAyah .. ")")
+end
+end)
+else
+playRukuFrom(currentAyahInRuku)
+end
+end
+btnDownloadRuku.onClick = function()
+btnDownloadRuku.setEnabled(false)
+btnDownloadRuku.setText("Downloading...")
+local total = ruku.endAyah - ruku.startAyah + 1
+local items = {}
+for a = ruku.startAyah, ruku.endAyah do
+table.insert(items, {url=M.buildAyahUrl(surahIdx, a), path=M.getAyahAudioLocal(surahIdx, a)})
+end
+if translationMode == "Urdu" then
+for a = ruku.startAyah, ruku.endAyah do
+local uUrl, uPath = M.currentUrduAyahPair(surahIdx, a)
+table.insert(items, {url=uUrl, path=uPath})
+end
+total = total * 2
+elseif translationMode == "English" then
+for a = ruku.startAyah, ruku.endAyah do
+table.insert(items, {url=M.buildEnglishAyahUrl(surahIdx, a), path=M.getEnglishAyahAudioLocal(surahIdx, a)})
+end
+total = total * 2
+elseif translationMode == "Farsi" then
+for a = ruku.startAyah, ruku.endAyah do
+table.insert(items, {url=M.buildFarsiAyahUrl(surahIdx, a), path=M.getFarsiAyahAudioLocal(surahIdx, a)})
+end
+total = total * 2
+end
+M.downloadSequentially(items, 1, 0, function(doneSoFar, idx)
+if screen == "rukuplayer" then pcall(function() txtRukuDlProgress.setText("Downloaded: " .. doneSoFar .. " / " .. total) end) end
+end, function(done)
+if screen == "rukuplayer" then
+pcall(function() btnDownloadRuku.setEnabled(true) btnDownloadRuku.setText("Download This Ruku for Offline") end)
+Toast.makeText(activity, "Ruku download complete: " .. done .. " / " .. total, 1).show()
+end
+end)
+end
+end
 function showReadingMode(index)
-  screen = "reading"
-  local surahName = surahNames[index]
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
-    {LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
-      {Button, text="⬅️", onClick=function() showPlayer(index) end},
-      {TextView, text=surahName, textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1, layout_weight=1},
-      {Button, text="-", textSize="20sp", onClick=function() if readingFontSize > 12 then readingFontSize = readingFontSize - 2 prefs.edit().putInt("readingFontSize", readingFontSize).apply() showReadingMode(index) end end},
-      {Button, text="+", textSize="20sp", layout_marginLeft="5dp", onClick=function() if readingFontSize < 40 then readingFontSize = readingFontSize + 2 prefs.edit().putInt("readingFontSize", readingFontSize).apply() showReadingMode(index) end end}
-    },
-    {ScrollView, layout_width=-1, layout_height=-1, padding="15dp",
-      {LinearLayout, orientation=1, layout_width=-1, layout_height=-2,
-        {TextView, text="بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ", textSize=tostring(readingFontSize+4).."sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="center", layout_marginBottom="20dp", layout_marginTop="10dp"},
-        {TextView, text="(Reading data from JSON will populate here dynamically. Currently showing test UI with adjustable font size. FontSize: "..readingFontSize..")", textSize=tostring(readingFontSize).."sp", textColor=textColor, gravity="center"}
-      }
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
+screen = "reading"
+local surahName = surahNames[index]
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor=appColorStr, layout_width=-1, gravity="center_vertical",
+{Button, text="⬅️", onClick=function() showPlayer(index) end},
+{TextView, text=surahName, textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1, layout_weight=1},
+{Button, text="-", textSize="20sp", onClick=function() if readingFontSize > 12 then readingFontSize = readingFontSize - 2 prefs.edit().putInt("readingFontSize", readingFontSize).apply() showReadingMode(index) end end},
+{Button, text="+", textSize="20sp", layout_marginLeft="5dp", onClick=function() if readingFontSize < 40 then readingFontSize = readingFontSize + 2 prefs.edit().putInt("readingFontSize", readingFontSize).apply() showReadingMode(index) end end}
+},
+{ScrollView, layout_width=-1, layout_height=-1, padding="15dp",
+{LinearLayout, orientation=1, layout_width=-1, layout_height=-2,
+{TextView, text="بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ", textSize=tostring(readingFontSize+4).."sp", typeface=Typeface.DEFAULT_BOLD, textColor=appColorStr, gravity="center", layout_marginBottom="20dp", layout_marginTop="10dp"},
+{TextView, text="(Reading data from JSON will populate here dynamically. Currently showing test UI with adjustable font size. FontSize: "..readingFontSize..")", textSize=tostring(readingFontSize).."sp", textColor=textColor, gravity="center"}
+}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
 end
-
--- PLAYER
 function showPlayer(index)
-  screen = "player"
-  PS.externalPlayback=false PS.externalPreparing=false PS.externalPausePending=false
-  currentIndex = index
-  local surahName = surahNames[index]
-  saveLastPlayed(currentIndex, currentReciter)
-
-  local sID = string.format("%03d", index)
-  local reciterKey = slug(reciters[currentReciter].name)
-  local isUrdu = (translationMode == "Urdu")
-  local isHindi = (translationMode == "Hindi")
-  local isPunjabi = (translationMode == "Punjabi")
-  local isEnglish = (translationMode == "English")
-  local isSindhi = (translationMode == "Sindhi")
-  local v25OnlineUrl, v25FileName = buildV25WholeTrack(translationMode, index)
-  -- NAYA (v2.1): Tarjuma ON ho to combined (Arabic+tarjuma, ek hi file)
-  -- audio use hoti hai - isi liye download bhi EK hi hota hai, alag Surah
-  -- aur alag tarjuma download nahi karni padti.
-  local fileName = v25FileName or (isUrdu and ("urdu_surah_"..sID..".mp3") or isHindi and ("hindi_surah_"..sID..".mp3") or isPunjabi and ("punjabi_surah_"..sID..".mp3") or isEnglish and ("english_surah_"..sID..".mp3") or isSindhi and ("sindhi_surah_"..sID..".mp3") or ("reciter_"..reciterKey.."_surah_"..sID..".mp3"))
-  local localFilePath = downloadDir .. fileName
-  if v25OnlineUrl and File(localFilePath).exists() and File(localFilePath).length()<1000 then pcall(function() File(localFilePath).delete() end) end
-  local onlineUrl = v25OnlineUrl or (isUrdu and buildUrduSurahUrl(index) or isHindi and buildHindiSurahUrl(index) or isPunjabi and buildPunjabiSurahUrl(index) or isEnglish and buildEnglishSurahUrl(index) or isSindhi and buildSindhiSurahUrl(index) or buildQuranUrl(currentReciter, index))
-  local selectedAudioLabel = (V25.modes[translationMode] and V25.modes[translationMode].label) or (isUrdu and "Urdu Tarjuma" or isHindi and "Hindi Tarjuma" or isPunjabi and "Punjabi Tarjuma" or isEnglish and "English Tarjuma" or isSindhi and "Sindhi Tarjuma" or reciters[currentReciter].name)
-  local playUrl = File(localFilePath).exists() and localFilePath or onlineUrl
-  local isDownloaded = File(localFilePath).exists()
-
-  local bgColor, textColor = getThemeColors()
-
-  activity.setContentView(loadlayout{
-    LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
-    {TextView, text=isDownloaded and "Offline Mode" or "Online Stream", textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text=surahName, textSize="26sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="10dp", textColor=appColorStr},
-    {TextView, text="Reciter / Translation: " .. selectedAudioLabel, textSize="14sp", layout_marginBottom="20dp", textColor=textColor},
-
-    {TextView, id="txtSleepTimer", text="", textSize="14sp", textColor="#E91E63", layout_marginBottom="10dp", typeface=Typeface.DEFAULT_BOLD},
-
-    {Button, text="📖 Read Surah Text", textSize="14sp", layout_marginBottom="10dp", backgroundColor="#8E24AA", textColor=-1, onClick=function() showReadingMode(index) end},
-    {Button, text="Ayat-ba-Ayat Mode", textSize="14sp", layout_marginBottom="10dp", backgroundColor="#00695C", textColor=-1, onClick=function() showAyahByAyah(index) end},
-    {Button, text="Ruku Mode", textSize="14sp", layout_marginBottom="10dp", backgroundColor="#6A1B9A", textColor=-1, onClick=function() showRukuMode(index) end},
-    {Button, text="Word-by-Word (Hifz)", textSize="14sp", layout_marginBottom="20dp", backgroundColor="#B71C1C", textColor=-1, contentDescription="Word by word memorization mode", onClick=function() showWbwStartDialog(index) end},
-
-    {SeekBar, id="skBar", layout_width=-1, layout_marginBottom="10dp"},
-    -- NAYA (v2.5): Play Speed + Surah Repeat spinner seedha player screen par
-    -- (Menu mein jane ki zaroorat nahi) - Surah + 30 Para dono yahan se
-    {LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, layout_marginBottom="6dp",
-      {TextView, text="Speed:", textSize="13sp", textColor=textColor, layout_marginRight="6dp"},
-      {Spinner, id="playerSpeedSpinner", layout_width=0, layout_weight=1},
-      {TextView, text="Repeat:", textSize="13sp", textColor=textColor, layout_marginLeft="8dp", layout_marginRight="6dp"},
-      {Spinner, id="playerRepeatSpinner", layout_width=0, layout_weight=1}
-    },
-    {LinearLayout, orientation=0, gravity="center", layout_width=-1,
-      {Button, text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("playPrevSurah", playPrevSurah) end},
-      {Button, text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("seekRewind", seekRewind) end},
-      {Button, id="btnPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", onClick=function() safeRun("togglePlayPause", togglePlayPause) end},
-      {Button, text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("seekForward", seekForward) end},
-      {Button, text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("playNextSurah", playNextSurah) end}
-    },
-    {Button, id="btnDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download Surah", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
-    {LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
-      {Button, text="Back to List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showSurahList", showSurahList) end},
-      {Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
-    }
-  })
-  applyWallpaper(mainLayout, bgColor)
-
-  btnDownload.onClick = function() if File(localFilePath).exists() then confirmDelete(localFilePath, function() showPlayer(currentIndex) end) else downloadSurah(onlineUrl, fileName, surahName .. " (" .. selectedAudioLabel .. ")") end end
-
-  -- NAYA (v2.5): player-screen speed + surah-repeat spinners
-  do
-    local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"}
-    local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
-    local speedIndex = 1
-    for i,v in ipairs(speedValues) do if math.abs(v - PS.speed) < 0.01 then speedIndex = i - 1 break end end
-    playerSpeedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels))
-    playerSpeedSpinner.setSelection(speedIndex)
-    playerSpeedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
-      savePlaybackSpeed(speedValues[pos+1])
-      if mp then applyPlaybackSpeed(mp) end
-      if duaMp then applyPlaybackSpeed(duaMp) end
-    end})
-    local repLabels = {"1x", "2x", "3x", "5x", "Loop"}
-    local repValues = {1, 2, 3, 5, 0}
-    local repIndex = 0
-    for i,v in ipairs(repValues) do if v == PS.surahRepeat then repIndex = i - 1 break end end
-    playerRepeatSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repLabels))
-    playerRepeatSpinner.setSelection(repIndex)
-    playerRepeatSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
-      saveSurahRepeatCount(repValues[pos+1])
-      PS.surahRepeatRem = PS.surahRepeat
-    end})
-  end
-
-  PS.surahRepeatRem = PS.surahRepeat
-
-  if v25OnlineUrl then
-    PS.externalPlayback=true
-    PS.externalPreparing=true PS.externalPausePending=false
-    PS.externalUrl=onlineUrl PS.externalPath=localFilePath PS.externalLabel=selectedAudioLabel
-    PS.surahRepeatRem=PS.surahRepeat
-    local function refreshExternalPlayer()
-      if screen~="player" or not duaMp then return end
-      pcall(function()
-        PS.externalPreparing=false
-        applyPlaybackSpeed(duaMp)
-        if PS.externalPausePending then
-          PS.externalPausePending=false
-          pcall(function() if duaMp.isPlaying() then duaMp.pause() end end)
-        elseif not duaMp.isPlaying() then
-          pcall(function() duaMp.start() end)
-        end
-        local dur=duaMp.getDuration()
-        if dur>0 then skBar.setMax(dur); skBar.setProgress(duaMp.getCurrentPosition()) end
-        if btnPlayPause then btnPlayPause.setText(duaMp.isPlaying() and ("⏸ "..tr("Pause")) or ("▶ "..tr("Play"))) end
-        showPlaybackNotification(surahName,"Translation: "..selectedAudioLabel)
-      end)
-      updateTask=Runnable({run=function()
-        if screen=="player" and PS.externalPlayback and duaMp then
-          pcall(function() if duaMp.isPlaying() then skBar.setProgress(duaMp.getCurrentPosition()) end end)
-          handler.postDelayed(updateTask,1000)
-        end
-      end})
-      handler.post(updateTask)
-    end
-    local playAgain
-    playAgain=function()
-      PS.externalPreparing=true
-      playReliable(playUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",refreshExternalPlayer,function()
-        completedSurahs[index]=true saveCompletedSurahs()
-        if PS.surahRepeat==0 then
-          playAgain()
-        elseif PS.surahRepeatRem>1 then
-          PS.surahRepeatRem=PS.surahRepeatRem-1
-          playAgain()
-        else
-          PS.surahRepeatRem=PS.surahRepeat
-          if autoNextMode and currentIndex<#surahNames then playNextSurah()
-          else
-            stopPlayer(function()
-              PS.externalPlayback=true
-              if btnPlayPause then btnPlayPause.setText("▶ "..tr("Play")) end
-            end)
-          end
-        end
-      end)
-    end
-    playAgain()
-    skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(b,pos,fromUser) if fromUser and duaMp then pcall(function() duaMp.seekTo(pos) end) end end})
-  else
-    PS.externalPlayback=false PS.externalUrl=nil PS.externalPath=nil PS.externalLabel=nil
-  stopPlayer(function()
-  playerReady = false
-  playIntentPending = false
-  mp = MediaPlayer()
-  -- FIX (v2.2): screen band hone ke baad bhi playback (streaming/
-  -- decoding) na atke, is ke liye CPU ko "so" jaane se rokte hain
-  pcall(function() mp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
-  local dsOk,dsErr=pcall(function() mp.setDataSource(playUrl); mp.prepareAsync() end)
-  if not dsOk then
-    pcall(function() if mp then mp.release() end end); mp=nil
-    if v25OnlineUrl then
-      PS.externalPlayback=true
-      playReliable(playUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",nil,nil)
-      return
-    end
-    Toast.makeText(activity,"Audio source could not be opened: "..tostring(dsErr),1).show()
-    return
-  end
-  mp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p, w, e) if v25OnlineUrl then
-    pcall(function() if mp then mp.release() end end); mp=nil
-    PS.externalPlayback=true
-    playReliable(onlineUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",nil,nil)
-  else Toast.makeText(activity, "Audio error.", 0).show() end
-  if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end return true end})
-  mp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
-    applyPlaybackSpeed(p)
-    skBar.setMax(p.getDuration())
-    playerReady = true
-    -- FIX: agar user ne load hone se pehle hi Play dabaya tha, ab turant
-    -- start karte hain (aur button ko sahi text dete hain) - warna pehle
-    -- ki tarah paused rehta hai jab tak user khud Play na dabaye
-    if playIntentPending then
-      playIntentPending = false
-      pcall(function() p.start() end)
-      pcall(function() if btnPlayPause then btnPlayPause.setText("⏸ " .. tr("Pause")) end end)
-      startSleepTimer()
-    else
-      pcall(function() if p.isPlaying() then p.pause() end end)
-    end
-
-    updateTask = Runnable({run = function()
-      if mp and mp.isPlaying() then
-        skBar.setProgress(mp.getCurrentPosition())
-        if targetSleepTime > 0 then
-          local diff = targetSleepTime - os.time()
-          if diff > 0 then
-             local min = math.floor(diff / 60)
-             local sec = diff % 60
-             txtSleepTimer.setText(string.format("💤 Auto-stop in: %02d:%02d", min, sec))
-          else
-             txtSleepTimer.setText("")
-          end
-        else
-          txtSleepTimer.setText("")
-        end
-      end
-      handler.postDelayed(updateTask, 1000)
-    end})
-    handler.post(updateTask)
-  end})
-  mp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function()
-    completedSurahs[index] = true
-    saveCompletedSurahs()
-    -- NAYA (v2.5): Surah Repeat (1x/2x/3x/5x/Loop) - Loop=0 means infinite
-    if PS.surahRepeat == 0 then
-      pcall(function() if mp then mp.seekTo(0) mp.start() end end)
-      return
-    end
-    if PS.surahRepeatRem > 1 then
-      PS.surahRepeatRem = PS.surahRepeatRem - 1
-      pcall(function() if mp then mp.seekTo(0) mp.start() end end)
-      return
-    end
-    PS.surahRepeatRem = PS.surahRepeat
-    if autoNextMode then playNextSurah() else btnPlayPause.setText("▶ " .. tr("Play")) cancelNotification() end
-  end})
-  skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and mp then mp.seekTo(p) end end})
-  end)
-  end
+screen = "player"
+PS.externalPlayback=false PS.externalPreparing=false PS.externalPausePending=false
+currentIndex = index
+local surahName = surahNames[index]
+M.saveLastPlayed(currentIndex, currentReciter)
+local sID = string.format("%03d", index)
+local reciterKey = slug(reciters[currentReciter].name)
+local isUrdu = (translationMode == "Urdu")
+local isHindi = (translationMode == "Hindi")
+local isPunjabi = (translationMode == "Punjabi")
+local isEnglish = (translationMode == "English")
+local isSindhi = (translationMode == "Sindhi")
+local v25OnlineUrl, v25FileName = M.buildV25WholeTrack(translationMode, index)
+local fileName = v25FileName or (isUrdu and ("urdu_surah_"..sID..".mp3") or isHindi and ("hindi_surah_"..sID..".mp3") or isPunjabi and ("punjabi_surah_"..sID..".mp3") or isEnglish and ("english_surah_"..sID..".mp3") or isSindhi and ("sindhi_surah_"..sID..".mp3") or ("reciter_"..reciterKey.."_surah_"..sID..".mp3"))
+local localFilePath = downloadDir .. fileName
+if v25OnlineUrl and File(localFilePath).exists() and File(localFilePath).length()<1000 then pcall(function() File(localFilePath).delete() end) end
+local onlineUrl = v25OnlineUrl or (isUrdu and M.buildUrduSurahUrl(index) or isHindi and M.buildHindiSurahUrl(index) or isPunjabi and M.buildPunjabiSurahUrl(index) or isEnglish and M.buildEnglishSurahUrl(index) or isSindhi and M.buildSindhiSurahUrl(index) or M.buildQuranUrl(currentReciter, index))
+local selectedAudioLabel = (V25.modes[translationMode] and V25.modes[translationMode].label) or (isUrdu and "Urdu Tarjuma" or isHindi and "Hindi Tarjuma" or isPunjabi and "Punjabi Tarjuma" or isEnglish and "English Tarjuma" or isSindhi and "Sindhi Tarjuma" or reciters[currentReciter].name)
+local playUrl = File(localFilePath).exists() and localFilePath or onlineUrl
+local isDownloaded = File(localFilePath).exists()
+local bgColor, textColor = M.getThemeColors()
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, padding="20dp", layout_width=-1, layout_height=-1, gravity="center", backgroundColor=bgColor,
+{TextView, text=isDownloaded and "Offline Mode" or "Online Stream", textSize="14sp", layout_marginBottom="10dp", textColor=appColorStr},
+{TextView, text=surahName, textSize="26sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="10dp", textColor=appColorStr},
+{TextView, text="Reciter / Translation: " .. selectedAudioLabel, textSize="14sp", layout_marginBottom="20dp", textColor=textColor},
+{TextView, id="txtSleepTimer", text="", textSize="14sp", textColor="#E91E63", layout_marginBottom="10dp", typeface=Typeface.DEFAULT_BOLD},
+{Button, text="📖 Read Surah Text", textSize="14sp", layout_marginBottom="10dp", backgroundColor="#8E24AA", textColor=-1, onClick=function() showReadingMode(index) end},
+{Button, text="Ayat-ba-Ayat Mode", textSize="14sp", layout_marginBottom="10dp", backgroundColor="#00695C", textColor=-1, onClick=function() showAyahByAyah(index) end},
+{Button, text="Ruku Mode", textSize="14sp", layout_marginBottom="10dp", backgroundColor="#6A1B9A", textColor=-1, onClick=function() showRukuMode(index) end},
+{Button, text="Word-by-Word (Hifz)", textSize="14sp", layout_marginBottom="20dp", backgroundColor="#B71C1C", textColor=-1, contentDescription="Word by word memorization mode", onClick=function() showWbwStartDialog(index) end},
+{SeekBar, id="skBar", layout_width=-1, layout_marginBottom="10dp"},
+{LinearLayout, orientation=0, gravity="center_vertical", layout_width=-1, layout_marginBottom="6dp",
+{TextView, text="Speed:", textSize="13sp", textColor=textColor, layout_marginRight="6dp"},
+{Spinner, id="playerSpeedSpinner", layout_width=0, layout_weight=1},
+{TextView, text="Repeat:", textSize="13sp", textColor=textColor, layout_marginLeft="8dp", layout_marginRight="6dp"},
+{Spinner, id="playerRepeatSpinner", layout_width=0, layout_weight=1}
+},
+{LinearLayout, orientation=0, gravity="center", layout_width=-1,
+{Button, text="⏮", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("playPrevSurah", playPrevSurah) end},
+{Button, text="⏪ "..seekSeconds.."s", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("seekRewind", seekRewind) end},
+{Button, id="btnPlayPause", text="▶ " .. tr("Play"), textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_weight=1.5, layout_margin="2dp", onClick=function() safeRun("togglePlayPause", togglePlayPause) end},
+{Button, text=seekSeconds.."s ⏩", textSize="16sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("seekForward", seekForward) end},
+{Button, text="⏭", textSize="14sp", layout_weight=1, layout_margin="2dp", onClick=function() safeRun("playNextSurah", playNextSurah) end}
+},
+{Button, id="btnDownload", text=isDownloaded and "🗑 Delete Offline" or "⬇️ Download Surah", textSize="14sp", layout_width=-1, layout_marginTop="20dp", backgroundColor=isDownloaded and "#C62828" or "#1976D2", textColor=-1},
+{LinearLayout, orientation=0, gravity="center", layout_marginTop="30dp", layout_width=-1,
+{Button, text="Back to List", layout_weight=1, layout_marginRight="10dp", onClick=function() safeRun("showSurahList", showSurahList) end},
+{Button, text="Exit App", layout_weight=1, backgroundColor="#C62828", textColor=-1, onClick=function() activity.finish() end}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+btnDownload.onClick = function() if File(localFilePath).exists() then confirmDelete(localFilePath, function() showPlayer(currentIndex) end) else downloadSurah(onlineUrl, fileName, surahName .. " (" .. selectedAudioLabel .. ")") end end
+do
+local speedLabels = {"0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x"}
+local speedValues = {0.75, 1.0, 1.25, 1.5, 2.0}
+local speedIndex = 1
+for i,v in ipairs(speedValues) do if math.abs(v - PS.speed) < 0.01 then speedIndex = i - 1 break end end
+playerSpeedSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, speedLabels))
+playerSpeedSpinner.setSelection(speedIndex)
+playerSpeedSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
+savePlaybackSpeed(speedValues[pos+1])
+if mp then applyPlaybackSpeed(mp) end
+if duaMp then applyPlaybackSpeed(duaMp) end
+end})
+local repLabels = {"1x", "2x", "3x", "5x", "Loop"}
+local repValues = {1, 2, 3, 5, 0}
+local repIndex = 0
+for i,v in ipairs(repValues) do if v == PS.surahRepeat then repIndex = i - 1 break end end
+playerRepeatSpinner.setAdapter(ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, repLabels))
+playerRepeatSpinner.setSelection(repIndex)
+playerRepeatSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{onItemSelected=function(p,v,pos,id)
+saveSurahRepeatCount(repValues[pos+1])
+PS.surahRepeatRem = PS.surahRepeat
+end})
 end
-
--- FIX (v2.2): pehle yahan mp/duaMp/WBW.player ko PAUSE kar diya jata tha
--- jab bhi screen band hoti ya app background mein jati (taake "audio
--- background mein chalti rehti hai" wala purana masla na ho) - lekin
--- isi wajah se yeh naya masla ban gaya tha ke sirf SCREEN band karne se
--- hi Surah/Dua/Hadith/Tafseer wagera ki audio ruk jati thi, jab tak user
--- khud dobara Play na dabaye. Ab audio background mein (screen band ho,
--- ya kisi aur app par chale jayein) bhi chalti rehti hai - jaisa har
--- audio/Quran app mein hota hai - sirf tab rukegi jab user khud
--- Pause/Stop dabaye ya track khatam ho jaye. MediaPlayer.setWakeMode
--- (jahan bhi mp/duaMp/WBW.player banaye jate hain) yeh yaqeeni banata hai
--- ke screen band hone par CPU "so" na jaye aur streaming/download beech
--- mein na atke.
+PS.surahRepeatRem = PS.surahRepeat
+if v25OnlineUrl then
+PS.externalPlayback=true
+PS.externalPreparing=true PS.externalPausePending=false
+PS.externalUrl=onlineUrl PS.externalPath=localFilePath PS.externalLabel=selectedAudioLabel
+PS.surahRepeatRem=PS.surahRepeat
+local function refreshExternalPlayer()
+if screen~="player" or not duaMp then return end
+pcall(function()
+PS.externalPreparing=false
+applyPlaybackSpeed(duaMp)
+if PS.externalPausePending then
+PS.externalPausePending=false
+pcall(function() if duaMp.isPlaying() then duaMp.pause() end end)
+elseif not duaMp.isPlaying() then
+pcall(function() duaMp.start() end)
+end
+local dur=duaMp.getDuration()
+if dur>0 then skBar.setMax(dur); skBar.setProgress(duaMp.getCurrentPosition()) end
+if btnPlayPause then btnPlayPause.setText(duaMp.isPlaying() and ("⏸ "..tr("Pause")) or ("▶ "..tr("Play"))) end
+M.showPlaybackNotification(surahName,"Translation: "..selectedAudioLabel)
+end)
+updateTask=Runnable({run=function()
+if screen=="player" and PS.externalPlayback and duaMp then
+pcall(function() if duaMp.isPlaying() then skBar.setProgress(duaMp.getCurrentPosition()) end end)
+handler.postDelayed(updateTask,1000)
+end
+end})
+handler.post(updateTask)
+end
+local playAgain
+playAgain=function()
+PS.externalPreparing=true
+M.playReliable(playUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",refreshExternalPlayer,function()
+completedSurahs[index]=true M.saveCompletedSurahs()
+if PS.surahRepeat==0 then
+playAgain()
+elseif PS.surahRepeatRem>1 then
+PS.surahRepeatRem=PS.surahRepeatRem-1
+playAgain()
+else
+PS.surahRepeatRem=PS.surahRepeat
+if autoNextMode and currentIndex<#surahNames then playNextSurah()
+else
+M.stopPlayer(function()
+PS.externalPlayback=true
+if btnPlayPause then btnPlayPause.setText("▶ "..tr("Play")) end
+end)
+end
+end
+end)
+end
+playAgain()
+skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(b,pos,fromUser) if fromUser and duaMp then pcall(function() duaMp.seekTo(pos) end) end end})
+else
+PS.externalPlayback=false PS.externalUrl=nil PS.externalPath=nil PS.externalLabel=nil
+M.stopPlayer(function()
+playerReady = false
+playIntentPending = false
+mp = MediaPlayer()
+pcall(function() mp.setWakeMode(activity, PowerManager.PARTIAL_WAKE_LOCK) end)
+local dsOk,dsErr=pcall(function() mp.setDataSource(playUrl); mp.prepareAsync() end)
+if not dsOk then
+pcall(function() if mp then mp.release() end end); mp=nil
+if v25OnlineUrl then
+PS.externalPlayback=true
+M.playReliable(playUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",nil,nil)
+return
+end
+Toast.makeText(activity,"Audio source could not be opened: "..tostring(dsErr),1).show()
+return
+end
+mp.setOnErrorListener(MediaPlayer.OnErrorListener{onError=function(p, w, e) if v25OnlineUrl then
+pcall(function() if mp then mp.release() end end); mp=nil
+PS.externalPlayback=true
+M.playReliable(onlineUrl,localFilePath,surahName.." ("..selectedAudioLabel..")",nil,nil)
+else Toast.makeText(activity, "Audio error.", 0).show() end
+if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end return true end})
+mp.setOnPreparedListener(MediaPlayer.OnPreparedListener{onPrepared=function(p)
+applyPlaybackSpeed(p)
+skBar.setMax(p.getDuration())
+playerReady = true
+if playIntentPending then
+playIntentPending = false
+pcall(function() p.start() end)
+pcall(function() if btnPlayPause then btnPlayPause.setText("⏸ " .. tr("Pause")) end end)
+M.startSleepTimer()
+else
+pcall(function() if p.isPlaying() then p.pause() end end)
+end
+updateTask = Runnable({run = function()
+if mp and mp.isPlaying() then
+skBar.setProgress(mp.getCurrentPosition())
+if targetSleepTime > 0 then
+local diff = targetSleepTime - os.time()
+if diff > 0 then
+local min = math.floor(diff / 60)
+local sec = diff % 60
+txtSleepTimer.setText(string.format("💤 Auto-stop in: %02d:%02d", min, sec))
+else
+txtSleepTimer.setText("")
+end
+else
+txtSleepTimer.setText("")
+end
+end
+handler.postDelayed(updateTask, 1000)
+end})
+handler.post(updateTask)
+end})
+mp.setOnCompletionListener(MediaPlayer.OnCompletionListener{onCompletion=function()
+completedSurahs[index] = true
+M.saveCompletedSurahs()
+if PS.surahRepeat == 0 then
+pcall(function() if mp then mp.seekTo(0) mp.start() end end)
+return
+end
+if PS.surahRepeatRem > 1 then
+PS.surahRepeatRem = PS.surahRepeatRem - 1
+pcall(function() if mp then mp.seekTo(0) mp.start() end end)
+return
+end
+PS.surahRepeatRem = PS.surahRepeat
+if autoNextMode then playNextSurah() else btnPlayPause.setText("▶ " .. tr("Play")) M.cancelNotification() end
+end})
+skBar.setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener{onProgressChanged=function(s, p, f) if f and mp then mp.seekTo(p) end end})
+end)
+end
+end
 function onPause() end
 function onStop() end
-
 function onDestroy()
-  -- FIX: pehle yahan mp.stop()/mp.release() seedha (turant) call ho rahe the,
-  -- jo us safe background-thread mechanism (stopPlayer) ko bypass kar dete
-  -- the jo khaas is wajah se banaya gaya tha ke agar player abhi "preparing"
-  -- state mein ho to seedha stop/release karna native crash de sakta hai -
-  -- yehi exit karte waqt error ki wajah thi. Ab wahi safe tareeqa use hota hai.
-  pcall(function() stopPlayer() end)
-  pcall(function() cancelNotification() end)
-  pcall(function() wbwStopAudio() end)
+pcall(function() M.stopPlayer() end)
+pcall(function() M.cancelNotification() end)
+pcall(function() wbwStopAudio() end)
 end
-
 function onKeyDown(keyCode, event)
-  if keyCode == 4 then
-    if screen == "player" then showSurahList() return true
-    elseif screen == "names" then showMore() return true
-    elseif screen == "asmanabi" then showMore() return true
-    elseif screen == "feedback" or screen == "about" then showSettings() return true
-    elseif screen == "dailyduas" then showHome() return true
-    elseif screen == "more" then showHome() return true
-    elseif screen == "azan" then showMore() return true
-    elseif screen == "azanplayer" or screen == "azanschedule" then showAzan() return true
-    elseif screen == "progresstracker" or screen == "storagemanager" then showMore() return true
-    elseif screen == "duaplayer" then showDailyDuas() return true
-    elseif screen == "para" then showMore() return true
-    elseif screen == "parasurahs" then showPara() return true
-    elseif screen == "reading" then showPlayer(currentIndex) return true
-    elseif screen == "ayahmode" then showPlayer(currentIndex) return true
-    elseif screen == "rukumode" then showPlayer(currentIndex) return true
-    elseif screen == "rukuplayer" then showRukuMode(currentIndex) return true
-    elseif screen == "wbwmode" then wbwStopAudio() showPlayer(WBW.surahIdx) return true
-    elseif screen == "surahlist" then showHome() return true
-    elseif screen == "socialmedia" then showSettings() return true
-    elseif screen == "fullquranlist" then showMore() return true
-    elseif screen == "fullquranplayer" then showFullQuranScreen() return true
-    elseif screen == "hadithlist" then showMore() return true
-    elseif screen == "hadithplayer" then showHadithScreen() return true
-    elseif screen == "israrlist" then showMore() return true
-    elseif screen == "israrplayer" then showIsrarTafseerScreen() return true
-    elseif screen == "nawawilist" then showMore() return true
-    elseif screen == "nawawiplayer" then showNawawiScreen() return true
-    elseif screen == "settings" or screen == "tasbeeh" or screen == "bookmarks" then showMore() return true end
-  end
-  return false
+if keyCode == 4 then
+if screen == "player" then showSurahList() return true
+elseif screen == "names" then showMore() return true
+elseif screen == "asmanabi" then showMore() return true
+elseif screen == "feedback" or screen == "about" then showSettings() return true
+elseif screen == "dailyduas" then showHome() return true
+elseif screen == "more" then showHome() return true
+elseif screen == "azan" then showMore() return true
+elseif screen == "azanplayer" or screen == "azanschedule" then showAzan() return true
+elseif screen == "progresstracker" or screen == "storagemanager" then showMore() return true
+elseif screen == "duaplayer" then showDailyDuas() return true
+elseif screen == "para" then showMore() return true
+elseif screen == "parasurahs" then showPara() return true
+elseif screen == "reading" then showPlayer(currentIndex) return true
+elseif screen == "ayahmode" then showPlayer(currentIndex) return true
+elseif screen == "rukumode" then showPlayer(currentIndex) return true
+elseif screen == "rukuplayer" then showRukuMode(currentIndex) return true
+elseif screen == "wbwmode" then wbwStopAudio() showPlayer(WBW.surahIdx) return true
+elseif screen == "surahlist" then showHome() return true
+elseif screen == "socialmedia" then showSettings() return true
+elseif screen == "fullquranlist" then showMore() return true
+elseif screen == "fullquranplayer" then showFullQuranScreen() return true
+elseif screen == "hadithlist" then showMore() return true
+elseif screen == "hadithplayer" then showHadithScreen() return true
+elseif screen == "israrlist" then showMore() return true
+elseif screen == "israrplayer" then showIsrarTafseerScreen() return true
+elseif screen == "nawawilist" then showMore() return true
+elseif screen == "nawawiplayer" then showNawawiScreen() return true
+elseif screen == "settings" or screen == "tasbeeh" or screen == "bookmarks" then showMore() return true end
 end
-
---------------------------------------------------
--- NOTIFICATION PLAY/PAUSE (background control, bina app khole)
---------------------------------------------------
--- AndroLua ka apna registerReceiver(filter) + global onReceive(context, intent)
--- convention (onKeyDown jaisa hi) - is se notification ka Play/Pause button
--- app khole bina kaam karta hai
+return false
+end
 pcall(function() activity.registerReceiver(IntentFilter("quran_majeed_playpause")) end)
-pcall(function() for _,pr in ipairs(AZAN_PRAYERS) do registerCityAzanReceiver(pr.key) end; scheduleCityAzans() end)
-
+pcall(function() for _,pr in ipairs(AZAN_PRAYERS) do M.registerCityAzanReceiver(pr.key) end; scheduleCityAzans() end)
 function onActivityResult(requestCode, resultCode, data)
-  if requestCode==2606 and resultCode==Activity.RESULT_OK and data then
-    pcall(function()
-      local spoken=data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-      if spoken and spoken.size()>0 and etHomeSearch then
-        etHomeSearch.setText(tostring(spoken.get(0)))
-        etHomeSearch.setSelection(etHomeSearch.length())
-      end
-    end)
-  end
-end
-
-function onReceive(context, intent)
-  pcall(function()
-    local action = intent.getAction()
-    local azanPrayer=action and action:match("^quran_majeed_city_azan_(%a+)$")
-    if azanPrayer then
-      local trackIndex=prefs.getInt("cityAzanTrack_"..azanPrayer,prefs.getInt("azanDefaultTrack",1))
-      local track=AZAN_TRACKS[trackIndex]
-      if track then
-        local path=getAzanLocalPath(trackIndex)
-        playReliable(track.url,path,"Azan "..azanPrayer,function()
-          showPlaybackNotification("Azan - "..azanPrayer,savedCity..", "..savedCountry.." | "..track.name)
-        end,function() cancelNotification() end)
-      end
-      pcall(function() scheduleCityAzans() end)
-    elseif action == "quran_majeed_playpause" then
-      if mp then
-        if mp.isPlaying() then
-          mp.pause()
-          pcall(function() if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end end)
-        else
-          mp.start()
-          pcall(function() if btnPlayPause then btnPlayPause.setText("⏸ " .. tr("Pause")) end end)
-        end
-        pcall(function() showPlaybackNotification(surahNames[currentIndex] or "Quran Majeed", "Reciter: " .. (reciters[currentReciter] and reciters[currentReciter].name or "")) end)
-      elseif duaMp then
-        if duaMp.isPlaying() then duaMp.pause() else duaMp.start() end
-      end
-    end
-  end)
-end
-
---------------------------------------------------
--- APP START
---------------------------------------------------
--- FIX (v2.1, retry with safety): Storage permission (Android 6+) kabhi
--- nahi maangi gayi thi - is wajah se listFiles() (Storage Manager) hamesha
--- khaali/0 wapis deta tha. Pehli koshish mein onRequestPermissionsResult
--- handler define nahi kiya gaya tha - jab Android permission dialog band
--- karke wapis app ko batata hai, agar yeh function maujood na ho to yeh
--- poori app crash kar sakta hai. Ab dono cheezein sath hain: request bhi,
--- aur is ka result handler bhi (khali/no-op hi sahi, lekin maujood zaroor).
-function onRequestPermissionsResult(requestCode, permissions, grantResults)
-  -- Kuch khaas karne ki zaroorat nahi - agar permission mil gayi, agli
-  -- baar jab Storage Manager khulega ya download hoga, khud kaam kar
-  -- jayega. Sirf is function ka maujood hona hi zaroori hai.
-end
-
+if requestCode==2606 and resultCode==Activity.RESULT_OK and data then
 pcall(function()
-  if Build.VERSION.SDK_INT >= 23 then
-    local writePerm = "android.permission.WRITE_EXTERNAL_STORAGE"
-    local readPerm  = "android.permission.READ_EXTERNAL_STORAGE"
-    if activity.checkSelfPermission(writePerm) ~= 0 or activity.checkSelfPermission(readPerm) ~= 0 then
-      local perms = luajava.newArray("java.lang.String", 2)
-      perms[0] = writePerm
-      perms[1] = readPerm
-      activity.requestPermissions(perms, 1001)
-    end
-  end
+local spoken=data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+if spoken and spoken.size()>0 and etHomeSearch then
+etHomeSearch.setText(tostring(spoken.get(0)))
+etHomeSearch.setSelection(etHomeSearch.length())
+end
 end)
-
--- v2.7-fix: app ka start bhi safe hai - agar Home bante waqt koi error ho to
--- app band nahi hogi, Copy/Share/Cancel wala dialog khulega.
+end
+end
+function onReceive(context, intent)
+pcall(function()
+local action = intent.getAction()
+local azanPrayer=action and action:match("^quran_majeed_city_azan_(%a+)$")
+if azanPrayer then
+local trackIndex=prefs.getInt("cityAzanTrack_"..azanPrayer,prefs.getInt("azanDefaultTrack",1))
+local track=AZAN_TRACKS[trackIndex]
+if track then
+local path=M.getAzanLocalPath(trackIndex)
+M.playReliable(track.url,path,"Azan "..azanPrayer,function()
+M.showPlaybackNotification("Azan - "..azanPrayer,savedCity..", "..savedCountry.." | "..track.name)
+end,function() M.cancelNotification() end)
+end
+pcall(function() scheduleCityAzans() end)
+elseif action == "quran_majeed_playpause" then
+if mp then
+if mp.isPlaying() then
+mp.pause()
+pcall(function() if btnPlayPause then btnPlayPause.setText("▶ " .. tr("Play")) end end)
+else
+mp.start()
+pcall(function() if btnPlayPause then btnPlayPause.setText("⏸ " .. tr("Pause")) end end)
+end
+pcall(function() M.showPlaybackNotification(surahNames[currentIndex] or "Quran Majeed", "Reciter: " .. (reciters[currentReciter] and reciters[currentReciter].name or "")) end)
+elseif duaMp then
+if duaMp.isPlaying() then duaMp.pause() else duaMp.start() end
+end
+end
+end)
+end
+function onRequestPermissionsResult(requestCode, permissions, grantResults)
+end
+pcall(function()
+if Build.VERSION.SDK_INT >= 23 then
+local writePerm = "android.permission.WRITE_EXTERNAL_STORAGE"
+local readPerm  = "android.permission.READ_EXTERNAL_STORAGE"
+if activity.checkSelfPermission(writePerm) ~= 0 or activity.checkSelfPermission(readPerm) ~= 0 then
+local perms = luajava.newArray("java.lang.String", 2)
+perms[0] = writePerm
+perms[1] = readPerm
+activity.requestPermissions(perms, 1001)
+end
+end
+end)
 V25.startDateTick()
+V25.urduBookTracks = {}
+(function()
+local t, base = {}, "https://archive.org/download/"
+local function pnames(pat, nf)
+local o = {}
+for k = 1, nf do o[#o + 1] = string.format(pat, k) end
+return o
+end
+local function ssplit(str)
+local o = {}
+local pos = 1
+while true do
+local n = str:find("|", pos, true)
+if not n then o[#o + 1] = str:sub(pos) break end
+o[#o + 1] = str:sub(pos, n - 1)
+pos = n + 1
+end
+return o
+end
+local SRCS = {hindi = M.hindiTranslationFiles, urdu = M.urduTranslationFiles}
+for _, b in ipairs(V25.BOOKS) do
+local rest = {}
+if b.d then
+rest = ssplit(b.d)
+if b.pp or b.ss then for i, xn in ipairs(rest) do rest[i] = (b.pp or "") .. xn .. (b.ss or "") end end
+elseif b.f then rest = b.f
+elseif b.r then rest = SRCS[b.r]()
+elseif b.p then rest = pnames(b.p, b.nf)
+elseif b.q then
+local qs = ssplit(b.q)
+for k = 1, b.nf do if qs[k] ~= "" then rest[k] = string.format(b.qp, k) .. qs[k] .. ".mp3" end end
+elseif b.u then
+local us = ssplit(b.u)
+for k = 1, b.nf do rest[k] = string.format("%03d", k) .. us[k] .. ".mp3" end
+elseif b.nf then rest = pnames("%03d.mp3", b.nf) end
+if b.o then for _, pair in ipairs(ssplit(b.o)) do local oi, on = pair:match("^(%d+)=(.+)$") rest[tonumber(oi)] = on end end
+if b.cp and b.oc then for nn in b.oc:gmatch("%d+") do local oi = tonumber(nn) rest[oi] = string.format(b.cp, oi) end end
+local names = {}
+if b.x then for _, xn in ipairs(b.x) do names[#names + 1] = xn end end
+for _, xn in ipairs(rest) do if xn ~= "" then names[#names + 1] = xn end end
+if b.x2 then for _, xn in ipairs(b.x2) do names[#names + 1] = xn end end
+local n = #names
+for k = 1, n do
+local f = names[k]
+t[#t + 1] = {book = b.n, lang = b.l, title = (b.t and ("Surah " .. k .. " of " .. n)) or (k .. ". " .. V25.cleanName(f)),
+en = b.l .. " - Part " .. k .. "/" .. n,
+audio = base .. b.i .. "/" .. urlEncodeBytes((b.ow and (f:sub(-4) == ".mp3" and f or (f .. ((b.ow2 and b.ow2:find("," .. k .. ",", 1, true)) and "-owaisQadri-owaisQadri.mp3" or "-owaisQadri.mp3")))) or f), src = "archive.org (" .. b.i .. ")",
+cacheKey = "bk_" .. b.s .. "_" .. string.format("%03d", k)}
+end
+end
+V25.urduBookTracks = t
+end)()
+function V25.bookLangRank(lg)
+local r = {Urdu=1, Hindi=2, English=3, Arabic=4, Punjabi=5, Chinese=6}
+return r[lg] or 9
+end
+function V25.bookLangList()
+local order, seen, out = {}, {}, {}
+for _, t in ipairs(V25.urduBookTracks or {}) do
+local lg = t.lang or "Urdu"
+if not seen[lg] then seen[lg] = true table.insert(order, lg) end
+end
+table.sort(order, function(a, b)
+local ra, rb = V25.bookLangRank(a), V25.bookLangRank(b)
+if ra ~= rb then return ra < rb end
+return tostring(a) < tostring(b)
+end)
+for _, lg in ipairs(order) do
+local books, bseen, parts = {}, {}, 0
+for _, t in ipairs(V25.urduBookTracks or {}) do
+if (t.lang or "Urdu") == lg then
+parts = parts + 1
+if not bseen[t.book] then bseen[t.book] = true table.insert(books, t.book) end
+end
+end
+table.insert(out, {lang = lg, books = books, nbooks = #books, parts = parts})
+end
+return out
+end
+function V25.booksOfLang(lg)
+local books, seen = {}, {}
+for _, t in ipairs(V25.urduBookTracks or {}) do
+if (t.lang or "Urdu") == lg and not seen[t.book] then
+seen[t.book] = true table.insert(books, t.book)
+end
+end
+return books
+end
+function V25.bookPartsCount(b)
+local n = 0
+for _, t in ipairs(V25.urduBookTracks or {}) do if t.book == b then n = n + 1 end end
+return n
+end
+function V25.bookLangOf(b)
+for _, t in ipairs(V25.urduBookTracks or {}) do if t.book == b then return (t.lang or "Urdu") end end
+return "Urdu"
+end
+function showBookLangScreen(lg)
+screen = "booklang"
+M.stopPlayer()
+duaListOverride = nil
+V25.duaBackFn = nil
+local ok, err = pcall(function()
+local bgColor, textColor = M.getThemeColors()
+V25.uiTextColor = textColor
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00897B", layout_width=-1, gravity="center_vertical",
+{Button, text="< Languages", onClick=function() safeRun("backToLangs", showUrduBooks) end},
+{TextView, text="📚 " .. tostring(lg) .. " Books", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="Kisi bhi kitaab par tap karein - uske saare parts khul jayenge. Player Poora Quran jaisa hai: play/pause, seek, speed, download aur offline (.mp3).", textSize="12sp", textColor=textColor, padding="10dp"},
+{ScrollView, layout_width=-1, layout_height=0, layout_weight=1,
+{LinearLayout, id="booksBox", orientation=1, layout_width=-1, layout_height=-2}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+local books = V25.booksOfLang(lg)
+if #books == 0 then V25.uiRow(booksBox, "Koi kitaab available nahi", "", function() end) return end
+for _, bk in ipairs(books) do
+local n = V25.bookPartsCount(bk)
+V25.uiRow(booksBox, "📖 " .. tostring(bk), tostring(n) .. " parts - tap karein", function() showUrduBookEpisodes(bk) end)
+end
+end)
+if not ok then showErrorDialog("Books screen error", err) end
+end
+function V25.urduBookNames()
+local names, seen = {}, {}
+for _, t in ipairs(V25.urduBookTracks or {}) do
+if t.book and not seen[t.book] then seen[t.book] = true table.insert(names, t.book) end
+end
+return names
+end
+function V25.urduBookEps(b)
+local e = {}
+for _, t in ipairs(V25.urduBookTracks or {}) do if t.book == b then table.insert(e, t) end end
+return e
+end
+function V25.uiRow(box, title, sub, fn)
+local tv = TextView(activity)
+tv.setText(tostring(title or "") .. ((sub and sub ~= "") and ("\n" .. tostring(sub)) or ""))
+tv.setTextSize(15)
+pcall(function() tv.setPadding(24, 26, 24, 26) end)
+pcall(function() tv.setBackgroundColor(570425344) end)
+pcall(function() local lp = LinearLayout.LayoutParams(-1, -2) lp.setMargins(12, 7, 12, 7) tv.setLayoutParams(lp) end)
+pcall(function() local tc = V25.safeTextColor(V25.uiTextColor) if tc then tv.setTextColor(tc) end end)
+tv.setOnClickListener(function() safeRun(tostring(title or "row"), fn) end)
+box.addView(tv)
+return tv
+end
+function showUrduBooks()
+screen = "urdubooks"
+M.stopPlayer()
+duaListOverride = nil
+V25.duaBackFn = nil
+local ok, err = pcall(function()
+local bgColor, textColor = M.getThemeColors()
+V25.uiTextColor = textColor
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00897B", layout_width=-1, gravity="center_vertical",
+{Button, text="< Back", onClick=function() safeRun("backToHome", showHome) end},
+{TextView, text="📚 اسلامک بکس - Islam Books", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text="Zaban chunein - Urdu / Hindi / English / Arabic / Punjabi / Chinese. Har kitaab mukammal hai aur har part Poora Quran jaisa player (play / download / offline) chalta hai.", textSize="12sp", textColor=textColor, padding="10dp"},
+{ScrollView, layout_width=-1, layout_height=0, layout_weight=1,
+{LinearLayout, id="langBox", orientation=1, layout_width=-1, layout_height=-2}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+local langs = V25.bookLangList()
+if #langs == 0 then V25.uiRow(langBox, "Koi kitaab available nahi", "", function() end) return end
+for _, it in ipairs(langs) do
+V25.uiRow(langBox, "🌍 " .. tostring(it.lang) .. " (" .. tostring(it.nbooks) .. " kitaabein)",
+tostring(it.parts) .. " parts - tap karein", function() showBookLangScreen(it.lang) end)
+end
+end)
+if not ok then showErrorDialog("Islam Books screen error", err) end
+end
+function showUrduBookEpisodes(b)
+screen = "urdubookeps"
+M.stopPlayer()
+V25.currentBook = b
+local eps = V25.urduBookEps(b)
+duaListOverride = eps
+V25.duaBackFn = function() duaListOverride = nil showUrduBookEpisodes(V25.currentBook) end
+local ok, err = pcall(function()
+local bgColor, textColor = M.getThemeColors()
+V25.uiTextColor = textColor
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00897B", layout_width=-1, gravity="center_vertical",
+{Button, text="< Books", onClick=function() safeRun("backToBooks", showUrduBooks) end},
+{TextView, text="📖 " .. tostring(b), textSize="15sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{TextView, text=tostring(#eps) .. " episodes - kisi bhi episode par tap karein.", textSize="12sp", textColor=textColor, padding="10dp"},
+{ScrollView, layout_width=-1, layout_height=0, layout_weight=1,
+{LinearLayout, id="epsBox", orientation=1, layout_width=-1, layout_height=-2}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+for i, t in ipairs(eps) do
+V25.uiRow(epsBox, tostring(i) .. ". " .. tostring(t.title), "Tap karein - play / download / offline",
+(function(ix) return function() safeRun("playBookEp", function() showDuaPlayer(ix) end) end end)(i))
+end
+end)
+if not ok then showErrorDialog("Episodes screen error", err) end
+end
+function showAdvancedSearch()
+screen = "advsearch"
+M.stopPlayer()
+duaListOverride = nil
+local ok, err = pcall(function()
+local bgColor, textColor = M.getThemeColors()
+V25.uiTextColor = textColor
+activity.setContentView(loadlayout{
+LinearLayout, id="mainLayout", orientation=1, layout_width=-1, layout_height=-1, backgroundColor=bgColor,
+{LinearLayout, orientation=0, padding="10dp", backgroundColor="#00695C", layout_width=-1, gravity="center_vertical",
+{Button, text="< Back", onClick=function() safeRun("backHome2", showHome) end},
+{TextView, text="🔎 Advanced Search", textSize="16sp", typeface=Typeface.DEFAULT_BOLD, layout_marginLeft="10dp", textColor=-1}
+},
+{LinearLayout, orientation=0, padding="8dp", layout_width=-1, gravity="center_vertical",
+{EditText, id="advQuery", hint="Surah, Dua, Kalma, Kitaab, Episode...", layout_weight=1, singleLine=true, textColor=textColor, hintTextColor="#888888"},
+{Button, id="advGo", text="Search", layout_marginLeft="6dp"}
+},
+{TextView, id="advCount", text="Likhein aur Search dabayein", textSize="12sp", textColor=textColor, padding="10dp"},
+{ScrollView, layout_width=-1, layout_height=0, layout_weight=1,
+{LinearLayout, id="advBox", orientation=1, layout_width=-1, layout_height=-2}
+}
+})
+M.applyWallpaper(mainLayout, bgColor)
+advGo.onClick = function() safeRun("advRun", function() V25.advSearchRun(advQuery.getText().toString()) end) end
+pcall(function() advQuery.setOnEditorActionListener(function(v, a, e) safeRun("advRun2", function() V25.advSearchRun(advQuery.getText().toString()) end) return true end) end)
+end)
+if not ok then showErrorDialog("Advanced Search screen error", err) end
+end
+function V25.advSearchRun(q)
+local box = advBox
+if not box then return end
+pcall(function() box.removeAllViews() end)
+local qn = V25.norm(q)
+if qn == "" then if advCount then advCount.setText("Kuch likhein (Surah, Dua, Kalma, Kitaab)...") end return end
+local n = 0
+local function add(tt, sb, fn) n = n + 1 V25.uiRow(box, tt, sb, fn) end
+pcall(function()
+for i = 1, #surahNames do
+if V25.norm(surahNames[i]):find(qn, 1, true) then
+add("📗 Surah " .. i .. ": " .. tostring(surahNames[i]), "Poora Quran player kholain", (function(ix) return function() showPlayer(ix) end end)(i))
+end
+end
+end)
+pcall(function() if not audioDuasCache and M.buildAudioDuasList then audioDuasCache = M.buildAudioDuasList() end end)
+pcall(function()
+if audioDuasCache then
+for i, d in ipairs(audioDuasCache) do
+local hay = tostring(d.title or "") .. " " .. tostring(d.cat or "") .. " " .. tostring(d.en or "") .. " " .. tostring(d.ur or "")
+if V25.norm(hay):find(qn, 1, true) then
+add("🔊 " .. tostring(d.title), tostring(d.cat or ""), (function(ix) return function() duaListOverride = nil showDuaPlayer(ix) end end)(i))
+end
+end
+end
+end)
+pcall(function()
+for _, t in ipairs(V25.urduBookTracks or {}) do
+local hay = tostring(t.book or "") .. " " .. tostring(t.title or "")
+if V25.norm(hay):find(qn, 1, true) then
+add("📖 " .. tostring(t.title), "Kitaab: " .. tostring(t.book), (function(bk) return function() showUrduBookEpisodes(bk) end end)(t.book))
+end
+end
+end)
+pcall(function()
+if reciters then
+for _, r in ipairs(reciters) do
+local nm = tostring(type(r) == "table" and (r.name or r[1] or "") or r)
+if nm ~= "" and V25.norm(nm):find(qn, 1, true) then
+add("🎙️ " .. nm, "Qari - Poora Quran screen kholein", function() safeRun("openFQ", showFullQuranScreen) end)
+end
+end
+end
+end)
+if advCount then
+if n == 0 then advCount.setText("Kuch nahi mila: " .. tostring(q)) else advCount.setText(tostring(n) .. " nataij mil gaye (tap karein)") end
+end
+end
 safeRun("App start - Home screen", showHome)
