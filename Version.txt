@@ -1,43 +1,19 @@
-2.7
-
-Assalam-o-Alaikum!
-Version: 2.7
-
---- WHAT'S NEW IN V2.7 ---
-
-1) Islamic (Hijri) date - ab 100% OFFLINE (API hata di gayi):
-- Purani Islamic date Aladhan API ke response se aati thi; network/API masle par woh Home screen par load hi nahi hoti thi aur screen par kuch theek se nazar nahi aata tha. Wo API tareeqa poori tarah hata diya gaya hai.
-- Ab bilkul Punjabi date ki tarah Islamic date device par hi local tabular (Kuwaiti) algorithm se compute hoti hai - koi internet, koi API, koi download nahi.
-- Display: din, Urdu mahina, saal ھ - sath Roman mahina + AH (TalkBack ke liye). Default correction 0 din (tabular result South Asian calendars se match karta hai, e.g. 25 September 2026 = 12 Rabi-ul-Thani 1448). Home par tap kar ke ±2 din manual correction laga sakte hain.
-
-2) NAYA audio section - 6 Kalme / Iman / Namaz:
-- Chhe Kalme, Iman-e-Mufassal, Iman-e-Mujmal, Namaz ka Sabaq aur Namaz-e-Janaza ka Tareeqa add kiye gaye hain.
-- Audio wale items (Chhe Kalme, Namaz ka Sabaq, Namaz-e-Janaza) online stream hote hain aur Quran ki tarah download + offline replay support karte hain; player bilkul Quran wala hi (online/offline, seek, speed, prev/next) hai.
-- Iman-e-Mufassal aur Iman-e-Mujmal ka koi verified direct MP3 nahi mila, is liye unhein mukammal Arabic/Urdu/English text ke sath rakha gaya hai aur online sunne ke liye source page ka button diya gaya hai.
-- Ye sab Duas tab, universal search, aur naye "6 Kalme" menu button/tab se khulte hain.
-
-3) Version 2.7:
-- Poori app ka version ab 2.7 hai (title, About aur internal notes sab jagah).
-
-5) v2.7-fix2 - HANG FIX + alag alag audio tracks + live Islamic date:
-- HANG/ISN'T RESPONDING ka asli sabab hata diya: pehle stream fail hone par player CHUPKE se poore file ka DownloadManager download shuru karta tha aur 60 second tak Thread.sleep poll loop chalata rehta tha. Ab AUTO-DOWNLOAD POORI TARAH BAND hai - fail hone par sirf Retry online / Download / Cancel dialog aata hai, aur download sirf aap ke button se hota hai.
-- Wahi background-download fallback Word-by-Word mode se bhi hata diya.
-- Ab audio ALAG ALAG tracks mein hai: 6 Kalme (chhe alag entries), Namaz ka Sabaq (8 alag verified step files), Namaz-e-Janaza (poora audio + takbeer-wise 4 step), Iman-e-Mufassal aur Iman-e-Mujmal (mukammal text + online link).
-- Clip support (startAt/endAt) add hua, is liye ek hi recording ka ek hissa apne track ki tarah lagta hai; clip entries ek hi offline copy share karte hain (26 MB sirf ek dafa).
-- اسلامی تاریخ ab bilkul LIVE hai, Punjabi date ki tarah screen par seedha nazar aati hai; manual "tap to adjust" hata diya aur aadhi raat par khud update hoti hai.
-
-4) v2.7-fix - 6 Kalme screen ka click/error masla + universal error dialog:
-- 6 Kalme / Iman / Namaz screen ab ListView + onItemClick par hai (wahi pattern jo Poora Quran / Para list aur Search mein pehle se theek chalta hai). Purani alag "6 Kalme" bottom tab hata di gayi (wo screen ki width se bahar nikal jati thi, is liye click nahi hota tha) - entry ab More menu ke bare button, Duas tab aur Search se hai.
-- Ab har error par ek dialog khulta hai jisme 3 buttons hain: Copy, Share aur Cancel - sath mein poora report (app version, screen, Android version, device, city, tareekh, error + traceback) jo copy ya WhatsApp/Email par share ho sakta hai.
-- Ye error dialog ab in sab par laga hai: 6 Kalme ke har item ka click, app start/Home, bottom tabs aur More menu ke saare buttons, audio/stream errors, aur Duas/Search ke text-item dialogs (wo Copy+Cancel wale hain). Kisi bhi screen par error aaye to app band nahi hogi, dialog khulega.
-
---- FEATURES CARRIED FORWARD ---
-- v2.5: eight whole-surah language collections (English Ibrahim Walk, English Mishary, Hindi, Bengali, French, Sindhi, Pashto, Farsi), each mapped for 114 surahs; Waheed Zafar and Shakir Urdu Qari maps; two Farsi ayah voices; preserved player, speed/repeat, offline, Tafseer, Hadith, duas, Tasbeeh and Quran features.
-- v2.6: Quran-style Adhan player, 15 verified recordings, per-prayer city schedule, 130 categorized duas (119 audio, 11 text-only), English meanings/descriptions, 40 Rabbana references, filtered/fuzzy search, voice-search launch, and Hijri adjustment control.
-- v2.7 keeps the v2.6 feature set and corrects Waheed audio playback/cache handling and Hijri cache refresh/local offset defaults.
-
-Android exact-alarm caveat: the host app must declare SCHEDULE_EXACT_ALARM and RECEIVE_BOOT_COMPLETED and supply a manifest boot receiver for guaranteed alarms after process death/reboot. Runtime dynamic receivers alone cannot promise that lifecycle guarantee.
-
---- CREDITS ---
-Lead Developer: Numan Khan.
-May Allah accept our continuous efforts!
+3.0
+🚀 What's New in Version 3.0 (Mega Update)
+​✨ New Features & Additions
+​Massive Library Expansion: Added 32 new Islamic books to the collection.
+​Multi-Language Support: Books are now available in multiple languages, including Urdu, Hindi, English, Punjabi, and Chinese.
+​Naats Collection: Introduced a brand-new section dedicated to Naats.
+​🛠️ Bug Fixes & Improvements
+​Fixed a playback issue in the Kalma & Namaz section to ensure uninterrupted listening.
+​Resolved a bug in the Islami Tareekh (Islamic History) section.
+​Overall performance enhancements for a smoother user experience.
+​🚀 What's New in Version 3.0 (Mega Update) - Roman Urdu
+​✨ Naye Features
+​Badi Library Update: App mein 32 nayi Islamic books add ki gayi hain.
+​Multi-Language Books: Ab books Urdu, Hindi, English, Punjabi, aur Chinese samet mukhtalif zabanon mein dastiyab hain.
+​Naat Section: App mein ek naya aur khoobsurat Naaton ka section shamil kiya gaya hai.
+​🛠️ Bug Fixes Aur Improvements
+​Kalma aur Namaz ke section mein aane wale playback bug ko mukammal taur par fix kar diya gaya hai.
+​Islami Tareekh ke section mein aane wale masail (bugs) ko hal kar diya gaya hai.
+​App ki overall performance ko mazeed behtar aur fast banaya gaya hai.
